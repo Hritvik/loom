@@ -48,7 +48,7 @@ identical on all three surfaces.
 | `answer` | Answer a question addressed to you, once |
 | `events` | Read or verify the hash-chained audit log |
 | `edge` | Inspect or edit cross-task dependency edges |
-| `board` | List, sync or import packet boards |
+| `board` | List, add, remove, sync or import boards |
 | `reconcile` | Compare or adopt board statuses for imported tasks |
 | `genesis` | Write the single bootstrap event |
 

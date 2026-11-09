@@ -200,11 +200,22 @@ def active_claim(task: dict, now: dt.datetime) -> bool:
     return bool(expiry and expiry > now)
 
 
+PATH_LOCK_STATUSES = {"claimed", "red"}
+
+
+def holds_path_lock(task: dict, now: dt.datetime) -> bool:
+    """Green is finished work: it keeps its lease so findings can be fixed, but not the directory."""
+    if task.get("status") not in PATH_LOCK_STATUSES or not task.get("claim"):
+        return False
+    expiry = lease_expiry(task)
+    return bool(expiry and expiry > now)
+
+
 def write_path_conflicts(registry: dict, task: dict, now: dt.datetime) -> list[str]:
     conflicts = []
     mine = task.get("write_paths", []) or []
     for other in registry["tasks"]:
-        if other["id"] == task["id"] or not active_claim(other, now):
+        if other["id"] == task["id"] or not holds_path_lock(other, now):
             continue
         for left in mine:
             for right in other.get("write_paths", []) or []:
@@ -1476,6 +1487,10 @@ def cmd_board(args, store: Store) -> int:
             count = sum(1 for task in registry["tasks"] if task["board"] == board["id"])
             print(f"{board['id']:<16} {board['kind']:<8} {count:>2} tasks  {board['repo']}/{board['path']}")
         return 0
+    if args.action == "add":
+        return add_board(args, store, registry)
+    if args.action == "remove":
+        return remove_board(args, store, registry)
     board = find_board(registry, args.board)
     if args.action == "import":
         return import_board(args, store, board, registry)
@@ -1554,6 +1569,51 @@ def program_headings(path: Path) -> dict[str, str]:
             suffix, title = line[3:].split(" — ", 1)
             titles[suffix.strip()] = title.strip()
     return titles
+
+
+def add_board(args, store: Store, registry: dict) -> int:
+    """Register a board. Configuration, but recorded as an event like every other mutation."""
+    agent = require_agent(args)
+    if not args.board:
+        raise WorkError("board add requires --board")
+    if not BOARD_PATTERN.match(args.board):
+        raise WorkError(f"invalid board id {args.board!r}")
+    if any(entry["id"] == args.board for entry in registry["boards"]):
+        raise WorkError(f"board {args.board} already exists")
+    repo = Path(args.repo or ".").expanduser()
+    entry = {
+        "id": args.board,
+        "kind": args.kind,
+        "role": args.role,
+        "repo": str(repo),
+        "path": args.path or "",
+    }
+    if args.path and not (repo / args.path).is_file():
+        raise WorkError(f"board file missing: {repo / args.path}")
+    if args.integration_ref:
+        entry["integration_ref"] = args.integration_ref
+    registry["boards"].append(entry)
+    store.save()
+    store.append_event(event="board", agent=agent, action="add", board=args.board,
+                       kind=args.kind, path=entry["path"], now=args.now)
+    print(f"added board {args.board} ({args.kind}) at {entry['repo']}/{entry['path']}")
+    return 0
+
+
+def remove_board(args, store: Store, registry: dict) -> int:
+    agent = require_agent(args)
+    if not args.board:
+        raise WorkError("board remove requires --board")
+    entry = next((item for item in registry["boards"] if item["id"] == args.board), None)
+    if entry is None:
+        raise WorkError(f"unknown board {args.board}")
+    if any(task.get("board") == args.board for task in registry["tasks"]):
+        raise WorkError(f"board {args.board} still has tasks; move or delete them first")
+    registry["boards"].remove(entry)
+    store.save()
+    store.append_event(event="board", agent=agent, action="remove", board=args.board, now=args.now)
+    print(f"removed board {args.board}")
+    return 0
 
 
 def backfill_titles(args, store: Store, board: dict, registry: dict) -> int:
@@ -1938,7 +1998,12 @@ def build_parser() -> argparse.ArgumentParser:
     edge.set_defaults(func=cmd_edge)
 
     board = sub.add_parser("board", help="list boards or materialise a packet board", parents=[common])
-    board.add_argument("action", choices=["list", "sync", "import", "titles"])
+    board.add_argument("action", choices=["list", "add", "remove", "sync", "import", "titles"])
+    board.add_argument("--repo", help="repository root for `board add`")
+    board.add_argument("--path", help="board file inside that repository")
+    board.add_argument("--kind", choices=["program", "board"], default="program")
+    board.add_argument("--role", default="provider")
+    board.add_argument("--integration-ref", help="ref a reviewed commit must be an ancestor of")
     board.add_argument("--board")
     board.add_argument("--program", help="namespace for `board import` (e.g. iam)")
     board.add_argument("--check", action="store_true")

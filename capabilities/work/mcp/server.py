@@ -44,6 +44,7 @@ FALLBACK_VERSION = "2025-06-18"
 
 DONE_STATUSES = {"accepted", "integrated", "done"}
 ACTIVE_STATUSES = {"claimed", "red", "green"}
+PATH_LOCK_STATUSES = {"claimed", "red"}  # green is finished work and holds no directory
 STATUSES = [
     "draft", "planned", "ready", "claimed", "red", "green", "blocked", "reviewed",
     "integrated", "accepted", "rejected", "released", "in-progress", "done",
@@ -142,7 +143,7 @@ def claimability(registry: Registry, task: dict, tasks: list[dict]) -> tuple[boo
              if by_id.get(dep, {}).get("status") not in DONE_STATUSES]
     conflicts = []
     for other in tasks:
-        if other["id"] == task["id"] or other.get("status") not in ACTIVE_STATUSES:
+        if other["id"] == task["id"] or other.get("status") not in PATH_LOCK_STATUSES:
             continue
         for mine in task.get("write_paths", []) or []:
             for theirs in other.get("write_paths", []) or []:

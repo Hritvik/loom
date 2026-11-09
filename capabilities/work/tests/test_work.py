@@ -1012,6 +1012,42 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("demo/W-1", later)
         self.assertIn("agent-a", later)
 
+    def test_green_does_not_hold_a_write_path(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",
+                    "--agent", "agent-a", "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "green",
+                    "--agent", "agent-a", "--now", T0)
+
+        self.invoke("create", "--agent", "agent-a", "--now", T0,
+                    "--id", "demo/W-6", "--board", "demo.board", "--title", "Overlapping path",
+                    "--status", "ready", "--write-path", "src/one")
+        claimed = self.invoke("claim", "demo/W-6", "--revision", "0", "--ttl", "45m",
+                              "--agent", "agent-b", "--now", T0)
+        self.assertIn("claimed demo/W-6", claimed.stdout)
+
+    def test_board_add_and_remove(self):
+        (self.ws.repo / "docs" / "program.md").write_text(
+            "## W-1 — Thing\n\n**Status.** ready\n", encoding="utf-8")
+        added = self.invoke("board", "add", "--board", "demo.program", "--repo", str(self.ws.repo),
+                            "--path", "docs/program.md", "--agent", "agent-a", "--now", T0)
+        self.assertIn("added board demo.program", added.stdout)
+        self.assertIn("demo.program", self.invoke("board", "list").stdout)
+
+        duplicate = self.invoke("board", "add", "--board", "demo.program", "--repo",
+                                str(self.ws.repo), "--path", "docs/program.md",
+                                "--agent", "agent-a", expect=2)
+        self.assertIn("already exists", duplicate.stderr)
+
+        missing = self.invoke("board", "add", "--board", "demo.other", "--repo", str(self.ws.repo),
+                              "--path", "docs/nope.md", "--agent", "agent-a", expect=2)
+        self.assertIn("board file missing", missing.stderr)
+
+        removed = self.invoke("board", "remove", "--board", "demo.program", "--agent", "agent-a",
+                              "--now", T0)
+        self.assertIn("removed board demo.program", removed.stdout)
+        self.assertNotIn("demo.program", self.invoke("board", "list").stdout)
+
     def test_board_import_registers_unlisted_packets(self):
         board = self.ws.board_data()
         board["packets"].append(packet("W-5", "ready", ["src/five"]))
