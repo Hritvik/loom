@@ -62,7 +62,7 @@ class ToolError(Exception):
 class Registry:
     def __init__(self, root: Path, backend: str = "sqlite", db: str | None = None):
         self.root = Path(root).expanduser()
-        self.store = make_store(self.root, backend, db)
+        self.store = make_store(self.root, backend, db or os.environ.get("WORK_DB"))
 
     def has_registry(self) -> bool:
         return self.store.has_registry()

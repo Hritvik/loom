@@ -24,6 +24,7 @@ from pathlib import Path
 
 import yaml
 
+DEFAULT_DB = Path.home() / ".local/state/loom/work.db"
 ZERO_HASH = "0" * 64
 REGISTRY_KIND = "work-coordination-registry"
 REGISTRY_HEADER = (
@@ -241,7 +242,7 @@ class SqliteStore(Store):
 
     def __init__(self, root: Path, db_path: Path | None = None):
         self.root = Path(root)
-        self.db_path = Path(db_path) if db_path else self.root / "work.db"
+        self.db_path = Path(db_path).expanduser() if db_path else DEFAULT_DB
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
