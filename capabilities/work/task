@@ -752,10 +752,23 @@ def cmd_graph(args, store: Store) -> int:
 def cmd_show(args, store: Store) -> int:
     registry = store.load()
     task = find_task(registry, args.task)
+    receipt = integration_receipt(task_history(store, task))
     if args.json:
-        print(json.dumps(task, indent=2, default=str))
+        payload = dict(task)
+        if receipt:
+            payload["integration"] = {
+                "source": receipt.get("integrated_source"),
+                "tip": receipt.get("integration_tip"),
+                "event": receipt.get("seq"),
+            }
+        print(json.dumps(payload, indent=2, default=str))
     else:
         print(summarize(task, registry))
+        if receipt:
+            print(f"  integrated: {receipt.get('integrated_source')[:12]}"
+                  f" (event {receipt.get('seq')})")
+        elif task.get("status") in {"integrated", "accepted"}:
+            print("  integrated: NO RECEIPT — run `./task annotate` with a provable commit")
     return 0
 
 
@@ -969,12 +982,8 @@ def verified_review(args, store: Store, task: dict) -> dict:
     }
 
 
-def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
-    review = task.get("review") or {}
-    if not review.get("source") or not review.get("answer"):
-        raise WorkError("missing verified review receipt; reopen the task and submit it for review")
-    if source != review["source"]:
-        raise WorkError("--integrated-source must be the exact approved commit")
+def require_source_on_ref(task: dict, source: str, ref: str) -> str:
+    """Require a real commit that is in the history of the integration branch."""
     require_source_commit(task, source)
     if not ref.startswith("refs/heads/") or git_review_check(task, "check-ref-format", ref).returncode:
         raise WorkError("integration_ref must name a local branch under refs/heads/")
@@ -983,7 +992,17 @@ def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
         raise WorkError(f"configured integration branch {ref} is missing from the owner repository")
     integration_tip = tip.stdout.strip()
     if git_review_check(task, "merge-base", "--is-ancestor", source, integration_tip).returncode:
-        raise WorkError(f"approved commit must be in the history of {ref}")
+        raise WorkError(f"commit must be in the history of {ref}")
+    return integration_tip
+
+
+def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
+    review = task.get("review") or {}
+    if not review.get("source") or not review.get("answer"):
+        raise WorkError("missing verified review receipt; reopen the task and submit it for review")
+    if source != review["source"]:
+        raise WorkError("--integrated-source must be the exact approved commit")
+    integration_tip = require_source_on_ref(task, source, ref)
     base = review.get("base")
     if base:
         changed = git_review_check(task, "diff", "--name-only", "-z", "--no-renames", base, source)
@@ -1079,6 +1098,61 @@ def cmd_transition(args, store: Store) -> int:
                        **({"integrated_source": args.integrated_source, "integration_tip": integration_tip}
                           if integration_tip else {}))
     print(f"{task['id']}: {current} -> {target} at revision {task['revision']}")
+    return 0
+
+
+def integration_receipt(history: list[dict]) -> dict:
+    """The latest integration proof recorded for a task, if any."""
+    for event in reversed(history):
+        if event.get("event") == "annotate" and event.get("integrated_source"):
+            return event
+        if (event.get("event") == "transition" and event.get("status") == "integrated"
+                and event.get("integrated_source")):
+            return event
+    return {}
+
+
+def cmd_annotate(args, store: Store) -> int:
+    """Record an integration receipt for a task that was integrated before receipts existed.
+
+    The proof lives in the event log, exactly like a normal integration. Nothing is
+    inferred: the caller supplies a commit that must exist and be in the history of
+    the board's integration branch.
+    """
+    agent = require_agent(args)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    if task.get("status") != "integrated":
+        raise WorkError(f"only an integrated task can be annotated; {task['id']} is {task['status']!r}")
+    if not args.reason:
+        raise WorkError("annotate requires --reason explaining how the commit was established")
+    history = task_history(store, task)
+    if integration_receipt(history):
+        raise WorkError(f"{task['id']} already records an integration receipt; history is not rewritten")
+    board = find_board(registry, task["board"])
+    ref = board.get("integration_ref", "refs/heads/main")
+    integration_tip = require_source_on_ref(task, args.integrated_source, ref)
+    if args.base:
+        base = review_base(task, args.integrated_source, args.base)
+        changed = git_review_check(
+            task, "diff", "--name-only", "-z", "--no-renames", base, args.integrated_source)
+        if changed.returncode:
+            raise WorkError("could not determine the paths changed since --base")
+        paths = list(dict.fromkeys(changed.stdout.split("\0")[:-1]))
+        if paths and git_review_check(
+            task, "diff", "--quiet", "--no-ext-diff", "--ignore-submodules=none",
+            args.integrated_source, integration_tip, "--", *paths,
+        ).returncode:
+            raise WorkError(f"paths changed since --base differ in {ref}")
+    bump(task, "integrated", parse_now(args.now))
+    store.save()
+    store.append_event(event="annotate", task=task["id"], agent=agent, status="integrated",
+                       revision=task["revision"], integrated_source=args.integrated_source,
+                       integration_tip=integration_tip, base=args.base or None,
+                       path_check="verified" if args.base else "skipped",
+                       reason=args.reason, now=args.now)
+    print(f"{task['id']}: integration receipt {args.integrated_source[:12]} at revision {task['revision']}")
     return 0
 
 
@@ -1979,6 +2053,18 @@ def build_parser() -> argparse.ArgumentParser:
                             help="who can resolve a blocked task (default agent)")
     transition.add_argument("--reason")
     transition.set_defaults(func=cmd_transition)
+
+    annotate = sub.add_parser(
+        "annotate", help="record an integration receipt for a migrated integrated task",
+        parents=[common])
+    annotate.add_argument("task")
+    annotate.add_argument("--revision", type=int, required=True)
+    annotate.add_argument("--integrated-source", required=True,
+                          help="full Git commit that carries the integrated change")
+    annotate.add_argument("--base", help="optional base commit to re-check changed paths")
+    annotate.add_argument("--reason", required=True,
+                          help="how the commit was established (migration, evidence, review)")
+    annotate.set_defaults(func=cmd_annotate)
 
     events = sub.add_parser("events", help="read or verify the audit log", parents=[common])
     events.add_argument("--task")

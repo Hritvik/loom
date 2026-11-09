@@ -130,7 +130,13 @@ is integrated, accepted, or done.
    revision. Confirm the reviewer did not implement the change or hold its claim. Record
    `reviewed` using the approval event ID. The board rejects stale or superseded approvals,
    approvals from a different reviewer, changes to the submitted evidence locator, and ordinary inbox replies. Changes requested leave the item with the implementer for a new review round.
-4. **Product owner integrates.** Record the exact approved commit and evidence. The board
+4. **Product owner integrates.** Record the exact approved commit and evidence. The
+   transition writes `integrated_source` and `integration_tip` into the event log, which
+   is the only proof of integration. Tasks carried over from the pre-SQLite registry have
+   no such event: `task show` prints `integrated: NO RECEIPT` and the validator warns.
+   Repair one with `./task annotate <id> --revision N --integrated-source <full-commit>
+   --reason ... --agent <you>`; it refuses a commit that is not in the integration
+   branch's history, refuses when a receipt already exists, and never invents a hash. The board
    checks that the commit is on the owner repo's integration branch and that the paths changed
    between the submitted base and commit still match the approved commit. Review the new commit after
    squash, cherry-pick or conflicting changes. Production acceptance remains a separate gate.

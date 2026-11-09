@@ -43,6 +43,7 @@ identical on all three surfaces.
 | `release` | Return a claimed task to the ready pool with a reason |
 | `takeover` | Take over an expired lease with a recorded reason |
 | `transition` | Move through the state machine, enforcing evidence and review |
+| `annotate` | Record an integration receipt for a task integrated before receipts existed |
 | `ask` | Ask another agent a question about a task |
 | `inbox` | List unanswered questions addressed to an agent |
 | `answer` | Answer a question addressed to you, once |
@@ -51,6 +52,26 @@ identical on all three surfaces.
 | `board` | List, add, remove, sync or import boards |
 | `reconcile` | Compare or adopt board statuses for imported tasks |
 | `genesis` | Write the single bootstrap event |
+
+## Integration receipts
+
+An integration is only proven by the event that records it: the `transition` to
+`integrated` carries `integrated_source` and `integration_tip`, verified against the
+board's integration branch. Tasks migrated from the pre-SQLite registry have no such
+event, so `validate_work.py` warns and `task show` prints
+`integrated: NO RECEIPT`.
+
+`task annotate` repairs that without rewriting history and without inventing a hash:
+
+```bash
+./task annotate <id> --revision <n> --integrated-source <full-commit> \
+  --base <base-commit> --reason "how the commit was established" --agent <you>
+```
+
+The commit must exist in the owner checkout and be in the history of the board's
+`integration_ref`. `--base` is optional and, when given, re-checks that the paths the
+commit changed are unchanged at the integration tip. Annotating is refused when a
+receipt already exists, and the event is appended to the audit log like any other.
 
 ## Storage
 

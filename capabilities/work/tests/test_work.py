@@ -878,6 +878,94 @@ class WorkCLITest(unittest.TestCase):
                             "--agent", "agent-b", "--now", "2030-01-01T10:05:00Z")
         self.assertIn("claimed demo/W-8", after.stdout)
 
+    def git_repo(self):
+        """Turn the fixture repository into a real checkout with two commits."""
+        import subprocess as sp
+        repo = self.ws.repo
+        sp.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        sp.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.test"], check=True)
+        sp.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+        (repo / "src").mkdir(exist_ok=True)
+        (repo / "src" / "one.txt").write_text("one\n")
+        sp.run(["git", "-C", str(repo), "add", "src/one.txt"], check=True)
+        sp.run(["git", "-C", str(repo), "commit", "-q", "-m", "first"], check=True)
+        first = sp.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                       capture_output=True, text=True, check=True).stdout.strip()
+        (repo / "src" / "two.txt").write_text("two\n")
+        sp.run(["git", "-C", str(repo), "add", "src/two.txt"], check=True)
+        sp.run(["git", "-C", str(repo), "commit", "-q", "-m", "second"], check=True)
+        second = sp.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=True).stdout.strip()
+        return first, second
+
+    def integrated_task(self):
+        """Add a task already integrated by a pre-SQLite registry, packet included."""
+        self.ws.board["packets"].append(packet("W-9", "integrated", ["src/one"]))
+        (self.ws.repo / "docs" / "board.json").write_text(
+            json.dumps(self.ws.board, indent=2) + "\n")
+        self.ws.registry["tasks"].append(
+            self.ws.task("demo/W-9", "integrated", ["src/one"]))
+        self.ws.save()
+
+    def test_annotate_records_a_verifiable_integration_receipt(self):
+        first, second = self.git_repo()
+        self.integrated_task()
+
+        missing = self.invoke("annotate", "demo/W-9", "--revision", "0",
+                              "--integrated-source", second, "--agent", "agent-a",
+                              expect=2)
+        self.assertIn("--reason", missing.stderr)
+
+        result = self.invoke("annotate", "demo/W-9", "--revision", "0",
+                             "--integrated-source", second,
+                             "--base", first,
+                             "--reason", "migrated; commit verified on main",
+                             "--agent", "agent-a")
+        self.assertIn("integration receipt", result.stdout)
+
+        receipt = next(event for event in self.ws.events() if event.get("event") == "annotate")
+        self.assertEqual(receipt["integrated_source"], second)
+        self.assertEqual(receipt["integration_tip"], second)
+        self.assertEqual(receipt["base"], first)
+        self.assertEqual(receipt["reason"], "migrated; commit verified on main")
+        self.assertEqual(self.ws.task_record("demo/W-9")["revision"], 1)
+
+        shown = self.invoke("show", "demo/W-9")
+        self.assertIn(f"integrated: {second[:12]}", shown.stdout)
+
+        again = self.invoke("annotate", "demo/W-9", "--revision", "1",
+                            "--integrated-source", first, "--agent", "agent-a",
+                            "--reason", "second attempt", expect=2)
+        self.assertIn("already records an integration receipt", again.stderr)
+
+    def test_annotate_refuses_an_unprovable_commit(self):
+        first, second = self.git_repo()
+        self.integrated_task()
+
+        missing = self.invoke("annotate", "demo/W-9", "--revision", "0",
+                              "--integrated-source", "0" * 40, "--agent", "agent-a",
+                              "--reason", "invented", expect=2)
+        self.assertIn("missing from the owner repository", missing.stderr)
+
+        wrong_state = self.invoke("annotate", "demo/W-1", "--revision", "0",
+                                  "--integrated-source", second, "--agent", "agent-a",
+                                  "--reason", "not integrated", expect=2)
+        self.assertIn("only an integrated task can be annotated", wrong_state.stderr)
+
+    def test_the_validator_surfaces_a_missing_integration_receipt(self):
+        first, second = self.git_repo()
+        self.integrated_task()
+
+        before = validate(self.ws.root)
+        self.assertIn("integrated/accepted tasks have no integration receipt", before.stdout)
+        self.assertIn("demo/W-9", before.stdout)
+
+        self.invoke("annotate", "demo/W-9", "--revision", "0",
+                    "--integrated-source", second, "--agent", "agent-a",
+                    "--reason", "migrated")
+        after = validate(self.ws.root)
+        self.assertNotIn("demo/W-9", after.stdout)
+
     def test_blocking_a_claim_releases_the_lease(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "1m",
                     "--agent", "agent-a", "--now", T0)

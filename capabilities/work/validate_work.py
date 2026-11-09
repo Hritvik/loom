@@ -658,6 +658,23 @@ def main(argv: list[str] | None = None) -> int:
             if reviewer and reviewer in claimants.get(task_id, set()):
                 warnings.append(
                     f"{task_id}: reviewer {reviewer!r} also claimed the task; review is not independent")
+        receipts: dict[str, bool] = {}
+        for _, record in records:
+            task_id = record.get("task")
+            if not task_id:
+                continue
+            if (record.get("event") == "annotate" and record.get("integrated_source")) or (
+                    record.get("event") == "transition" and record.get("status") == "integrated"
+                    and record.get("integrated_source")):
+                receipts[task_id] = True
+        unproven = sorted(
+            task_id for task_id, task in by_id.items()
+            if task.get("status") in {"integrated", "accepted"} and not receipts.get(task_id))
+        if unproven:
+            preview = ", ".join(unproven[:5]) + (", …" if len(unproven) > 5 else "")
+            warnings.append(
+                f"{len(unproven)} integrated/accepted tasks have no integration receipt"
+                f" ({preview}); record one with `./task annotate`")
     else:
         warnings.append("events.ndjson missing; run `./task genesis --agent <id>`")
 
