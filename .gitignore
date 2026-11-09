@@ -64,3 +64,9 @@ wheels/
 .registry.*.yaml
 /private/
 PASSWORDS.md
+
+# Local state and caches
+*.db
+*.db-shm
+*.db-wal
+__pycache__/

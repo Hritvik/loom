@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Pre-commit guard: a commit may only touch what its agent has claimed.
+
+Every portfolio repository is worked by several agents in one working tree, so `git add -A`
+silently captures another agent's in-flight edits. This hook refuses that, using the central
+registry as the source of truth.
+
+It is installed once per repository as a thin wrapper in `.githooks/pre-commit`; this file holds the
+implementation so every repository behaves identically.
+
+Rules, in order:
+
+1. A committer with a live claim may only stage paths inside that claim's write paths. Anything
+   else is someone else's work in your tree.
+2. A committer with no live claim may not stage paths covered by another agent's live claim.
+3. Without an `Agent: <identity>` trailer, the staged set must not span more than one live claim.
+
+Shared paths are exempt: the registry, the event log, team memory and the boundary documents are
+written by everyone by design.
+
+The human bypasses with `git commit --no-verify`.
+"""
+from __future__ import annotations
+
+import datetime as dt
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+DEFAULT_HOME = Path.home() / "repositories/portfolio-planning"
+ACTIVE = {"claimed", "red", "green", "in-progress"}
+SHARED_PREFIXES = ("capabilities/work/", ".ecc/memory/")
+SHARED_FILES = {"AGENTS.md", "README.md", "HANDOFF.md", ".gitignore"}
+
+
+def work_home() -> Path:
+    return Path(os.environ.get("WORK_COORDINATION_HOME", DEFAULT_HOME)).expanduser()
+
+
+def repo_root() -> Path:
+    override = os.environ.get("WORK_REPO_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    return Path(result.stdout.strip() or Path.cwd()).resolve()
+
+
+def load_registry(path: Path | None = None) -> dict:
+    path = path or work_home() / "capabilities/work/registry.yaml"
+    if not path.is_file():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _same_repo(task: dict, root: Path) -> bool:
+    owner = task.get("owner_repo")
+    if not owner:
+        return False
+    try:
+        return Path(str(owner)).expanduser().resolve() == root
+    except OSError:
+        return False
+
+
+def live_claims(registry: dict, root: Path, now: dt.datetime | None = None) -> list[dict]:
+    now = now or dt.datetime.now(dt.timezone.utc)
+    claims = []
+    for task in registry.get("tasks", []):
+        claim = task.get("claim") or {}
+        if task.get("status") not in ACTIVE or not claim.get("agent") or not _same_repo(task, root):
+            continue
+        try:
+            expiry = dt.datetime.fromisoformat(str(claim.get("lease_expires")).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=dt.timezone.utc)
+        if expiry > now:
+            claims.append(task)
+    return claims
+
+
+def is_shared(path: str) -> bool:
+    return path in SHARED_FILES or any(path.startswith(prefix) for prefix in SHARED_PREFIXES)
+
+
+def covers(task: dict, path: str) -> bool:
+    for write_path in task.get("write_paths") or []:
+        root = str(write_path).rstrip("/")
+        if root and (path == root or path.startswith(root + "/")):
+            return True
+    return False
+
+
+def evaluate(staged: list[str], agent: str | None, registry: dict, root: Path,
+             now: dt.datetime | None = None) -> list[str]:
+    """Return the reasons this commit must be refused; empty means allowed."""
+    root = Path(root).resolve()
+    claims = live_claims(registry, root, now)
+    relevant = [path for path in staged if not is_shared(path)]
+    if not claims or not relevant:
+        return []
+
+    if agent:
+        mine = [task for task in claims if (task.get("claim") or {}).get("agent") == agent]
+        if mine:
+            stray = [path for path in relevant if not any(covers(task, path) for task in mine)]
+            if stray:
+                owned = ", ".join(sorted({task["id"] for task in mine}))
+                return [
+                    f"{len(stray)} staged path(s) are outside the write paths of {agent!r} "
+                    f"(claimed: {owned}):",
+                    *[f"    {path}" for path in stray],
+                    "Another agent's files are in this working tree; stage only your own.",
+                ]
+            return []
+        foreign = [path for path in relevant if any(covers(task, path) for task in claims)]
+        if foreign:
+            owners = ", ".join(sorted({(task.get("claim") or {}).get("agent", "?")
+                                       for task in claims for path in foreign if covers(task, path)}))
+            return [
+                f"{agent!r} has no live claim, but the staged set touches work claimed by {owners}:",
+                *[f"    {path}" for path in foreign],
+            ]
+        return []
+
+    touched = sorted({task["id"] for task in claims for path in relevant if covers(task, path)})
+    if len(touched) > 1:
+        return [
+            f"staged changes span {len(touched)} live claims: {', '.join(touched)}",
+            "Add an `Agent: <identity>` trailer to the commit message, or stage explicit paths.",
+        ]
+    return []
+
+
+def commit_agent(message_file: Path) -> str | None:
+    if not message_file.is_file():
+        return None
+    for line in reversed(message_file.read_text(encoding="utf-8", errors="replace").splitlines()):
+        if line.lower().startswith("agent:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def staged_paths(root: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        capture_output=True, text=True)
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def main(argv: list[str]) -> int:
+    root = repo_root()
+    agent = commit_agent(Path(argv[1])) if len(argv) > 1 else None
+    problems = evaluate(staged_paths(root), agent, load_registry(), root)
+    if not problems:
+        return 0
+    print("commit refused: the staged set is not attributable to one claim\n", file=sys.stderr)
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    print("\nThe human may bypass with: git commit --no-verify", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
