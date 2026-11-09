@@ -49,7 +49,7 @@ Point the engine at the other two:
 
 ```bash
 export WORK_CONTENT_HOME=~/repositories/your-content
-export WORK_CONTRACTS=~/repositories/portfolio-contracts
+export WORK_CONTRACTS=~/repositories/your-contracts
 export WORK_DB=~/.local/state/loom/work.db
 ```
 

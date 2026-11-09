@@ -706,11 +706,11 @@ class WorkCoordinationServer(ThreadingHTTPServer):
                     + ". Every action uses compare-and-swap, leases and the hash-chained audit "
                     "log. Task bodies stay in the owning repository."
                 ),
-                "tags": ["work", "claims", "leases", "coordination", "iam", "ums", "dutch"],
+                "tags": ["work", "claims", "leases", "coordination"],
                 "examples": [
-                    "ListTasks with contextId iam and status TASK_STATE_SUBMITTED",
-                    "SendMessage to iam/W-12 with data {action: claim, revision: 0, ttl: 45m}",
-                    "SendMessage to iam/W-12 with data {action: ask, to: iam-agent, question: ...}",
+                    "ListTasks with contextId <program> and status TASK_STATE_SUBMITTED",
+                    "SendMessage to <program>/<ID> with data {action: claim, revision: 0, ttl: 45m}",
+                    "SendMessage to <program>/<ID> with data {action: ask, to: <agent>, question: ...}",
                 ],
                 "inputModes": ["application/json"],
                 "outputModes": ["application/json"],

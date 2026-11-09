@@ -79,7 +79,7 @@ loom knows the *kinds*; a content repository holds the *instances*. Point it at 
 
 ```bash
 export WORK_CONTENT_HOME=~/repositories/your-content         # your content repository
-export WORK_CONTRACTS=~/repositories/portfolio-contracts     # your contract registry
+export WORK_CONTRACTS=~/repositories/your-contracts     # your contract registry
 export WORK_DB=~/.local/state/loom/work.db                   # the task database
 ```
 
@@ -194,119 +194,6 @@ A program map is a cross-service view that per-repository work items do not carr
 contract, which task appears in which journey, and which slice an agent can start. It is optional and
 lives in your content repository; when present, `validate_work.py --programs <dir>` checks that every
 task, gate and contract reference exists.
-
-## Authority
-
-- **Central registry** — task identity, program, cross-repo dependencies, write-path conflicts,
-  claims/leases and the revision counter. Authoritative once a task has been adopted
-  (`revision >= 1`, i.e. mutated through `./task`).
-- **Repo boards** — packet body, detailed scope, evidence files, reviews and execution checkpoints.
-- **Imported tasks** (`revision == 0`, `status_source: board`) — the repo board is authoritative;
-  use `reconcile` to adopt a status change.
-- **Program documents** (`work-items.md`) — the human narrative remains the authority for headings;
-  the registry mirrors their status.
-
-Status drift is an error for imported tasks and a warning for centrally-managed ones. `board sync`
-materialises the registry into packet boards; it never deletes packets and never rewrites packet
-scope, evidence or write paths.
-
-## Pick up work
-
-```bash
-export WORK_AGENT=opencode/iam-agent-3      # identity recorded in every event
-
-./task list --ready                          # claimable: ready + deps met + no path conflict
-./task show iam/W-12
-./task claim iam/W-12 --revision 0 --ttl 45m
-```
-
-`claim` is a compare-and-swap: the `--revision` you pass must equal the registry revision. A stale
-revision fails, a live lease held by another agent fails, and overlapping `write_paths` fail.
-
-```bash
-./task renew   iam/W-12 --revision 1 --ttl 45m
-./task release iam/W-12 --revision 2 --reason "handing back for review"
-./task takeover iam/W-12 --revision 3 --reason "lease expired; agent went silent"
-```
-
-Heartbeat with `renew` before the lease expires. `takeover` only works after expiry and always
-records the previous agent and a reason. Mutating another agent's live claim is impossible.
-
-## Move work through the state machine
-
-```bash
-./task transition iam/W-12 --revision 1 --to red
-./task transition iam/W-12 --revision 2 --to green
-./task transition iam/W-12 --revision 3 --to reviewed \
-  --reviewer reviewer-7 --decision approve
-./task transition iam/W-12 --revision 4 --to integrated --evidence evidence/W-12.md
-./task transition iam/W-12 --revision 5 --to accepted   --evidence evidence/W-12.md
-```
-
-Rules enforced by the CLI:
-
-- `reviewed` requires an independent reviewer (`--reviewer`, `--decision approve`). The reviewer
-  cannot be the acting agent, the live claim holder, or any agent that previously claimed the task —
-  releasing a lease does not let the implementer approve its own work.
-- `integrated` and `accepted` require evidence.
-- `accepted` requires every dependency to be accepted/integrated.
-- Illegal transitions are refused; `claim` is the only way to enter `claimed`.
-- Reviewing clears the implementation claim.
-
-## Create work centrally
-
-New work starts here, not in a repository.
-
-```bash
-./task create --id iam/W-15 --board iam.program --title "…" --goal "…" \
-  --status ready --depends-on ums/W-18 --write-path src/main/java/...
-```
-
-Then add the detailed work-item section to the owning document (program) or materialise the packet:
-
-```bash
-./task board sync  --board dutch.ref.w12
-./task board sync  --board dutch.ref.w12 --check   # CI: non-zero if stale
-./task board import --board iam.w07 --program iam  # adopt existing packets
-```
-
-## A2A façade
-
-Agents that speak A2A can use the same registry without the CLI:
-
-```bash
-python3 a2a/server.py --port 8787
-curl -s http://127.0.0.1:8787/.well-known/agent-card.json
-```
-
-`ListTasks`, `GetTask`, `SendMessage` (claim/renew/release/takeover/transition) and `CancelTask` are
-supported; mutations are delegated to `./task`, so CAS, leases and audit are identical. The card
-declares no streaming/push/extended-card support and implements no authentication; it binds
-loopback by default. See [`a2a/README.md`](a2a/README.md).
-
-## MCP discovery
-
-Agents discover the registry from their tool list, not from a document:
-
-```bash
-python3 mcp/server.py --print-config opencode     # or claude / codex
-```
-
-Tools: `work_status`, `work_list`, `work_get`, `work_claim`, `work_renew`, `work_release`,
-`work_transition`. `work_status` is described as the pre-planning entry point; mutations delegate
-to `./task`, so the guarantees are identical. The server infers `repo` from the workspace path and
-`agent` as `<repo>-agent`, so one global registration works in every repository. See
-[`mcp/README.md`](mcp/README.md).
-
-## Integration map
-
-`programs/identity-platform-integration.yaml` is the cross-service view that the per-repo work items
-do not carry: who owns which contract, which task appears in which journey, and which slice an agent
-can start. It links to real task IDs and is checked by `validate_work.py`.
-
-```bash
-./task edge list        # dependency edges between tasks
-```
 
 ## Reconcile
 

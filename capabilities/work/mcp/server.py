@@ -500,9 +500,9 @@ TOOL_DEFS = [
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "repo": {"type": "string", "description": "Repository name or path, e.g. iam, ums, dutch"},
-                "program": {"type": "string", "description": "Program namespace, e.g. iam, ums, dutch-ref"},
-                "board": {"type": "string", "description": "Board id, e.g. iam.w09"},
+                "repo": {"type": "string", "description": "Repository name or path"},
+                "program": {"type": "string", "description": "Program namespace"},
+                "board": {"type": "string", "description": "Board id"},
             },
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},

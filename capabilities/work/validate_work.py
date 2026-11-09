@@ -562,8 +562,9 @@ def main(argv: list[str] | None = None) -> int:
     plan_count = 0
     plans_dir = (Path(args.programs).expanduser() if args.programs
                  else Path(os.environ.get("WORK_PROGRAMS") or root / "programs"))
-    services = {"iam", "ums", "dutch", "dutch-ref", "portfolio"}
     slice_states = {"startable", "coordinated", "blocked", "owner-confirmation"}
+    if not plans_dir.is_dir():
+        print(f"  programs: none (pass --programs <dir> to check an integration map)")
     if plans_dir.is_dir():
         for path in sorted(plans_dir.glob("*.yaml")):
             plan = load_yaml(path)
@@ -577,13 +578,13 @@ def main(argv: list[str] | None = None) -> int:
                 if contract_id in contract_ids:
                     errors.append(f"{path.name}: duplicate contract {contract_id}")
                 contract_ids.add(contract_id)
-                if contract.get("owner") and contract["owner"] not in services:
-                    errors.append(f"{path.name}: contract {contract_id} has unknown owner")
+                if not contract.get("owner"):
+                    errors.append(f"{path.name}: contract {contract_id} has no owner")
                 for role in ("producers", "consumers"):
                     for service in contract.get(role, []) or []:
-                        if service not in services:
+                        if not isinstance(service, str) or not service.strip():
                             errors.append(
-                                f"{path.name}: contract {contract_id} references unknown service {service}")
+                                f"{path.name}: contract {contract_id} has an empty {role} entry")
                 if contract.get("task") and contract["task"] not in by_id:
                     errors.append(f"{path.name}: contract {contract_id} references unknown task {contract['task']}")
             for journey in plan.get("journeys", []):

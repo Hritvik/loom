@@ -15,7 +15,7 @@ artifacts:
   tests: tests
   a2a: a2a/server.py
   mcp: mcp/server.py
-  programs: programs
+  programs: programs            # optional; pass --programs when it exists
 
 policy:
   authoritative: true

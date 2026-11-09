@@ -48,3 +48,15 @@ tree and found fourteen hits. Fixed:
 
 Verification: `git grep -n -I -E "hritvik|IAM|UMS|Dutch|portfolio-planning|dutch/S7"` returns
 nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validator PASS.
+
+## Second rework after re-review (event 819, changes requested)
+
+- `capabilities/work/README.md`: the previous edit duplicated 110 lines and left a stale integration
+  map section naming the deleted program file. Deduplicated; one optional-map section remains.
+- `validate_work.py`: the program-map check hardcoded this portfolio's service names, so any other
+  adopter's map failed. It now requires an owner and non-empty producers/consumers, and validates
+  task references only.
+- The skip is no longer silent: `programs: none (pass --programs <dir> …)` prints when absent.
+- A2A agent card tags and examples, and the MCP input-schema descriptions, no longer name this
+  portfolio's programs.
+- `work-home.yaml` marks `programs` optional; the remaining personal example paths are genericised.
