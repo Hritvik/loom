@@ -1,0 +1,30 @@
+# Contract registry — the wire formats services exchange.
+# Lives in its own public repository; consumers pin the hash they build against.
+kind: wire-contract-registry
+version: 1
+updated: <YYYY-MM-DD>
+contracts:
+  - id: <provider>.<surface>.v1
+    kind: http | event
+    version: 1
+    owner: <provider>
+    status: proposed | accepted | deprecated
+    artifact: http/<id>/v1/openapi.yaml
+    sha256: <hex of the artifact at the recorded commit>
+    files:
+      - events/<id>/v1/envelope.schema.json
+    fixtures:
+      valid:
+        - fixtures/<id>/v1/valid/example.json
+      invalid:
+        - fixtures/<id>/v1/invalid/example.json
+    consumers:
+      - service: <consumer>
+        pin:
+          sha256: <hex>
+          commit: <commit>
+    gate: <program>/<ID>
+    source:
+      repo: ~/repositories/<provider>
+      path: <where the artifact came from>
+      commit: <commit>

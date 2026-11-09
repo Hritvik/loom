@@ -1,0 +1,36 @@
+# Capability map — what one service promises another.
+# Lives in the content repository; the provider accepts it, consumers pin it.
+id: <service>-effort
+title: <service> capability map
+status: exploring
+
+owner: <who>
+
+provides:
+  - capability: <name>
+    outcome: >-
+      What a consumer can rely on, stated as an outcome rather than an API.
+
+consumes:
+  - capability: <name>
+    provider: <service>
+    reason: >-
+      Why this is a dependency and not a duplicate.
+    status: not-integrated | integrated
+
+owns:
+  - The decisions this service may make alone.
+
+excludes:
+  - What a reader might expect here and will not find.
+
+open_questions:
+  - id: <service>-q-001
+    addressed_to: <service>
+    question: >-
+      What cannot be decided alone.
+
+evidence:
+  - repo: <repo>
+    paths:
+      - <path>

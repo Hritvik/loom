@@ -13,6 +13,21 @@ repository owns the instances.
 | **Decision (ADR)** | why something is the way it is | either | whoever decided | superseded by a later decision |
 | **Memory** | what a later session should not have to rediscover | content repo | any agent | verified → promoted into a spec, ADR or rule |
 
+## Templates
+
+Copy the one that matches, fill it in, and put it where the table says.
+
+| Kind | Template |
+|---|---|
+| Wayfinder map | [`templates/wayfinder-map.md`](../templates/wayfinder-map.md) |
+| Spec | [`templates/spec.md`](../templates/spec.md) |
+| Plan | [`templates/plan.md`](../templates/plan.md) |
+| Capability map | [`templates/capability-map.yaml`](../templates/capability-map.yaml) |
+| Contract | [`templates/contract-registry.yaml`](../templates/contract-registry.yaml) |
+| Decision | [`templates/adr.md`](../templates/adr.md) |
+| Memory | [`templates/memory-vault/README.md`](../templates/memory-vault/README.md) |
+| Product-repo pointer | [`templates/agents-block.md`](../templates/agents-block.md) |
+
 ## Why the split
 
 - **The engine is generic.** It knows what a task, a claim, a lease and an event are. It does not
