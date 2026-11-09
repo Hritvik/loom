@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -301,6 +302,14 @@ def check_contracts(root: Path, explicit: str | None, by_id: dict[str, dict], er
             if pin.get("sha256") and digest and pin["sha256"] != digest:
                 warnings.append(
                     f"{label}: {consumer.get('service')} is pinned to a different version")
+        source = entry.get("source") or {}
+        repo = Path(str(source.get("repo", ""))).expanduser()
+        commit = str(source.get("commit") or "")
+        if commit and (repo / ".git").exists():
+            probe = subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{commit}^{{commit}}"],
+                                   capture_output=True)
+            if probe.returncode != 0:
+                warnings.append(f"{label}: source commit {commit} does not exist in {repo}")
 
     # A program map may reference a contract, never invent one.
     for path in sorted((root / "programs").glob("*.yaml")):
