@@ -155,6 +155,8 @@ def program_statuses(text: str) -> dict[str, str]:
                 statuses[current] = "blocked"
             elif "rejected" in body:
                 statuses[current] = "rejected"
+            elif "reviewed" in body:
+                statuses[current] = "reviewed"
             elif "ready" in body:
                 statuses[current] = "ready"
             else:

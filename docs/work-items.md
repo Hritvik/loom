@@ -4,12 +4,12 @@ The engine's own backlog. Bodies live here; identity, state and claims live in t
 
 ## LOOM-1 — Remove portfolio content from the public engine
 
-**Status.** Ready.
+**Status.** Reviewed.
 
 ## LOOM-2 — Publish the artifact taxonomy and templates
 
-**Status.** Planned.
+**Status.** Reviewed.
 
 ## LOOM-3 — Write the adopting guide and a worked example
 
-**Status.** Planned.
+**Status.** Reviewed.
