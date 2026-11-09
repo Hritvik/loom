@@ -1,0 +1,6 @@
+#!/bin/sh
+# Coordination guard. The implementation is central so every repository behaves identically.
+# Install: git config core.hooksPath .githooks
+central="${WORK_COORDINATION_HOME:-$HOME/repositories/portfolio-planning}/capabilities/work/hooks/pre-commit"
+[ -f "$central" ] || exit 0
+exec python3 "$central" "$@"

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.distracted.dev/iam/events/iam.app-subject.onboarding-ready.v1.schema.json",
+  "title": "IAM App Subject Onboarding Ready Event v1",
+  "allOf": [
+    {"$ref": "event-envelope.schema.json"},
+    {"type": "object", "properties": {
+      "eventType": {"const": "iam.app-subject.onboarding-ready.v1"},
+      "schemaVersion": {"const": 1},
+      "producer": {"const": "iam"},
+      "aggregate": {"type": "object", "properties": {"type": {"const": "APP_ONBOARDING"}, "id": {"pattern": "^act_[A-Za-z0-9_-]{16,128}$"}, "version": {"type": "integer", "minimum": 1}}},
+      "destination": {"type": "object", "additionalProperties": false, "required": ["appRegistrationId"], "properties": {"appRegistrationId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$"}}},
+      "payload": {"$ref": "iam.app-subject.onboarding-ready.v1.payload.schema.json"}
+    }}
+  ]
+}

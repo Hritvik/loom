@@ -1,0 +1,26 @@
+{
+  "eventId": "evt_012345678901234567",
+  "eventType": "dutch.member-profile.mapping-changed.v1",
+  "schemaVersion": 1,
+  "occurredAt": "2026-10-31T00:00:00Z",
+  "producer": "dutch-ums",
+  "environment": "development",
+  "aggregate": {
+    "type": "MEMBER_PROFILE",
+    "id": "mem_012345678901234567",
+    "version": 1
+  },
+  "correlationId": "cor_0123456789012345",
+  "causationId": "evt_112345678901234567",
+  "destination": {
+    "appRegistrationId": "dutch-development"
+  },
+  "payload": {
+    "appRegistrationId": "dutch-development",
+    "appSubject": "aps_0123456789012345678901ab",
+    "memberId": "mem_012345678901234567",
+    "mappingVersion": 1,
+    "profileState": "PROFILE_READY",
+    "lifecycleState": "ACTIVE"
+  }
+}

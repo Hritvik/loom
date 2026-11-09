@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.distracted.dev/iam/http/onboarding-snapshot-response.schema.json",
+  "title": "IAM Onboarding Snapshot Success Envelope v1",
+  "type": "object", "additionalProperties": false, "required": ["data"],
+  "properties": {
+    "data": {
+      "type": "object", "additionalProperties": false,
+      "required": ["appRegistrationId", "items", "hasMore"],
+      "properties": {
+        "appRegistrationId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$"},
+        "items": {"type": "array", "maxItems": 200, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["appSubject", "activationId", "activationState", "activationVersion", "onboardingReason", "onboardingVersion", "requiredProfileState"],
+          "properties": {
+            "appSubject": {"type": "string", "pattern": "^aps_[A-Za-z0-9_-]{22,128}$"},
+            "activationId": {"type": "string", "pattern": "^act_[A-Za-z0-9_-]{16,128}$"},
+            "activationState": {"const": "ACTIVE"},
+            "activationVersion": {"type": "integer", "minimum": 1},
+            "onboardingReason": {"enum": ["FIRST_ACTIVATION", "RECONCILIATION"]},
+            "onboardingVersion": {"type": "integer", "minimum": 1},
+            "requiredProfileState": {"const": "PROFILE_REQUIRED"}
+          }
+        }},
+        "nextCursor": {"type": "string", "minLength": 1, "maxLength": 512},
+        "hasMore": {"type": "boolean"}
+      }
+    }
+  }
+}

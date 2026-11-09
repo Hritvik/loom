@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.dutch.example/events/dutch/dutch.member-profile.mapping-changed.v1.schema.json",
+  "title": "dutch.member-profile.mapping-changed.v1",
+  "description": "Dutch-owned member mapping fact. Envelope fields mirror the pinned IAM event envelope (contracts/imported/iam/event-envelope.schema.json). No global identity, identifier, credential, token or App Subject outside appSubject.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eventId", "eventType", "schemaVersion", "occurredAt", "producer", "environment",
+    "aggregate", "correlationId", "causationId", "destination", "payload"],
+  "properties": {
+    "eventId": {"type": "string", "pattern": "^evt_[A-Za-z0-9_-]{16,128}$"},
+    "eventType": {"const": "dutch.member-profile.mapping-changed.v1"},
+    "schemaVersion": {"const": 1},
+    "occurredAt": {"type": "string", "format": "date-time", "maxLength": 35},
+    "producer": {"const": "dutch-ums"},
+    "environment": {"enum": ["development", "test", "staging", "production"]},
+    "aggregate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": {"const": "MEMBER_PROFILE"},
+        "id": {"type": "string", "pattern": "^mem_[A-Za-z0-9_-]{16,128}$"},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "correlationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "causationId": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", "maxLength": 128},
+    "destination": {
+      "type": "object", "additionalProperties": false,
+      "minProperties": 1, "maxProperties": 1,
+      "properties": {"appRegistrationId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$"}}
+    },
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["appRegistrationId", "appSubject", "memberId", "mappingVersion", "profileState", "lifecycleState"],
+      "properties": {
+        "appRegistrationId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{2,63}$"},
+        "appSubject": {"type": "string", "pattern": "^aps_[A-Za-z0-9_-]{22,128}$"},
+        "memberId": {"type": "string", "pattern": "^mem_[A-Za-z0-9_-]{16,128}$"},
+        "mappingVersion": {"type": "integer", "minimum": 1},
+        "profileState": {"enum": ["PROFILE_REQUIRED", "PROFILE_PROVISIONING", "PROFILE_READY"]},
+        "lifecycleState": {"enum": ["ACTIVE", "SUSPENDED", "DEPARTED"]}
+      }
+    }
+  }
+}

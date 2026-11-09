@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ums.invalid/contracts/v1/common.json",
+  "$defs": {
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-6][0-9]{0}|9223372036854775807)(?![\\s\\S])"
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z(?![\\s\\S])"
+    },
+    "fields": {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069\\ud800-\\udfff]+(?![\\s\\S])"
+        },
+        "avatarReference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9_-]+(?![\\s\\S])"
+        },
+        "displayLocale": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*(?![\\s\\S])"
+        },
+        "displayTimezone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*(?![\\s\\S])"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "field": {
+      "enum": [
+        "displayName",
+        "avatarReference",
+        "displayLocale",
+        "displayTimezone"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "issuerEnvironmentRef": {
+          "$ref": "common.json#/$defs/uuid"
+        },
+        "appReference": {
+          "$ref": "common.json#/$defs/uuid"
+        },
+        "subjectReference": {
+          "$ref": "common.json#/$defs/uuid"
+        }
+      },
+      "required": [
+        "issuerEnvironmentRef",
+        "appReference",
+        "subjectReference"
+      ],
+      "additionalProperties": false
+    },
+    "lifecycle": {
+      "enum": [
+        "ACTIVE",
+        "CLOSED",
+        "DELETION_PENDING",
+        "ERASED"
+      ]
+    },
+    "readiness": {
+      "enum": [
+        "PROFILE_REQUIRED",
+        "PROFILE_PROVISIONING",
+        "PROFILE_READY"
+      ]
+    }
+  }
+}

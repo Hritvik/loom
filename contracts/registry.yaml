@@ -1,0 +1,184 @@
+kind: wire-contract-registry
+version: 1
+updated: '2026-11-08'
+contracts:
+- id: iam.onboarding-snapshot.v1
+  kind: http
+  version: 1
+  owner: iam
+  status: accepted
+  note: Provider bundle 1.1.0 adds the accepted workload_access token alternative to the snapshot (provider commit b831ea5). The artifact and hash are updated; UMS and Dutch must re-pin after reviewing the additive security alternative.
+  artifact: http/iam.onboarding-snapshot.v1/v1/openapi.yaml
+  sha256: 9f87d53aa9f795747f32787778ddcedfa0a120a02edc59ff0f5d39ce24554179
+  files:
+  - http/iam.onboarding-snapshot.v1/v1/onboarding-snapshot-response.schema.json
+  - fixtures/iam.onboarding-snapshot.v1/v1/valid/onboarding-snapshot-response.json
+  fixtures:
+    valid:
+    - fixtures/iam.onboarding-snapshot.v1/v1/valid/onboarding-snapshot-response.json
+    invalid: []
+  consumers:
+  - service: ums
+    pin:
+      sha256: 9f87d53aa9f795747f32787778ddcedfa0a120a02edc59ff0f5d39ce24554179
+      commit: 89c1430
+  - service: dutch
+    pin:
+      sha256: f5cda8a504d3aba041841ac72eea62794576e45be3beb07bc87da962f2a2e9d0
+      commit: 767fd70
+  gate: iam/W-9
+  source:
+    repo: ~/repositories/iam
+    path: contracts/http/iam-onboarding-snapshot.openapi.yaml
+    commit: b831ea5
+- id: iam.app-subject.onboarding-ready.v1
+  kind: event
+  version: 1
+  owner: iam
+  status: accepted
+  artifact: events/iam.app-subject.onboarding-ready.v1/v1/schema.json
+  sha256: c00e09a058254e5420ab973a9653bde124967a519c613d50bf6962b282486f1e
+  files:
+  - events/iam.app-subject.onboarding-ready.v1/v1/payload.schema.json
+  - events/iam.app-subject.onboarding-ready.v1/v1/event-envelope.schema.json
+  - fixtures/iam.app-subject.onboarding-ready.v1/v1/valid/onboarding-ready-event.json
+  fixtures:
+    valid:
+    - fixtures/iam.app-subject.onboarding-ready.v1/v1/valid/onboarding-ready-event.json
+    invalid: []
+  consumers:
+  - service: ums
+    pin:
+      sha256: c00e09a058254e5420ab973a9653bde124967a519c613d50bf6962b282486f1e
+      commit: 767fd70
+  - service: dutch
+    pin:
+      sha256: c00e09a058254e5420ab973a9653bde124967a519c613d50bf6962b282486f1e
+      commit: 767fd70
+  gate: iam/W-8
+  source:
+    repo: ~/repositories/iam
+    path: contracts/events/iam.app-subject.onboarding-ready.v1.schema.json
+    commit: 767fd70
+- id: ums.profile.state-changed.v1
+  kind: event
+  version: 1
+  owner: ums
+  status: accepted
+  artifact: events/ums.profile.state-changed.v1/v1/schema.json
+  sha256: 6bb64fd4feffc64ee330d1c9f0d8850a77ce8c478feeac95623cebb51e16be3f
+  files:
+  - fixtures/ums.profile.state-changed.v1/v1/valid/state-event.json
+  fixtures:
+    valid:
+    - fixtures/ums.profile.state-changed.v1/v1/valid/state-event.json
+    invalid: []
+  consumers:
+  - service: dutch
+    pin:
+      sha256: 6bb64fd4feffc64ee330d1c9f0d8850a77ce8c478feeac95623cebb51e16be3f
+      commit: 8a403b8
+  gate: ums/W-12
+  source:
+    repo: ~/repositories/ums
+    path: contracts/v1/schemas/profile-state-event.json
+    commit: 8a403b8
+- id: ums.profile-status.v1
+  kind: http
+  version: 1
+  owner: ums
+  status: accepted
+  artifact: http/ums.profile-status.v1/v1/openapi.json
+  sha256: 16fc700faef96b228f7e225f24d7e2b9c957bb18e16a7eba5f0e249eb471e54b
+  files:
+  - fixtures/ums.profile-status.v1/v1/valid/status-ready.json
+  fixtures:
+    valid:
+    - fixtures/ums.profile-status.v1/v1/valid/status-ready.json
+    invalid: []
+  consumers:
+  - service: dutch
+    pin:
+      sha256: 16fc700faef96b228f7e225f24d7e2b9c957bb18e16a7eba5f0e249eb471e54b
+      commit: 44cd104
+  gate: ums/W-7
+  source:
+    repo: ~/repositories/ums
+    path: contracts/v1/openapi.json
+    commit: 44cd104
+- id: dutch.member-profile.mapping-changed.v1
+  kind: event
+  version: 1
+  owner: dutch
+  status: accepted
+  artifact: events/dutch.member-profile.mapping-changed.v1/v1/schema.json
+  sha256: adc1f925b10a3d69ff0e80b6af9078d20a45a3915409fb275f6ae8cc2547c6a7
+  files:
+  - fixtures/dutch.member-profile.mapping-changed.v1/v1/valid/member-profile-mapping-changed.json
+  - fixtures/dutch.member-profile.mapping-changed.v1/v1/invalid/forbidden-identity.json
+  fixtures:
+    valid:
+    - fixtures/dutch.member-profile.mapping-changed.v1/v1/valid/member-profile-mapping-changed.json
+    invalid:
+    - fixtures/dutch.member-profile.mapping-changed.v1/v1/invalid/forbidden-identity.json
+  consumers:
+  - service: dutch
+    pin:
+      sha256: adc1f925b10a3d69ff0e80b6af9078d20a45a3915409fb275f6ae8cc2547c6a7
+      commit: a990b26
+  gate: dutch-ref/W10-A
+  source:
+    repo: ~/repositories/dutch
+    path: contracts/events/dutch/json-schema/dutch.member-profile.mapping-changed.v1.schema.json
+    commit: a990b26
+- id: dutch.profile-state.v1
+  kind: http
+  version: 1
+  owner: dutch
+  status: accepted
+  artifact: http/dutch.profile-state.v1/v1/openapi.yaml
+  sha256: 6d4bed1782504a2fdc97cacb22f38ed9545e5e012a64b7b03cf6a4e737d6f602
+  files:
+  - fixtures/dutch.profile-state.v1/v1/valid/profile-state-ready.json
+  - fixtures/dutch.profile-state.v1/v1/valid/profile-state-required.json
+  fixtures:
+    valid:
+    - fixtures/dutch.profile-state.v1/v1/valid/profile-state-ready.json
+    - fixtures/dutch.profile-state.v1/v1/valid/profile-state-required.json
+    invalid: []
+  consumers:
+  - service: dutch
+    pin:
+      sha256: 6d4bed1782504a2fdc97cacb22f38ed9545e5e012a64b7b03cf6a4e737d6f602
+      commit: 5e909cf
+  gate: dutch-ref/W10-C
+  source:
+    repo: ~/repositories/dutch
+    path: contracts/http/gateway/openapi.yaml
+    commit: 5e909cf
+- id: ums.profile.association-report.v1
+  kind: event
+  version: 1
+  owner: ums
+  status: accepted
+  artifact: events/ums.profile.association-report.v1/v1/schema.json
+  sha256: 8734706d103fa1996477bb8da7f22486b440e4f88af5a8c621a5f3c9459b2e03
+  files:
+  - events/ums.profile.association-report.v1/v1/common.json
+  fixtures:
+    valid:
+    - fixtures/ums.profile.association-report.v1/v1/association-report.json
+    invalid:
+    - fixtures/ums.profile.association-report.v1/v1/association-report-invalid-display.json
+    - fixtures/ums.profile.association-report.v1/v1/association-report-invalid-environment.json
+    - fixtures/ums.profile.association-report.v1/v1/association-report-invalid-tombstone.json
+  consumers:
+  - service: dutch
+    pin:
+      sha256: 8734706d103fa1996477bb8da7f22486b440e4f88af5a8c621a5f3c9459b2e03
+      commit: c17395a2b5e71ab3c8fc361d79999abf772b94d4
+  gate: ums/W-8
+  source:
+    repo: ~/repositories/ums
+    path: contracts/v1/schemas/association-report.json
+    commit: c17395a2b5e71ab3c8fc361d79999abf772b94d4

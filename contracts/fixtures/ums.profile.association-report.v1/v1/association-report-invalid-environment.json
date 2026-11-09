@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "eventId": "evt_0123456789abcdefghij",
+  "eventType": "ums.profile.association-report.v1",
+  "producer": "ums",
+  "environment": "local",
+  "occurredAt": "2026-11-05T09:00:00Z",
+  "correlationId": "corr-1",
+  "causationId": "550e8400-e29b-41d4-a716-446655440000",
+  "aggregate": {
+    "type": "UMS_PROFILE_BINDING",
+    "id": "aps_0123456789abcdefghijkL",
+    "version": 7
+  },
+  "destination": {
+    "appRegistrationId": "dutch-development"
+  },
+  "payload": {
+    "appSubject": "aps_0123456789abcdefghijkL",
+    "profileState": "PROFILE_READY",
+    "lifecycleState": "ACTIVE",
+    "generation": 3,
+    "profileRevision": "5",
+    "contentObligation": false
+  }
+}

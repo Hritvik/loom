@@ -1,0 +1,26 @@
+{
+  "eventId": "c1c8540a-8268-4ba9-9029-a5ef73cacbd4",
+  "schemaVersion": "1",
+  "producer": "ums",
+  "environment": "test",
+  "occurredAt": "2026-10-23T00:00:00Z",
+  "correlationId": "fixture-1",
+  "causationId": "c1c8540a-8268-4ba9-9029-a5ef73cacbd4",
+  "type": "ums.profile.state-changed.v1",
+  "state": {
+    "scope": {
+      "issuerEnvironmentRef": "c1c8540a-8268-4ba9-9029-a5ef73cacbd4",
+      "appReference": "c1c8540a-8268-4ba9-9029-a5ef73cacbd4",
+      "subjectReference": "c1c8540a-8268-4ba9-9029-a5ef73cacbd4"
+    },
+    "bindingRevision": "9007199254740993",
+    "policyRevision": "1",
+    "lifecycle": "ACTIVE",
+    "readiness": "PROFILE_READY",
+    "profileReference": "c1c8540a-8268-4ba9-9029-a5ef73cacbd4",
+    "generation": "1",
+    "profileRevision": "1",
+    "deletionCauses": {}
+  },
+  "reason": "PROVISIONED"
+}

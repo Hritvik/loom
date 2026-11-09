@@ -1,0 +1,2040 @@
+#!/usr/bin/env python3
+"""Central work-coordination CLI.
+
+The registry is the authority for task identity, dependency edges, claims and
+revisions. Boards remain the authority for local packet execution state. Every
+mutation is compare-and-swap on `revision`, takes a lease, and appends an
+entry to the hash-chained `events.ndjson` audit log.
+
+Run `./task --help` or see PROTOCOL.md.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import difflib
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+HOME = Path(__file__).resolve().parent
+DEFAULT_TTL = "30m"
+
+STATE_ORDER = [
+    "draft",
+    "planned",
+    "ready",
+    "claimed",
+    "red",
+    "green",
+    "blocked",
+    "reviewed",
+    "integrated",
+    "accepted",
+    "rejected",
+    "released",
+    "in-progress",
+    "done",
+]
+ACTIVE_STATES = {"claimed", "red", "green"}
+TERMINAL_STATES = {"accepted", "done"}
+DEP_SATISFIED = {"accepted", "integrated", "done"}
+REVIEW_GATED = DEP_SATISFIED | {"reviewed"}
+CLAIMABLE_FROM = {"ready"}
+
+# Explicitly allowed transitions. `claimed` is reached through `claim`, not
+# through `transition`, so it is intentionally absent from the value sets.
+TRANSITIONS = {
+    "draft": {"planned", "ready", "blocked", "rejected"},
+    "planned": {"ready", "blocked", "rejected"},
+    "ready": {"blocked", "released", "rejected"},
+    "claimed": {"red", "green", "blocked", "ready", "rejected", "released"},
+    "in-progress": {"claimed", "red", "green", "blocked", "ready", "rejected", "released"},
+    "red": {"green", "claimed", "blocked", "ready", "rejected", "released"},
+    "green": {"reviewed", "red", "blocked", "rejected", "released"},
+    "blocked": {"ready", "planned", "rejected"},
+    "reviewed": {"integrated", "accepted", "ready", "rejected"},
+    "integrated": {"accepted", "rejected"},
+    "accepted": set(),
+    "done": set(),
+    "rejected": {"ready", "draft", "planned"},
+    "released": {"ready", "planned"},
+}
+
+ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,31}/[A-Za-z0-9._-]+$")
+BOARD_PATTERN = re.compile(r"^[a-z][a-z0-9.-]{2,63}$")
+DURATION_PATTERN = re.compile(r"^(\d+)([smhd])$")
+
+
+# --------------------------------------------------------------------------
+# Storage
+# --------------------------------------------------------------------------
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from store import (  # noqa: E402 — sibling module, resolved from the script directory
+    REGISTRY_HEADER,
+    ZERO_HASH,
+    FileStore,
+    SqliteStore,
+    Store,
+    WorkError,
+    iso,
+    make_store,
+    parse_now,
+    parse_time,
+)
+
+
+def parse_duration(value: str) -> dt.timedelta:
+    match = DURATION_PATTERN.match(value.strip())
+    if not match:
+        raise WorkError(f"invalid duration {value!r}; use e.g. 30m, 2h, 7d")
+    amount, unit = int(match.group(1)), match.group(2)
+    return dt.timedelta(seconds=amount * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit])
+
+
+# --------------------------------------------------------------------------
+# Registry helpers
+# --------------------------------------------------------------------------
+
+
+def find_task(registry: dict, task_id: str) -> dict:
+    for task in registry["tasks"]:
+        if task["id"] == task_id:
+            return task
+    known = [task["id"] for task in registry["tasks"]]
+    close = difflib.get_close_matches(task_id, known, n=3)
+    hint = f"; did you mean {', '.join(close)}?" if close else ""
+    raise WorkError(f"unknown task {task_id}{hint}")
+
+
+def find_board(registry: dict, board_id: str) -> dict:
+    for board in registry["boards"]:
+        if board["id"] == board_id:
+            return board
+    raise WorkError(f"unknown board {board_id}")
+
+
+def task_edges(registry: dict, task_id: str) -> list[str]:
+    """Return task ids that `task_id` depends on.
+
+    Edge direction: `from` depends on `to` (for `depends-on` edges).
+    `provider-parity` edges are advisory and do not gate readiness.
+    """
+    deps = [edge["to"] for edge in registry["edges"]
+            if edge.get("kind", "depends-on") == "depends-on" and edge["from"] == task_id]
+    task = find_task(registry, task_id)
+    for dep in task.get("depends_on", []) or []:
+        if dep not in deps:
+            deps.append(dep)
+    return deps
+
+
+def dependencies_met(registry: dict, task: dict) -> tuple[bool, list[str]]:
+    unmet = []
+    for dep in task_edges(registry, task["id"]):
+        try:
+            other = find_task(registry, dep)
+        except WorkError:
+            unmet.append(f"{dep} (unknown)")
+            continue
+        if other.get("status") not in DEP_SATISFIED:
+            unmet.append(f"{dep} ({other.get('status')})")
+    return not unmet, unmet
+
+def dependents_index(registry: dict) -> dict[str, list[str]]:
+    """Reverse of the depends-on graph: task id -> ids that depend on it."""
+    index: dict[str, list[str]] = {}
+    for task in registry["tasks"]:
+        deps = [edge["to"] for edge in registry.get("edges", [])
+                if edge.get("kind", "depends-on") == "depends-on" and edge["from"] == task["id"]]
+        for dep in task.get("depends_on", []) or []:
+            if dep not in deps:
+                deps.append(dep)
+        for dep in deps:
+            index.setdefault(dep, []).append(task["id"])
+    return index
+
+
+def transitive_dependents(index: dict[str, list[str]], task_id: str) -> list[str]:
+    """Everything downstream of a task, following the reverse graph."""
+    seen: set[str] = set()
+    stack = list(index.get(task_id, []))
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(index.get(current, []))
+    return sorted(seen)
+
+
+def normalized_path(value: str) -> str:
+    return value.strip().rstrip("/")
+
+
+def paths_overlap(left: str, right: str) -> bool:
+    a, b = normalized_path(left), normalized_path(right)
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def lease_expiry(task: dict) -> dt.datetime | None:
+    claim = task.get("claim") or {}
+    value = claim.get("lease_expires")
+    return parse_time(value) if value else None
+
+
+def active_claim(task: dict, now: dt.datetime) -> bool:
+    if task.get("status") not in ACTIVE_STATES or not task.get("claim"):
+        return False
+    expiry = lease_expiry(task)
+    return bool(expiry and expiry > now)
+
+
+def write_path_conflicts(registry: dict, task: dict, now: dt.datetime) -> list[str]:
+    conflicts = []
+    mine = task.get("write_paths", []) or []
+    for other in registry["tasks"]:
+        if other["id"] == task["id"] or not active_claim(other, now):
+            continue
+        for left in mine:
+            for right in other.get("write_paths", []) or []:
+                if paths_overlap(left, right):
+                    conflicts.append(f"{left} overlaps {other['id']}:{right} ({other['claim'].get('agent')})")
+    return conflicts
+
+
+def require_state(task: dict, allowed: set[str], operation: str) -> None:
+    if task.get("status") not in allowed:
+        raise WorkError(
+            f"cannot {operation} {task['id']}: status is {task.get('status')!r}, expected {sorted(allowed)}"
+        )
+
+
+def require_revision(task: dict, revision: int) -> None:
+    current = int(task.get("revision", 0))
+    if revision != current:
+        raise WorkError(
+            f"revision conflict on {task['id']}: you passed {revision}, registry has {current}. "
+            "Re-read the task and retry (compare-and-swap)."
+        )
+
+
+def claim_owner(task: dict) -> str | None:
+    return (task.get("claim") or {}).get("agent")
+
+
+def require_owner(task: dict, agent: str) -> None:
+    owner = claim_owner(task)
+    if owner != agent:
+        raise WorkError(f"{task['id']} is claimed by {owner!r}, not {agent!r}")
+
+
+def bump(task: dict, status: str, now: dt.datetime) -> None:
+    task["status"] = status
+    task["revision"] = int(task.get("revision", 0)) + 1
+    task["updated_at"] = iso(now)
+
+
+def summarize(task: dict, registry: dict) -> str:
+    deps = task_edges(registry, task["id"])
+    satisfied, unmet = dependencies_met(registry, task)
+    claim = task.get("claim") or {}
+    index = dependents_index(registry)
+    direct = sorted(set(index.get(task["id"], [])))
+    downstream = transitive_dependents(index, task["id"])
+    blocks = ", ".join(direct) if direct else "-"
+    if len(downstream) > len(direct):
+        blocks += f"  ({len(downstream)} downstream)"
+    lines = [
+        f"{task['id']}  [{task.get('status')}]  revision {task.get('revision', 0)}",
+        f"  board:    {task.get('board')}",
+        f"  program:  {task.get('program', '-')}",
+        f"  title:    {task.get('title', '-')}",
+        f"  deps:     {', '.join(deps) if deps else '-'}"
+        + (f"  UNMET: {', '.join(unmet)}" if unmet else "  (satisfied)" if deps else ""),
+        f"  blocks:   {blocks}",
+        f"  paths:    {', '.join(task.get('write_paths', [])) or '-'}",
+    ]
+    if claim:
+        lines.append(
+            f"  claim:    {claim.get('agent')} until {claim.get('lease_expires')} "
+            f"(base revision {claim.get('base_revision')})"
+        )
+    if task.get("evidence"):
+        lines.append(f"  evidence: {task['evidence']}")
+    if task.get("review"):
+        lines.append(f"  review:   {task['review'].get('decision')} by {task['review'].get('reviewer')}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+
+def cmd_edge(args, store: Store) -> int:
+    registry = store.load()
+    edges = registry.setdefault("edges", [])
+    if args.action == "list":
+        if not edges:
+            print("no edges")
+            return 0
+        for edge in edges:
+            print(f"{edge['from']:<24} -> {edge['to']:<24} {edge.get('kind', 'depends-on')}")
+        return 0
+
+    agent = require_agent(args)
+    if not args.source or not args.target:
+        raise WorkError("edge add/remove requires --from and --to")
+    find_task(registry, args.source)
+    find_task(registry, args.target)
+    if args.source == args.target:
+        raise WorkError("an edge cannot point at itself")
+    kind = args.kind
+    existing = next((edge for edge in edges if edge["from"] == args.source
+                     and edge["to"] == args.target and edge.get("kind", "depends-on") == kind), None)
+    if args.action == "add":
+        if existing:
+            raise WorkError(f"edge already exists: {args.source} -> {args.target} ({kind})")
+        edges.append({"from": args.source, "to": args.target, "kind": kind})
+        assert_no_cycle(registry)
+        store.save()
+        store.append_event(event="edge", agent=agent, action="add", source=args.source,
+                           target=args.target, kind=kind, now=args.now)
+        print(f"added edge {args.source} -> {args.target} ({kind})")
+        return 0
+
+    if not existing:
+        raise WorkError(f"edge not found: {args.source} -> {args.target} ({kind})")
+    edges.remove(existing)
+    store.save()
+    store.append_event(event="edge", agent=agent, action="remove", source=args.source,
+                       target=args.target, kind=kind, now=args.now)
+    print(f"removed edge {args.source} -> {args.target} ({kind})")
+    return 0
+
+
+def cmd_create(args, store: Store) -> int:
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    registry = store.load()
+    if not ID_PATTERN.match(args.id):
+        raise WorkError(f"invalid task id {args.id!r}; expected <program>/<NAME>, e.g. iam/W-15")
+    if any(task["id"] == args.id for task in registry["tasks"]):
+        raise WorkError(f"task {args.id} already exists; ids are never reused or renumbered")
+    board = find_board(registry, args.board)
+    status = args.status
+    if status not in {"draft", "planned", "ready"}:
+        raise WorkError("new tasks may start as draft, planned or ready")
+    task = {
+        "id": args.id,
+        "board": args.board,
+        "program": args.program or args.id.split("/", 1)[0],
+        "owner_repo": args.owner_repo or board["repo"],
+        "title": args.title,
+        "goal": args.goal or args.title,
+        "status": status,
+        "revision": 0,
+        "created_at": iso(now),
+        "updated_at": iso(now),
+    }
+    if args.depends_on:
+        deps = []
+        for dep in args.depends_on:
+            find_task(registry, dep)
+            if dep == args.id:
+                raise WorkError("a task cannot depend on itself")
+            deps.append(dep)
+        task["depends_on"] = deps
+    if args.write_path:
+        task["write_paths"] = sorted({normalized_path(p) for p in args.write_path})
+    if args.acceptance:
+        task["acceptance"] = list(args.acceptance)
+    registry["tasks"].append(task)
+    assert_no_cycle(registry)
+    store.save()
+    store.append_event(event="create", task=task["id"], agent=agent, status=status,
+                       revision=0, now=args.now)
+    print(f"created {task['id']} on {task['board']} as {status} (revision 0)")
+    return 0
+
+
+def cmd_list(args, store: Store) -> int:
+    registry = store.load()
+    now = parse_now(args.now)
+    tasks = registry["tasks"]
+    if args.board:
+        tasks = [task for task in tasks if task["board"] == args.board]
+    if args.state:
+        wanted = {s.strip() for s in args.state.split(",")}
+        tasks = [task for task in tasks if task.get("status") in wanted]
+    if args.mine:
+        tasks = [task for task in tasks if claim_owner(task) == args.mine]
+    if args.awaiting:
+        tasks = [task for task in tasks if task.get("status") == "blocked"
+                 and (task.get("blocked_needs") or "agent") == args.awaiting]
+    weights: dict[str, int] = {}
+    if args.ready:
+        index = dependents_index(registry)
+        selected = []
+        for task in tasks:
+            if task.get("status") not in CLAIMABLE_FROM:
+                continue
+            satisfied, _ = dependencies_met(registry, task)
+            if not satisfied:
+                continue
+            if write_path_conflicts(registry, task, now):
+                continue
+            selected.append(task)
+            weights[task["id"]] = len(transitive_dependents(index, task["id"]))
+        tasks = sorted(selected, key=lambda task: (-weights.get(task["id"], 0), task["id"]))
+    if args.json:
+        print(json.dumps(tasks, indent=2, default=str))
+        return 0
+    if not tasks:
+        print("no tasks match")
+        return 0
+    for task in tasks:
+        claim = task.get("claim") or {}
+        suffix = f"  @{claim.get('agent')} until {claim.get('lease_expires')}" if claim else ""
+        if args.ready and weights.get(task["id"]):
+            suffix += f"  +{weights[task['id']]} downstream"
+        print(f"{task['id']:<22} {task.get('status'):<11} r{task.get('revision', 0):<4}"
+              f" {task.get('title', '')}{suffix}")
+    return 0
+
+
+def cmd_search(args, store: Store) -> int:
+    """Find tasks by question rather than by namespace."""
+    registry = store.load()
+    terms = [term.lower() for term in args.terms if term.strip()]
+    if not terms:
+        raise WorkError("search requires at least one term")
+    scored = []
+    for task in registry["tasks"]:
+        fields = [
+            (task.get("id") or "", 6),
+            (task.get("title") or "", 4),
+            (task.get("goal") or "", 3),
+            (" ".join(task.get("write_paths") or []), 2),
+            (task.get("evidence") or "", 2),
+            (task.get("program") or "", 1),
+            (task.get("board") or "", 1),
+        ]
+        score = 0
+        matched = 0
+        for term in terms:
+            best = 0
+            for text, weight in fields:
+                if term in text.lower():
+                    best = max(best, weight)
+            if best:
+                matched += 1
+                score += best
+        if matched == len(terms):
+            scored.append((score, task))
+    scored.sort(key=lambda item: (-item[0], item[1]["id"]))
+    if args.limit:
+        scored = scored[:args.limit]
+    if args.json:
+        print(json.dumps([task for _, task in scored], indent=2, default=str))
+        return 0
+    if not scored:
+        print("no tasks match")
+        return 0
+    for _, task in scored:
+        claim = task.get("claim") or {}
+        suffix = f"  @{claim.get('agent')}" if claim else ""
+        print(f"{task['id']:<22} {task.get('status'):<11} r{task.get('revision', 0):<4}"
+              f" {task.get('title', '')}{suffix}")
+    return 0
+
+
+def cmd_dependents(args, store: Store) -> int:
+    """Who is waiting on this task, directly and through the chain."""
+    registry = store.load()
+    task = find_task(registry, args.task)
+    index = dependents_index(registry)
+    direct = sorted(set(index.get(task["id"], [])))
+    downstream = transitive_dependents(index, task["id"])
+    by_id = {item["id"]: item for item in registry["tasks"]}
+    if args.json:
+        print(json.dumps({
+            "task": task["id"],
+            "direct": [{"id": dep, "status": by_id.get(dep, {}).get("status")} for dep in direct],
+            "transitive": [{"id": dep, "status": by_id.get(dep, {}).get("status")}
+                           for dep in downstream],
+        }, indent=2, default=str))
+        return 0
+    if not downstream:
+        print(f"{task['id']} blocks nothing")
+        return 0
+    print(f"{task['id']} blocks {len(direct)} directly and {len(downstream)} transitively")
+    for dep in downstream:
+        marker = "*" if dep in direct else " "
+        other = by_id.get(dep, {})
+        print(f" {marker} {dep:<22} {other.get('status', '?'):<11} {other.get('title', '')}")
+    return 0
+
+
+STATUS_COLOURS = {
+    "draft": "#6b7280", "planned": "#6b7280", "ready": "#3b82f6",
+    "claimed": "#f59e0b", "red": "#ef4444", "green": "#22c55e",
+    "in-progress": "#f59e0b", "blocked": "#b91c1c", "reviewed": "#14b8a6",
+    "integrated": "#16a34a", "accepted": "#4b5563", "done": "#4b5563",
+    "rejected": "#7f1d1d", "released": "#a855f7",
+}
+OPEN_STATUSES = {"draft", "planned", "ready", "claimed", "red", "green", "in-progress",
+                 "blocked", "reviewed", "released"}
+
+
+def graph_nodes(registry: dict, program: str | None, board: str | None, only_open: bool,
+                focus: str | None) -> list[dict]:
+    tasks = registry["tasks"]
+    if program:
+        tasks = [task for task in tasks if task.get("program") == program]
+    if board:
+        tasks = [task for task in tasks if task.get("board") == board]
+    if only_open:
+        tasks = [task for task in tasks if task.get("status") in OPEN_STATUSES]
+    if focus:
+        find_task(registry, focus)
+        index = dependents_index(registry)
+        by_id = {task["id"]: task for task in registry["tasks"]}
+        keep = {focus} | set(transitive_dependents(index, focus))
+        seen = {focus}
+        stack = [focus]
+        while stack:
+            current = stack.pop()
+            for dep in task_edges(registry, current):
+                if dep not in seen:
+                    seen.add(dep)
+                    keep.add(dep)
+                    stack.append(dep)
+        tasks = [by_id[task_id] for task_id in keep if task_id in by_id]
+    return sorted(tasks, key=lambda task: (task.get("program", ""), task["id"]))
+
+
+def graph_layout(registry: dict, tasks: list[dict]) -> tuple[dict[str, tuple[int, int]], dict[str, list[str]]]:
+    """Layer tasks so dependencies sit left of dependents; return positions and edges."""
+    ids = {task["id"] for task in tasks}
+    deps = {task["id"]: [dep for dep in task_edges(registry, task["id"]) if dep in ids] for task in tasks}
+    layer: dict[str, int] = {}
+
+    def depth(task_id: str, seen: frozenset[str] = frozenset()) -> int:
+        if task_id in layer:
+            return layer[task_id]
+        if task_id in seen:
+            return 0
+        value = 0
+        for dep in deps.get(task_id, []):
+            value = max(value, depth(dep, seen | {task_id}) + 1)
+        layer[task_id] = value
+        return value
+
+    for task in tasks:
+        depth(task["id"])
+    rows: dict[int, int] = {}
+    positions: dict[str, tuple[int, int]] = {}
+    for task in sorted(tasks, key=lambda t: (layer[t["id"]], t.get("program", ""), t["id"])):
+        column = layer[task["id"]]
+        row = rows.get(column, 0)
+        rows[column] = row + 1
+        positions[task["id"]] = (column, row)
+    edges = {task["id"]: deps[task["id"]] for task in tasks}
+    return positions, edges
+
+
+def render_graph_text(registry: dict, tasks: list[dict], positions, edges) -> str:
+    by_id = {task["id"]: task for task in registry["tasks"]}
+    lines = []
+    blocked = [task for task in tasks if task.get("status") == "blocked"]
+    if blocked:
+        lines.append("Blocked, and what each one releases:")
+        for task in sorted(blocked, key=lambda t: t["id"]):
+            needs = task.get("blocked_needs") or "agent"
+            downstream = transitive_dependents(dependents_index(registry), task["id"])
+            lines.append(f"  {task['id']:<22} {task.get('status'):<9} needs {needs:<6}"
+                         f" unblocks {len(downstream)}")
+    lines.append("")
+    lines.append("Chains (dependency on the left, dependent on the right):")
+    roots = [task for task in tasks if not edges.get(task["id"])]
+    for root in sorted(roots, key=lambda t: (positions[t["id"]][0], t["id"]))[:40]:
+        lines.append(f"  {root['id']}  [{root.get('status')}]  {root.get('title', '')[:60]}")
+        for dependent in transitive_dependents(dependents_index(registry), root["id"]):
+            if dependent in {task["id"] for task in tasks}:
+                other = by_id[dependent]
+                lines.append(f"    -> {dependent}  [{other.get('status')}]  "
+                             f"{other.get('title', '')[:52]}")
+    return "\n".join(lines)
+
+
+def render_graph_mermaid(tasks: list[dict], edges) -> str:
+    lines = ["graph LR"]
+    for task in tasks:
+        label = task["id"].replace("/", "<br/>")
+        lines.append(f'  n_{task["id"].replace("/", "_").replace(".", "_")}["{label}"]')
+    for task in tasks:
+        source = f'n_{task["id"].replace("/", "_").replace(".", "_")}'
+        for dep in edges.get(task["id"], []):
+            target = f'n_{dep.replace("/", "_").replace(".", "_")}'
+            lines.append(f"  {target} --> {source}")
+    for status in sorted({task.get("status") for task in tasks}):
+        members = [f'n_{task["id"].replace("/", "_").replace(".", "_")}'
+                   for task in tasks if task.get("status") == status]
+        lines.append(f"  classDef {status.replace('-', '_')} fill:{STATUS_COLOURS[status]},"
+                     f"color:#fff,stroke:#111;")
+        lines.append(f"  class {','.join(members)} {status.replace('-', '_')};")
+    return "\n".join(lines)
+
+
+def render_graph_html(registry: dict, tasks: list[dict], positions, edges,
+                      direction: str = "lr") -> str:
+    by_id = {task["id"]: task for task in registry["tasks"]}
+    vertical = direction == "tb"
+    columns = max(column for column, _ in positions.values()) + 1
+    rows = max(row for _, row in positions.values()) + 1
+    width = (rows * 280 if vertical else columns * 300) + 120
+    height = (columns * 96 if vertical else rows * 74) + 150
+    box_w, box_h, pad_x, pad_y = 236, 52, 60, 64
+    nodes, links = [], []
+    for task in tasks:
+        column, row = positions[task["id"]]
+        x = pad_x + (row * 280 if vertical else column * 300)
+        y = pad_y + (column * 96 if vertical else row * 74)
+        colour = STATUS_COLOURS.get(task.get("status"), "#6b7280")
+        claim = (task.get("claim") or {}).get("agent")
+        subtitle = task.get("status", "")
+        if claim:
+            subtitle += f" · {claim.split('/')[-1]}"
+        elif task.get("blocked_needs") == "human":
+            subtitle += " · needs owner"
+        title = (task.get("title") or "")[:38]
+        nodes.append(
+            f'<g class="node"><rect x="{x}" y="{y}" width="{box_w}" height="{box_h}" rx="7" '
+            f'fill="#111827" stroke="{colour}" stroke-width="2"/>'
+            f'<rect x="{x}" y="{y}" width="4" height="{box_h}" rx="2" fill="{colour}"/>'
+            f'<text x="{x + 14}" y="{y + 20}" fill="#e5e7eb" font-size="12.5" '
+            f'font-family="ui-monospace, monospace">{task["id"]}</text>'
+            f'<text x="{x + 14}" y="{y + 36}" fill="#9ca3af" font-size="10.5" '
+            f'font-family="ui-sans-serif, system-ui">{_esc(title)}</text>'
+            f'<text x="{x + box_w - 12}" y="{y + 20}" fill="{colour}" font-size="10" '
+            f'text-anchor="end" font-family="ui-sans-serif, system-ui">{subtitle}</text></g>')
+    for task in tasks:
+        column, row = positions[task["id"]]
+        for dep in edges.get(task["id"], []):
+            if dep not in positions:
+                continue
+            dcol, drow = positions[dep]
+            if vertical:
+                sx = pad_x + row * 280 + box_w / 2
+                sy = pad_y + column * 96
+                ex = pad_x + drow * 280 + box_w / 2
+                ey = pad_y + dcol * 96 + box_h
+                mid = (sy + ey) / 2
+                path = (f"M {ex} {ey} C {ex} {mid}, {sx} {mid}, {sx} {sy}")
+            else:
+                sx = pad_x + column * 300
+                sy = pad_y + row * 74 + box_h / 2
+                ex = pad_x + dcol * 300 + box_w
+                ey = pad_y + drow * 74 + box_h / 2
+                mid = (sx + ex) / 2
+                path = f"M {ex} {ey} C {mid} {ey}, {mid} {sy}, {sx} {sy}"
+            links.append(f'<path d="{path}" fill="none" stroke="#374151" stroke-width="1.4"/>')
+    legend = " ".join(
+        f'<span style="color:{colour}">■</span> {status}'
+        for status, colour in sorted(STATUS_COLOURS.items())
+        if status in {task.get("status") for task in tasks})
+    blocked = [task for task in tasks if task.get("status") == "blocked"]
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Work graph</title>
+<style>
+  body {{ margin:0; background:transparent; color:var(--foreground, #111827);
+         font-family:ui-sans-serif, system-ui, sans-serif; }}
+  header {{ padding:14px 20px; border-bottom:1px solid var(--border, #e5e7eb); }}
+  h1 {{ margin:0 0 6px; font-size:16px; font-weight:600; }}
+  .meta {{ color:var(--muted-foreground, #6b7280); font-size:12px; }}
+  .legend {{ margin-top:8px; font-size:11px; color:var(--muted-foreground, #6b7280); }}
+  .bar {{ display:flex; gap:8px; align-items:center; margin-top:10px; font-size:12px; }}
+  .bar button {{ background:transparent; color:inherit; border:1px solid var(--border, #e5e7eb);
+                 border-radius:6px; padding:3px 10px; cursor:pointer; font-size:12px; }}
+  .wrap {{ overflow:auto; }}
+  #canvas {{ transform-origin: top left; }}
+</style></head>
+<body>
+<header>
+  <h1>Work graph</h1>
+  <div class="meta">{len(tasks)} tasks · {sum(len(v) for v in edges.values())} dependency edges ·
+    {len(blocked)} blocked · generated {dt.datetime.now(dt.timezone.utc):%Y-%m-%d %H:%M}Z</div>
+  <div class="legend">{legend}</div>
+  <div class="bar">
+    <button onclick="zoom(-0.2)">−</button>
+    <button onclick="zoom(0.2)">+</button>
+    <button onclick="reset()">reset</button>
+    <span id="level">100%</span>
+  </div>
+</header>
+<div class="wrap"><svg id="canvas" width="{width}" height="{height}"
+  xmlns="http://www.w3.org/2000/svg">
+<rect width="100%" height="100%" fill="#0b1120"/>
+{chr(10).join(links)}
+{chr(10).join(nodes)}
+</svg></div>
+<script>
+  let scale = 1;
+  const canvas = document.getElementById('canvas');
+  function apply() {{
+    canvas.style.transform = 'scale(' + scale + ')';
+    document.getElementById('level').textContent = Math.round(scale * 100) + '%';
+  }}
+  function zoom(delta) {{ scale = Math.min(3, Math.max(0.2, scale + delta)); apply(); }}
+  function reset() {{ scale = 1; apply(); }}
+</script>
+</body></html>"""
+
+
+def _esc(value: str) -> str:
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def cmd_graph(args, store: Store) -> int:
+    """Render the dependency graph as text, mermaid, dot or a standalone HTML file."""
+    registry = store.load()
+    tasks = graph_nodes(registry, args.program, args.board, args.open, args.task)
+    if not tasks:
+        print("no tasks match")
+        return 0
+    positions, edges = graph_layout(registry, tasks)
+    if args.format == "text":
+        print(render_graph_text(registry, tasks, positions, edges))
+        return 0
+    if args.format == "mermaid":
+        print(render_graph_mermaid(tasks, edges))
+        return 0
+    if args.format == "dot":
+        print("digraph work {")
+        print('  rankdir=LR; node [shape=box, style=rounded, fontsize=10];')
+        for task in tasks:
+            print(f'  "{task["id"]}" [label="{task["id"]}\\n{task.get("status")}"];')
+        for task in tasks:
+            for dep in edges.get(task["id"], []):
+                print(f'  "{dep}" -> "{task["id"]}";')
+        print("}")
+        return 0
+    out = Path(args.out or "task-graph.html").expanduser()
+    out.write_text(render_graph_html(registry, tasks, positions, edges, args.direction),
+                   encoding="utf-8")
+    print(f"wrote {out}  ({len(tasks)} tasks, {sum(len(v) for v in edges.values())} edges)")
+    return 0
+
+
+def cmd_show(args, store: Store) -> int:
+    registry = store.load()
+    task = find_task(registry, args.task)
+    if args.json:
+        print(json.dumps(task, indent=2, default=str))
+    else:
+        print(summarize(task, registry))
+    return 0
+
+
+def cmd_claim(args, store: Store) -> int:
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    ttl = parse_duration(args.ttl)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    existing = task.get("claim")
+    if existing:
+        expiry = lease_expiry(task)
+        if expiry and expiry > now:
+            raise WorkError(
+                f"{task['id']} is leased by {existing.get('agent')} until {iso(expiry)}; "
+                "renew or takeover after expiry"
+            )
+        raise WorkError(
+            f"{task['id']} has an expired lease held by {existing.get('agent')}; use takeover with a reason"
+        )
+    require_state(task, CLAIMABLE_FROM, "claim")
+    satisfied, unmet = dependencies_met(registry, task)
+    if not satisfied:
+        raise WorkError(f"cannot claim {task['id']}: unmet dependencies {', '.join(unmet)}")
+    conflicts = write_path_conflicts(registry, task, now)
+    if conflicts:
+        raise WorkError("write-path conflict: " + "; ".join(conflicts))
+    task["claim"] = {
+        "agent": agent,
+        "base_revision": args.revision,
+        "lease_expires": iso(now + ttl),
+        "heartbeat": iso(now),
+    }
+    bump(task, "claimed", now)
+    store.save()
+    store.append_event(event="claim", task=task["id"], agent=agent, status="claimed",
+                       revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
+                       base_revision=args.revision, now=args.now)
+    print(f"claimed {task['id']} at revision {task['revision']} until {task['claim']['lease_expires']}")
+    return 0
+
+
+def cmd_renew(args, store: Store) -> int:
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    ttl = parse_duration(args.ttl)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    require_state(task, ACTIVE_STATES, "renew")
+    require_owner(task, agent)
+    expiry = lease_expiry(task)
+    if expiry is None:
+        raise WorkError(f"{task['id']} has no lease to renew")
+    if expiry <= now:
+        raise WorkError(
+            f"lease on {task['id']} expired at {iso(expiry)}; renewal is no longer safe, use takeover"
+        )
+    task["claim"]["lease_expires"] = iso(now + ttl)
+    task["claim"]["heartbeat"] = iso(now)
+    bump(task, task["status"], now)
+    store.save()
+    store.append_event(event="renew", task=task["id"], agent=agent, status=task["status"],
+                       revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
+                       now=args.now)
+    print(f"renewed {task['id']} at revision {task['revision']} until {task['claim']['lease_expires']}")
+    return 0
+
+
+def cmd_release(args, store: Store) -> int:
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    require_state(task, ACTIVE_STATES | {"in-progress"}, "release")
+    require_owner(task, agent)
+    previous = task.get("claim") or {}
+    task["claim"] = None
+    bump(task, "ready", now)
+    store.save()
+    store.append_event(event="release", task=task["id"], agent=agent, status="ready",
+                       revision=task["revision"], previous_agent=previous.get("agent"),
+                       reason=args.reason, now=args.now)
+    print(f"released {task['id']} back to ready at revision {task['revision']}")
+    return 0
+
+
+def cmd_takeover(args, store: Store) -> int:
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    ttl = parse_duration(args.ttl)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    require_state(task, ACTIVE_STATES, "take over")
+    existing = task.get("claim")
+    if not existing:
+        raise WorkError(f"{task['id']} has no claim to take over; use claim")
+    expiry = lease_expiry(task)
+    if expiry and expiry > now:
+        raise WorkError(
+            f"lease on {task['id']} is still live until {iso(expiry)}; takeover requires expiry"
+        )
+    previous_agent = existing.get("agent")
+    task["claim"] = {
+        "agent": agent,
+        "base_revision": args.revision,
+        "lease_expires": iso(now + ttl),
+        "heartbeat": iso(now),
+    }
+    bump(task, "claimed", now)
+    store.save()
+    store.append_event(event="takeover", task=task["id"], agent=agent, status="claimed",
+                       revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
+                       previous_agent=previous_agent, reason=args.reason, now=args.now)
+    print(
+        f"took over {task['id']} from {previous_agent} at revision {task['revision']} "
+        f"until {task['claim']['lease_expires']}"
+    )
+    return 0
+
+
+def git_review_check(task: dict, *args: str) -> subprocess.CompletedProcess:
+    repo = Path(task["owner_repo"]).expanduser()
+    try:
+        return subprocess.run(
+            ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(repo), *args],
+            capture_output=True, text=True, errors="surrogateescape", timeout=10, check=False,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkError(f"{task['id']}: could not verify the owner repository with Git") from exc
+
+
+def require_source_commit(task: dict, source: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", source):
+        raise WorkError("review source must be a full Git commit hash")
+    root = git_review_check(task, "rev-parse", "--show-toplevel")
+    if root.returncode or Path(root.stdout.strip()).resolve() != Path(task["owner_repo"]).expanduser().resolve():
+        raise WorkError(f"{task['id']}: owner path must be a Git checkout root")
+    result = git_review_check(task, "cat-file", "-t", source)
+    if result.returncode or result.stdout.strip() != "commit":
+        raise WorkError(f"{task['id']}: source commit is missing from the owner repository")
+
+
+def review_base(task: dict, source: str, base: str | None) -> str | None:
+    if base is None:
+        ancestry = git_review_check(task, "rev-list", "--parents", "-n", "1", source)
+        if ancestry.returncode or not ancestry.stdout.strip():
+            raise WorkError("could not determine the first parent of the review source")
+        return next(iter(ancestry.stdout.split()[1:]), None)
+    require_source_commit(task, base)
+    if base == source or git_review_check(task, "merge-base", "--is-ancestor", base, source).returncode:
+        raise WorkError("review base must be an ancestor distinct from the source commit")
+    return base
+
+
+def task_history(store: Store, task: dict) -> list[dict]:
+    return [event for _, event in store.read_events() if event.get("task") == task["id"]]
+
+
+def require_independent(task: dict, reviewer: str, history: list[dict]) -> None:
+    implementers = {
+        event.get("agent") for event in history
+        if event.get("event") in {"claim", "renew", "takeover"}
+        or (event.get("event") == "transition" and event.get("status") == "green")
+    }
+    if reviewer == claim_owner(task) or reviewer in implementers:
+        raise WorkError(f"review must be independent; {reviewer!r} implemented or held a claim on {task['id']}")
+
+
+def latest_review_request(task: dict, history: list[dict]) -> dict:
+    return next((
+        event for event in reversed(history)
+        if event.get("event") == "ask" and event.get("review_source")
+        and event.get("revision") == task["revision"] and event.get("status") == "green"
+    ), {})
+
+
+def verified_review(args, store: Store, task: dict) -> dict:
+    if not args.reviewer or args.decision != "approve":
+        raise WorkError("transition to reviewed requires --reviewer and --decision approve")
+    if args.reviewer == require_agent(args):
+        raise WorkError("review must be independent; the acting agent cannot name itself as reviewer")
+    history = task_history(store, task)
+    require_independent(task, args.reviewer, history)
+    if not args.review_answer:
+        raise WorkError("transition to reviewed requires --review-answer from the reviewer inbox")
+    request = latest_review_request(task, history)
+    answer = next((event for event in history if event.get("seq") == args.review_answer), {})
+    if (not request or answer.get("event") != "answer" or answer.get("decision") != "approve"
+            or answer.get("in_reply_to") != request["seq"] or request.get("to") != args.reviewer
+            or answer.get("agent") != args.reviewer or answer.get("revision") != task["revision"]
+            or answer.get("status") != "green"
+            or any(answer.get(key) != request[key] for key in ("review_source", "review_base", "review_evidence"))
+            or not (answer.get("note") or "").strip()):
+        raise WorkError("approval must match the reviewer, current green revision and latest review request")
+    if args.evidence and args.evidence != request["review_evidence"]:
+        raise WorkError("review evidence must match the submitted evidence path")
+    require_source_commit(task, request["review_source"])
+    return {
+        "reviewer": args.reviewer,
+        "decision": "approve",
+        "source": request["review_source"],
+        "base": request["review_base"],
+        "evidence": request["review_evidence"],
+        "answer": args.review_answer,
+        **({"severity": args.severity} if args.severity else {}),
+    }
+
+
+def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
+    review = task.get("review") or {}
+    if not review.get("source") or not review.get("answer"):
+        raise WorkError("missing verified review receipt; reopen the task and submit it for review")
+    if source != review["source"]:
+        raise WorkError("--integrated-source must be the exact approved commit")
+    require_source_commit(task, source)
+    if not ref.startswith("refs/heads/") or git_review_check(task, "check-ref-format", ref).returncode:
+        raise WorkError("integration_ref must name a local branch under refs/heads/")
+    tip = git_review_check(task, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
+    if tip.returncode:
+        raise WorkError(f"configured integration branch {ref} is missing from the owner repository")
+    integration_tip = tip.stdout.strip()
+    if git_review_check(task, "merge-base", "--is-ancestor", source, integration_tip).returncode:
+        raise WorkError(f"approved commit must be in the history of {ref}")
+    base = review.get("base")
+    if base:
+        changed = git_review_check(task, "diff", "--name-only", "-z", "--no-renames", base, source)
+    else:
+        changed = git_review_check(
+            task, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", source,
+        )
+    if changed.returncode:
+        raise WorkError("could not determine the paths changed by the approved commit")
+    paths = list(dict.fromkeys(changed.stdout.split("\0")[:-1]))
+    if paths and git_review_check(
+        task, "diff", "--quiet", "--no-ext-diff", "--ignore-submodules=none", source, integration_tip, "--", *paths,
+    ).returncode:
+        raise WorkError(f"paths changed by the approved commit differ in {ref}; submit the integrated change for review")
+    return integration_tip
+
+
+def cmd_transition(args, store: Store) -> int:
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    current = task.get("status")
+    target = args.to
+    if target == "claimed":
+        raise WorkError("use `claim` to take a lease; `transition` cannot create claims")
+    allowed = TRANSITIONS.get(current)
+    if allowed is None:
+        raise WorkError(f"unknown current state {current!r}")
+    if target not in allowed:
+        raise WorkError(
+            f"illegal transition {current} -> {target} for {task['id']}; "
+            f"allowed: {', '.join(sorted(allowed)) or '(none)'}"
+        )
+
+    owner = claim_owner(task)
+    # Independent review is the one transition a non-owner may perform.
+    if (current in ACTIVE_STATES | {"in-progress"} and owner and owner != agent
+            and target != "reviewed"):
+        raise WorkError(f"{task['id']} is claimed by {owner!r}; {agent!r} cannot move it")
+
+    if target in {"green", "blocked", "red"} and current in ACTIVE_STATES:
+        require_owner(task, agent)
+
+    review = verified_review(args, store, task) if target == "reviewed" else None
+    if target == "rejected" and not args.reason:
+        raise WorkError("transition to rejected requires --reason")
+    if target in {"released", "blocked"} and not args.reason:
+        raise WorkError(f"transition to {target} requires --reason")
+    if target == "ready" and current == "reviewed" and not args.reason:
+        raise WorkError("reopening a reviewed task requires --reason")
+    if target == "ready" and current in ACTIVE_STATES and not args.reason:
+        raise WorkError("returning claimed work to ready requires --reason (or use `release`)")
+    if target in {"integrated", "accepted"} and not args.evidence:
+        raise WorkError(f"transition to {target} requires --evidence")
+    integration_tip = None
+    if target in {"integrated", "accepted"}:
+        satisfied, unmet = dependencies_met(registry, task)
+        if not satisfied:
+            raise WorkError(f"cannot mark {task['id']} {target}: unmet dependencies {', '.join(unmet)}")
+    if target == "integrated" or (target == "accepted" and current == "reviewed"):
+        board = find_board(registry, task["board"])
+        integration_tip = require_reviewed_source(
+            task, args.integrated_source, board.get("integration_ref", "refs/heads/main"),
+        )
+
+    if args.evidence:
+        task["evidence"] = args.evidence
+    if review:
+        task["evidence"] = review["evidence"]
+        task["review"] = review
+        task["claim"] = None
+    if current == "reviewed" and target == "ready":
+        task.pop("review", None)
+    if target in {"integrated", "accepted", "released", "rejected", "blocked"}:
+        # A blocked packet is waiting on someone else; holding a lease is meaningless and
+        # the validator rejects a claim on a blocked task.
+        task["claim"] = None
+    if target == "ready":
+        task["claim"] = None
+    if target == "blocked":
+        task["blocked_needs"] = args.needs or "agent"
+    elif current == "blocked":
+        task.pop("blocked_needs", None)
+    bump(task, target, now)
+    store.save()
+    store.append_event(event="transition", task=task["id"], agent=agent, status=target,
+                       previous_status=current, revision=task["revision"],
+                       evidence=args.evidence, reviewer=args.reviewer,
+                       decision=args.decision, reason=args.reason, now=args.now,
+                       **({"review_answer": review["answer"], "review_source": review["source"]} if review else {}),
+                       **({"integrated_source": args.integrated_source, "integration_tip": integration_tip}
+                          if integration_tip else {}))
+    print(f"{task['id']}: {current} -> {target} at revision {task['revision']}")
+    return 0
+
+
+def cmd_events(args, store: Store) -> int:
+    records = store.read_events()
+    if args.task:
+        records = [(raw, rec) for raw, rec in records if rec.get("task") == args.task]
+    if args.limit:
+        records = records[-args.limit:]
+    errors = []
+    if args.verify:
+        records_all = store.read_events()
+        errors = verify_event_chain(records_all)
+        if store.has_registry():
+            errors.extend(verify_registry_events(store.load(), records_all))
+    for raw, record in records:
+        if args.json:
+            print(raw.decode("utf-8"))
+        else:
+            extra = record.get("reason") or record.get("evidence") or ""
+            if record.get("event") == "ask":
+                extra = f"to {record.get('to')}: {record.get('question')}"
+            elif record.get("event") == "answer":
+                extra = f"re {record.get('in_reply_to')}: {record.get('decision')}"
+            print(
+                f"{record.get('seq'):>4} {record.get('ts')} {record.get('event'):<10} "
+                f"{record.get('task', '-'):<22} r{record.get('revision', '-')} "
+                f"{record.get('status', ''):<10} {record.get('agent', '')} {extra}"
+            )
+    if args.verify:
+        for error in errors:
+            print(f"ERROR {error}")
+        print("event chain OK" if not errors else f"event chain FAIL ({len(errors)} errors)")
+        return 0 if not errors else 1
+    return 0
+
+
+def _message_records(store: Store) -> list[dict]:
+    return [record for _, record in store.read_events()]
+
+
+def cmd_ask(args, store: Store) -> int:
+    """Ask a question about a task on the audit log. Non-mutating: revision and status are copied."""
+    agent = require_agent(args)
+    if not args.to or not args.question.strip():
+        raise WorkError("ask requires --to and a non-empty --question")
+    if args.to == agent:
+        raise WorkError("an agent cannot ask itself; address another agent or the owner")
+    registry = store.load()
+    task = find_task(registry, args.task)
+    submission = {}
+    if args.review_source:
+        require_state(task, {"green"}, "submit for review")
+        history = task_history(store, task)
+        require_independent(task, args.to, history)
+        last_green = max((
+            event["seq"] for event in history
+            if event.get("event") == "transition" and event.get("status") == "green"
+        ), default=0)
+        if any(
+            event.get("event") == "answer" and event.get("review_source")
+            and event.get("decision") == "changes requested"
+            and (event["seq"] > last_green or event["review_source"] == args.review_source)
+            for event in history
+        ):
+            raise WorkError("changes were requested; submit a new commit after a new green transition")
+        require_source_commit(task, args.review_source)
+        evidence = (args.review_evidence or task.get("evidence") or "").strip()
+        if not evidence or len(evidence) > 512:
+            raise WorkError("review submission requires an evidence locator of 1–512 characters")
+        submission = {
+            "review_source": args.review_source,
+            "review_base": review_base(task, args.review_source, args.review_base),
+            "review_evidence": evidence,
+        }
+    elif args.review_base is not None or args.review_evidence is not None:
+        raise WorkError("--review-base and --review-evidence require --review-source")
+    event = store.append_event(
+        event="ask", task=task["id"], agent=agent, to=args.to, question=args.question.strip(),
+        needed_by=args.needed_by, revision=task.get("revision", 0), status=task.get("status"),
+        now=args.now, **submission)
+    print(f"asked {args.to} about {task['id']} (event {event['seq']})")
+    return 0
+
+
+def cmd_answer(args, store: Store) -> int:
+    """Answer a question event. Only the addressee may answer, and only once."""
+    agent = require_agent(args)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    records = _message_records(store)
+    question = next((record for record in records if record.get("seq") == args.question), None)
+    if question is None or question.get("event") != "ask":
+        raise WorkError(f"event {args.question} is not a question")
+    if question.get("task") != task["id"]:
+        raise WorkError(
+            f"event {args.question} asks about {question.get('task')}, not {task['id']}")
+    if question.get("to") != agent:
+        raise WorkError(
+            f"event {args.question} is addressed to {question.get('to')}, not {agent}")
+    if any(record.get("event") == "answer" and record.get("in_reply_to") == args.question
+           for record in records):
+        raise WorkError(f"event {args.question} is already answered")
+    source = question.get("review_source")
+    if source:
+        require_state(task, {"green"}, "answer review")
+        history = task_history(store, task)
+        require_independent(task, agent, history)
+        if question != latest_review_request(task, history):
+            raise WorkError("review request was superseded or is for an earlier green revision")
+        if args.decision not in {"approve", "changes requested"} or not (args.note or "").strip():
+            raise WorkError("review answer requires approve or changes requested and a nonblank note")
+    event = store.append_event(
+        event="answer", task=task["id"], agent=agent, to=question.get("agent"),
+        in_reply_to=args.question, decision=args.decision, note=args.note,
+        revision=task.get("revision", 0), status=task.get("status"), now=args.now,
+        **({key: question[key] for key in ("review_source", "review_base", "review_evidence")} if source else {}))
+    print(f"answered {question.get('agent')} on {task['id']} (event {event['seq']})")
+    return 0
+
+
+ROLE_BY_KIND = {"review": "reviewer", "integration": "integrator"}
+ROLES = ("implementer", "reviewer", "integrator")
+OWNER_DEFAULT = "hritvik"
+
+
+def task_role(task: dict) -> str:
+    """The hat this work needs. Advanced by state once the role field lands."""
+    return ROLE_BY_KIND.get(task.get("kind"), "implementer")
+
+
+def cmd_decisions(args, store: Store) -> int:
+    """Everything that needs the owner: authority decisions and questions addressed to them."""
+    registry = store.load()
+    owner = args.owner or os.environ.get("WORK_OWNER") or OWNER_DEFAULT
+    index = dependents_index(registry)
+    blocked = []
+    reasons = {}
+    for _, record in store.read_events():
+        if record.get("event") == "transition" and record.get("status") == "blocked":
+            reasons[record.get("task")] = record.get("reason") or ""
+    for task in registry["tasks"]:
+        if task.get("status") != "blocked":
+            continue
+        if (task.get("blocked_needs") or "agent") != "human":
+            continue
+        blocked.append({
+            "task": task["id"],
+            "title": task.get("title"),
+            "revision": task.get("revision", 0),
+            "reason": reasons.get(task["id"], ""),
+            "unblocks": transitive_dependents(index, task["id"]),
+        })
+    records = _message_records(store)
+    answered = {record.get("in_reply_to") for record in records if record.get("event") == "answer"}
+    questions = [
+        {
+            "task": record.get("task"),
+            "from": record.get("agent"),
+            "seq": record.get("seq"),
+            "question": record.get("question"),
+            "neededBy": record.get("needed_by"),
+        }
+        for record in records
+        if record.get("event") == "ask" and record.get("to") == owner
+        and record.get("seq") not in answered
+    ]
+    if args.json:
+        print(json.dumps({"owner": owner, "decisions": blocked, "questions": questions}, indent=2))
+        return 0
+    if not blocked and not questions:
+        print(f"nothing needs {owner}")
+        return 0
+    print(f"Decision queue for {owner}: {len(blocked)} decision(s), {len(questions)} question(s)\n")
+    for number, item in enumerate(blocked, start=1):
+        print(f"{number}. {item['task']}  blocked  r{item['revision']}  {item['title'] or ''}")
+        if item["reason"]:
+            print(f"   why: {item['reason']}")
+        if item["unblocks"]:
+            print(f"   unblocks: {', '.join(item['unblocks'])}")
+    for number, item in enumerate(questions, start=len(blocked) + 1):
+        needed = f"  needed by {item['neededBy']}" if item["neededBy"] else ""
+        print(f"{number}. question on {item['task']} from {item['from']}{needed}")
+        print(f"   {item['question']}")
+        print(f"   answer: ./task answer {item['task']} --question {item['seq']} --decision ...")
+    return 0
+
+
+def cmd_tick(args, store: Store) -> int:
+    """One policy pass: what would be claimed and launched, and what is stale."""
+    registry = store.load()
+    now = parse_now(args.now)
+    index = dependents_index(registry)
+    limits = {
+        "implementer": args.max_implementer,
+        "reviewer": args.max_reviewer,
+        "integrator": args.max_integrator,
+    }
+    active = {role: 0 for role in ROLES}
+    expired = []
+    for task in registry["tasks"]:
+        claim = task.get("claim") or {}
+        if not claim:
+            continue
+        expiry = lease_expiry(task)
+        if expiry and expiry > now:
+            active[task_role(task)] += 1
+        else:
+            expired.append({
+                "task": task["id"],
+                "agent": claim.get("agent"),
+                "expired": claim.get("lease_expires"),
+            })
+    candidates = []
+    for task in registry["tasks"]:
+        if task.get("status") not in CLAIMABLE_FROM:
+            continue
+        satisfied, unmet = dependencies_met(registry, task)
+        if not satisfied:
+            continue
+        if write_path_conflicts(registry, task, now):
+            continue
+        candidates.append({
+            "task": task["id"],
+            "role": task_role(task),
+            "title": task.get("title"),
+            "revision": task.get("revision", 0),
+            "unblocks": len(transitive_dependents(index, task["id"])),
+        })
+    candidates.sort(key=lambda item: (-item["unblocks"], item["task"]))
+    slots = {role: limits[role] - active[role] for role in ROLES}
+    chosen, held = [], []
+    for item in candidates:
+        if slots[item["role"]] > 0:
+            slots[item["role"]] -= 1
+            chosen.append(item)
+        else:
+            held.append({**item, "reason": f"no {item['role']} slot (limit {limits[item['role']]})"})
+    if args.json:
+        print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
+                          "held": held, "expired": expired}, indent=2))
+        return 0
+    print(f"Tick preview — {iso(now)}")
+    print("  capacity: " + "  ".join(
+        f"{role} {active[role]}/{limits[role]}" for role in ROLES))
+    print()
+    if chosen:
+        print("Would claim and launch:")
+        for item in chosen:
+            print(f"  {item['task']:<22} {item['role']:<12} r{item['revision']:<3}"
+                  f" +{item['unblocks']} downstream  {item['title'] or ''}")
+    else:
+        print("Would claim and launch: nothing")
+    if held:
+        print("\nHeld back:")
+        grouped: dict[str, list[dict]] = {}
+        for item in held:
+            grouped.setdefault(item["reason"], []).append(item)
+        for reason, items in sorted(grouped.items()):
+            shown = ", ".join(entry["task"] for entry in items[:4])
+            more = f" (+{len(items) - 4} more)" if len(items) > 4 else ""
+            print(f"  {reason}: {shown}{more}")
+    if expired:
+        print("\nExpired leases to release or take over:")
+        for item in expired:
+            print(f"  {item['task']:<22} {item['agent']}  expired {item['expired']}")
+    print("\nPreview only. Nothing was claimed; wiring --apply needs a worker that consumes launches.")
+    return 0
+
+
+def cmd_inbox(args, store: Store) -> int:
+    """List questions addressed to an agent that have no answer yet."""
+    agent = args.agent or os.environ.get("WORK_AGENT")
+    if not agent:
+        raise WorkError("inbox requires --agent or WORK_AGENT")
+    records = _message_records(store)
+    answered = {record.get("in_reply_to") for record in records if record.get("event") == "answer"}
+    questions = [
+        record for record in records
+        if record.get("event") == "ask" and record.get("to") == agent
+        and (args.all or record.get("seq") not in answered)
+    ]
+    if args.task:
+        questions = [record for record in questions if record.get("task") == args.task]
+    if not args.all and any(record.get("review_source") for record in questions):
+        tasks = {task["id"]: task for task in store.load()["tasks"]}
+        latest = {}
+        for record in records:
+            if record.get("event") == "ask" and record.get("review_source"):
+                latest[(record["task"], record["revision"])] = record["seq"]
+        questions = [
+            record for record in questions
+            if not record.get("review_source")
+            or (tasks[record["task"]]["status"] == "green"
+                and tasks[record["task"]]["revision"] == record["revision"]
+                and latest[(record["task"], record["revision"])] == record["seq"])
+        ]
+    if args.json:
+        print(json.dumps([
+            {"seq": record.get("seq"), "ts": record.get("ts"), "task": record.get("task"),
+             "from": record.get("agent"), "question": record.get("question"),
+             "neededBy": record.get("needed_by"),
+             "answered": record.get("seq") in answered,
+             **({"reviewSource": record["review_source"], "reviewBase": record["review_base"],
+                 "reviewEvidence": record["review_evidence"], "revision": record["revision"]}
+                if record.get("review_source") else {})}
+            for record in questions
+        ], indent=2))
+        return 0
+    if not questions:
+        print(f"inbox empty for {agent}")
+        return 0
+    for record in questions:
+        state = "answered" if record.get("seq") in answered else "open"
+        needed = f" needed-by {record['needed_by']}" if record.get("needed_by") else ""
+        source = ""
+        if record.get("review_source"):
+            source = (f" review r{record['revision']} {record['review_source']}"
+                      f" base={record['review_base'] or '(root)'} evidence={record['review_evidence']}")
+        print(f"{record.get('seq'):>4} {record.get('ts')} {state:<8} {record.get('task')} "
+              f"from {record.get('agent')}{needed}{source}: {record.get('question')}")
+    return 0
+
+
+def cmd_migrate(args, store: Store) -> int:
+    """Copy a file work home into a SQLite database, verifying the chain on the way."""
+    source_root = Path(args.source or args.root).expanduser()
+    source = FileStore(source_root)
+    registry = source.load()
+    records = source.read_events()
+    problems = verify_event_chain(records)
+    if problems:
+        for problem in problems:
+            print(f"ERROR {problem}", file=sys.stderr)
+        raise WorkError("source event chain does not verify; refusing to migrate")
+
+    target_path = Path(args.to).expanduser()
+    target = SqliteStore(source_root, target_path)
+    try:
+        existing = target.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+        if existing and not args.force:
+            raise WorkError(f"{target_path} already holds {existing} events; pass --force to replace")
+        if args.force:
+            with target._transaction():
+                target.connection.execute("DELETE FROM events")
+        target.registry = registry
+        target.save()
+        for raw, record in records:
+            target.connection.execute(
+                "INSERT INTO events (seq, task, body, prev, hash) VALUES (?, ?, ?, ?, ?)",
+                (record["seq"], record.get("task"), raw.decode("utf-8"), record["prev"],
+                 hashlib.sha256(raw).hexdigest()))
+    finally:
+        target.close()
+
+    check = SqliteStore(source_root, target_path)
+    try:
+        copied = check.load()
+        copied_events = check.read_events()
+        problems = verify_event_chain(copied_events)
+    finally:
+        check.close()
+    if problems:
+        for problem in problems:
+            print(f"ERROR {problem}", file=sys.stderr)
+        raise WorkError("migrated event chain does not verify")
+    print(f"migrated {len(copied['tasks'])} tasks, {len(copied['edges'])} edges, "
+          f"{len(copied_events)} events to {target_path}")
+    print("verify with: ./task --store sqlite --db " + str(target_path) + " list --ready")
+    return 0
+
+
+def cmd_export(args, store: Store) -> int:
+    """Render the store as YAML or JSON, the replacement for diffable state in git."""
+    registry = store.load()
+    if args.format == "json":
+        text = json.dumps(registry, indent=2, default=str) + "\n"
+    else:
+        text = REGISTRY_HEADER + yaml.safe_dump(
+            registry, sort_keys=False, default_flow_style=False, allow_unicode=True, width=100)
+    if args.out:
+        out = Path(args.out).expanduser()
+        out.write_text(text, encoding="utf-8")
+        print(f"wrote {out} ({len(text.splitlines())} lines)")
+    else:
+        print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
+def cmd_genesis(args, store: Store) -> int:
+    agent = require_agent(args)
+    if store.read_events():
+        raise WorkError("event log is not empty; genesis is written once")
+    registry = store.load() if store.has_registry() else {}
+    digest = hashlib.sha256(store.export_bytes()).hexdigest() if store.has_registry() else ""
+    event = store.append_event(event="genesis", agent=agent, registry_sha256=digest,
+                               tasks=len(registry.get("tasks", [])), now=args.now)
+    print(f"genesis event {event['seq']} written (sha256 {digest[:12]}…)")
+    return 0
+
+
+def cmd_board(args, store: Store) -> int:
+    registry = store.load()
+    if args.action == "list":
+        for board in registry["boards"]:
+            count = sum(1 for task in registry["tasks"] if task["board"] == board["id"])
+            print(f"{board['id']:<16} {board['kind']:<8} {count:>2} tasks  {board['repo']}/{board['path']}")
+        return 0
+    board = find_board(registry, args.board)
+    if args.action == "import":
+        return import_board(args, store, board, registry)
+    if args.action == "titles":
+        return backfill_titles(args, store, board, registry)
+    if board["kind"] != "board":
+        raise WorkError(f"{board['id']} is a {board['kind']} board; only packet boards are materialised")
+    path = Path(board["repo"]).expanduser() / board["path"]
+    if not path.is_file():
+        raise WorkError(f"board file missing: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    packets = data.setdefault("packets", [])
+    by_id = {packet["id"]: packet for packet in packets}
+    now = parse_now(args.now)
+    central = {task["id"].split("/", 1)[-1]: task for task in registry["tasks"]
+               if task["board"] == board["id"]}
+    changes: list[str] = []
+    unregistered = sorted(set(by_id) - set(central))
+
+    for suffix, task in central.items():
+        expected = {
+            "task": task["id"],
+            "revision": task.get("revision", 0),
+            "status": task.get("status"),
+            "claim": task.get("claim"),
+        }
+        packet = by_id.get(suffix)
+        if packet is None:
+            changes.append(f"create packet {suffix} ({task.get('status')})")
+            if args.check:
+                continue
+            packet = new_packet(suffix, task, data)
+            packets.append(packet)
+            by_id[suffix] = packet
+        current = packet.get("central") or {}
+        if {key: current.get(key) for key in expected} != expected:
+            changes.append(f"update central block on {suffix} (r{expected['revision']} {expected['status']})")
+            if not args.check:
+                packet["central"] = {**expected, "synced_at": iso(now)}
+        if packet.get("status") != expected["status"]:
+            if int(task.get("revision", 0)) == 0 and task.get("status_source") == "board":
+                changes.append(
+                    f"report status drift on {suffix} (board {packet.get('status')} vs central "
+                    f"{expected['status']}); run reconcile")
+            else:
+                changes.append(
+                    f"update status on {suffix} ({packet.get('status')} -> {expected['status']})")
+                if not args.check:
+                    packet["status"] = expected["status"]
+
+    for suffix in unregistered:
+        changes.append(f"keep unregistered packet {suffix} (report only)")
+
+    if not changes:
+        print(f"{board['id']}: in sync ({len(central)} tasks)")
+        return 0
+    for change in changes:
+        print(("would " if args.check else "") + change)
+    if args.check:
+        return 1
+    data["central_registry"] = {
+        "home": "capabilities/work",
+        "board": board["id"],
+        "synced_at": iso(now),
+    }
+    atomic_json_write(path, data)
+    print(f"{board['id']}: wrote {path}")
+    return 0
+
+
+def program_headings(path: Path) -> dict[str, str]:
+    """Map `## W-8 — Title` headings to their titles."""
+    titles: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## ") and " — " in line:
+            suffix, title = line[3:].split(" — ", 1)
+            titles[suffix.strip()] = title.strip()
+    return titles
+
+
+def backfill_titles(args, store: Store, board: dict, registry: dict) -> int:
+    """Adopt program-board headings as titles for tasks that were registered without one."""
+    if board["kind"] != "program":
+        raise WorkError(f"{board['id']} is a {board['kind']} board; titles apply to program boards")
+    path = Path(board["repo"]).expanduser() / board["path"]
+    if not path.is_file():
+        raise WorkError(f"board file missing: {path}")
+    headings = program_headings(path)
+    now = parse_now(args.now)
+    changes: list[str] = []
+    for task in registry["tasks"]:
+        if task.get("board") != board["id"]:
+            continue
+        suffix = task["id"].split("/", 1)[-1]
+        title = headings.get(suffix)
+        if not title:
+            continue
+        if (task.get("title") or "").strip() in {"", "-"}:
+            changes.append(f"{task['id']}: title -> {title[:60]}")
+            if not args.check:
+                task["title"] = title[:200]
+                if not (task.get("goal") or "").strip():
+                    task["goal"] = title
+                task["updated_at"] = iso(now)
+    if not changes:
+        print(f"{board['id']}: titles already set")
+        return 0
+    for change in changes:
+        print(("would set " if args.check else "set ") + change)
+    if args.check:
+        return 1
+    store.save()
+    store.append_event(event="titles", board=board["id"], count=len(changes), now=args.now)
+    print(f"{board['id']}: set {len(changes)} titles")
+    return 0
+
+
+def import_board(args, store: Store, board: dict, registry: dict) -> int:
+    """Register existing packet-board work as central tasks (adoption path)."""
+    agent = require_agent(args)
+    if board["kind"] != "board":
+        raise WorkError("only packet boards can be imported; program boards are markdown authority")
+    program = args.program
+    if not program:
+        raise WorkError("--program is required, e.g. --program iam for iam.w07")
+    if not re.fullmatch(r"[a-z][a-z0-9.-]{2,63}", program):
+        raise WorkError(f"invalid program namespace {program!r}")
+    path = Path(board["repo"]).expanduser() / board["path"]
+    data = json.loads(path.read_text(encoding="utf-8"))
+    packets = data.get("packets", [])
+    suffixes = {packet["id"] for packet in packets}
+    existing = {task["id"] for task in registry["tasks"]}
+    now = parse_now(args.now)
+    added = []
+    for packet in packets:
+        task_id = f"{program}/{packet['id']}"
+        if task_id in existing:
+            continue
+        if packet.get("status") in REVIEW_GATED:
+            raise WorkError(f"{task_id}: cannot import into {packet['status']}; use the review pipeline")
+        title = packet.get("title") or packet["id"]
+        task = {
+            "id": task_id,
+            "board": board["id"],
+            "program": program,
+            "owner_repo": board["repo"],
+            "title": title,
+            "goal": title,
+            "kind": packet.get("kind", "implementation"),
+            "status": packet.get("status", "draft"),
+            "status_source": "board",
+            "revision": 0,
+            "created_at": iso(now),
+            "updated_at": iso(now),
+        }
+        deps = [f"{program}/{dep}" for dep in packet.get("depends_on", []) if dep in suffixes]
+        if deps:
+            task["depends_on"] = deps
+        paths = packet.get("write_paths", [])
+        if paths:
+            task["write_paths"] = sorted({normalized_path(p) for p in paths})
+        if packet.get("evidence"):
+            task["evidence"] = packet["evidence"]
+        registry["tasks"].append(task)
+        existing.add(task_id)
+        added.append(task_id)
+    if not added:
+        print(f"{board['id']}: nothing to import")
+        return 0
+    assert_no_cycle(registry)
+    store.save()
+    store.append_event(event="import", agent=agent, board=board["id"],
+                       count=len(added), tasks=added, now=args.now)
+    print(f"{board['id']}: imported {len(added)} packets as {program}/…")
+    for task_id in added:
+        print(f"  {task_id}")
+    return 0
+
+
+def new_packet(suffix: str, task: dict, board: dict) -> dict:
+    existing = board.get("packets", [])
+    packet_dir = "packets"
+    evidence_dir = "evidence"
+    if existing and existing[0].get("packet"):
+        packet_dir = str(Path(existing[0]["packet"]).parent)
+    if existing and existing[0].get("evidence"):
+        evidence_dir = str(Path(existing[0]["evidence"]).parent)
+    return {
+        "id": suffix,
+        "title": task.get("title", suffix),
+        "kind": task.get("kind", "implementation"),
+        "status": task.get("status"),
+        "packet": f"{packet_dir}/{suffix}.md",
+        "evidence": f"{evidence_dir}/{suffix}.md",
+        "depends_on": [dep.split("/", 1)[-1] for dep in task.get("depends_on", [])
+                       if dep.startswith(task["id"].split("/", 1)[0] + "/")],
+        "dependency_gate": "reviewed",
+        "write_paths": list(task.get("write_paths", [])),
+        "shared_paths": [],
+        "lock_groups": [],
+        "execution_lock_groups": [],
+        "claim": None,
+        "checkpoint": None,
+    }
+
+
+def cmd_reconcile(args, store: Store) -> int:
+    registry = store.load()
+    board = find_board(registry, args.board)
+    if board["kind"] != "board":
+        raise WorkError("reconcile operates on packet boards")
+    path = Path(board["repo"]).expanduser() / board["path"]
+    data = json.loads(path.read_text(encoding="utf-8"))
+    statuses = {packet["id"]: packet.get("status") for packet in data.get("packets", [])}
+    drift = []
+    for task in registry["tasks"]:
+        if task["board"] != board["id"]:
+            continue
+        suffix = task["id"].split("/", 1)[-1]
+        board_status = statuses.get(suffix)
+        if board_status and board_status != task.get("status"):
+            drift.append((task, board_status))
+    if not drift:
+        print(f"{board['id']}: no status drift")
+        return 0
+    agent = require_agent(args) if args.apply else None
+    now = parse_now(args.now)
+    for task, board_status in drift:
+        print(f"{task['id']}: registry {task.get('status')} -> board {board_status}")
+    if not args.apply:
+        print("run with --apply --reason TEXT to adopt board status (boards are authoritative)")
+        return 1
+    if not args.reason:
+        raise WorkError("--apply requires --reason")
+    for task, board_status in drift:
+        if board_status in REVIEW_GATED:
+            raise WorkError(f"{task['id']}: cannot reconcile into {board_status}; use the review pipeline")
+    for task, board_status in drift:
+        previous = task.get("status")
+        task["status"] = board_status
+        task["status_source"] = "board"
+        task["claim"] = None if board_status not in ACTIVE_STATES else task.get("claim")
+        bump(task, board_status, now)
+        store.append_event(event="reconcile", task=task["id"], agent=agent, status=board_status,
+                           previous_status=previous, revision=task["revision"],
+                           reason=args.reason, now=args.now)
+    store.save()
+    print(f"{board['id']}: adopted {len(drift)} board statuses")
+    return 0
+
+
+def atomic_json_write(path: Path, data: dict) -> None:
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".board.", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+# --------------------------------------------------------------------------
+# Validation helpers
+# --------------------------------------------------------------------------
+
+
+def assert_no_cycle(registry: dict) -> None:
+    graph = {task["id"]: [] for task in registry["tasks"]}
+    for edge in registry["edges"]:
+        if edge.get("kind", "depends-on") != "depends-on":
+            continue
+        if edge["from"] in graph and edge["to"] in graph:
+            graph[edge["from"]].append(edge["to"])
+    for task in registry["tasks"]:
+        for dep in task.get("depends_on", []) or []:
+            if dep in graph:
+                graph[task["id"]].append(dep)
+    visiting, visited = set(), set()
+
+    def visit(node: str, trail: list[str]) -> None:
+        if node in visiting:
+            raise WorkError("dependency cycle: " + " -> ".join(trail + [node]))
+        if node in visited:
+            return
+        visiting.add(node)
+        for neighbour in graph.get(node, []):
+            visit(neighbour, trail + [node])
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in graph:
+        visit(node, [])
+
+
+def verify_event_chain(records: list[tuple[bytes, dict]]) -> list[str]:
+    errors = []
+    previous_raw = None
+    last_ts = None
+    for index, (raw, record) in enumerate(records, start=1):
+        if record.get("seq") != index:
+            errors.append(f"seq {record.get('seq')} at line {index}")
+        expected = hashlib.sha256(previous_raw).hexdigest() if previous_raw else ZERO_HASH
+        if record.get("prev") != expected:
+            errors.append(f"line {index}: prev hash mismatch")
+        ts = record.get("ts")
+        try:
+            moment = parse_time(ts)
+            if last_ts and moment < last_ts:
+                errors.append(f"line {index}: timestamp moved backwards")
+            last_ts = moment
+        except (TypeError, ValueError):
+            errors.append(f"line {index}: invalid timestamp {ts!r}")
+        previous_raw = raw
+    return errors
+
+
+def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) -> list[str]:
+    errors = []
+    by_id = {task["id"]: task for task in registry.get("tasks", [])}
+    last: dict[str, dict] = {}
+    for _, record in records:
+        if record.get("task"):
+            last[record["task"]] = record
+    for task_id, record in last.items():
+        task = by_id.get(task_id)
+        if task is None:
+            errors.append(f"event log references unknown task {task_id}")
+            continue
+        if record.get("revision") != task.get("revision"):
+            errors.append(
+                f"{task_id}: last event revision {record.get('revision')} != registry {task.get('revision')}")
+        if record.get("status") != task.get("status"):
+            errors.append(
+                f"{task_id}: last event status {record.get('status')!r} != registry {task.get('status')!r}")
+        claim = task.get("claim") or {}
+        if claim.get("agent") and record.get("event") in {"claim", "renew", "takeover"}:
+            if record.get("agent") != claim.get("agent"):
+                errors.append(f"{task_id}: last claim event agent does not match registry claim")
+    return errors
+
+
+def require_agent(args) -> str:
+    agent = args.agent or os.environ.get("WORK_AGENT")
+    if not agent:
+        raise WorkError("mutating commands require --agent or WORK_AGENT (e.g. opencode/iam-agent-3)")
+    return agent
+
+
+# --------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="task",
+        description="Central work-coordination CLI (claims, leases, transitions, board sync).",
+    )
+    parser.add_argument("--root", default=os.environ.get("WORK_HOME", str(HOME)),
+                        help="work home directory (default: this script's directory)")
+    parser.add_argument("--agent", default=None, help="agent identity for mutations")
+    parser.add_argument("--now", default=None, help="override clock (ISO-8601, testing only)")
+    parser.add_argument("--store", choices=["sqlite"], default="sqlite",
+                        help="storage backend (sqlite only; the file backend is retired)")
+    parser.add_argument("--db", default=os.environ.get("WORK_DB") or str(Path.home() / ".local/state/loom/work.db"),
+                        help="sqlite database path (default ~/.local/state/loom/work.db)")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--agent", default=argparse.SUPPRESS,
+                        help="agent identity (may follow the subcommand)")
+    common.add_argument("--now", default=argparse.SUPPRESS,
+                        help="override clock (may follow the subcommand)")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    create = sub.add_parser("create", help="create a central task", parents=[common])
+    create.add_argument("--id", required=True)
+    create.add_argument("--board", required=True)
+    create.add_argument("--title", required=True)
+    create.add_argument("--goal", default=None)
+    create.add_argument("--program", default=None)
+    create.add_argument("--owner-repo", default=None)
+    create.add_argument("--status", default="draft", choices=["draft", "planned", "ready"])
+    create.add_argument("--depends-on", action="append", default=[])
+    create.add_argument("--write-path", action="append", default=[])
+    create.add_argument("--acceptance", action="append", default=[])
+    create.set_defaults(func=cmd_create)
+
+    listing = sub.add_parser("list", help="list or filter tasks", parents=[common])
+    listing.add_argument("--board")
+    listing.add_argument("--state", help="comma-separated statuses")
+    listing.add_argument("--mine")
+    listing.add_argument("--ready", action="store_true", help="only claimable tasks")
+    listing.add_argument("--awaiting", choices=["human", "agent"],
+                         help="blocked tasks waiting on that kind of decision")
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(func=cmd_list)
+
+    show = sub.add_parser("show", help="show one task", parents=[common])
+    show.add_argument("task")
+    show.add_argument("--json", action="store_true")
+    show.set_defaults(func=cmd_show)
+
+    claim = sub.add_parser("claim", help="claim a ready task with a lease", parents=[common])
+    claim.add_argument("task")
+    claim.add_argument("--revision", type=int, required=True)
+    claim.add_argument("--ttl", default=DEFAULT_TTL)
+    claim.set_defaults(func=cmd_claim)
+
+    renew = sub.add_parser("renew", help="heartbeat and extend a live lease", parents=[common])
+    renew.add_argument("task")
+    renew.add_argument("--revision", type=int, required=True)
+    renew.add_argument("--ttl", default=DEFAULT_TTL)
+    renew.set_defaults(func=cmd_renew)
+
+    release = sub.add_parser("release", help="return a claimed task to ready", parents=[common])
+    release.add_argument("task")
+    release.add_argument("--revision", type=int, required=True)
+    release.add_argument("--reason", required=True)
+    release.set_defaults(func=cmd_release)
+
+    takeover = sub.add_parser("takeover", help="take an expired lease with a recorded reason", parents=[common])
+    takeover.add_argument("task")
+    takeover.add_argument("--revision", type=int, required=True)
+    takeover.add_argument("--reason", required=True)
+    takeover.add_argument("--ttl", default=DEFAULT_TTL)
+    takeover.set_defaults(func=cmd_takeover)
+
+    transition = sub.add_parser("transition", help="move a task through the state machine", parents=[common])
+    transition.add_argument("task")
+    transition.add_argument("--revision", type=int, required=True)
+    transition.add_argument("--to", required=True, choices=STATE_ORDER)
+    transition.add_argument("--evidence")
+    transition.add_argument("--reviewer")
+    transition.add_argument("--review-answer", type=int)
+    transition.add_argument("--integrated-source")
+    transition.add_argument("--decision", choices=["approve", "reject"])
+    transition.add_argument("--severity", choices=["critical", "high", "medium", "low", "info"])
+    transition.add_argument("--needs", choices=["human", "agent"],
+                            help="who can resolve a blocked task (default agent)")
+    transition.add_argument("--reason")
+    transition.set_defaults(func=cmd_transition)
+
+    events = sub.add_parser("events", help="read or verify the audit log", parents=[common])
+    events.add_argument("--task")
+    events.add_argument("--limit", type=int)
+    events.add_argument("--json", action="store_true")
+    events.add_argument("--verify", action="store_true")
+    events.set_defaults(func=cmd_events)
+
+    genesis = sub.add_parser("genesis", help="write the single genesis event (bootstrap)", parents=[common])
+    genesis.set_defaults(func=cmd_genesis)
+
+    edge = sub.add_parser("edge", help="inspect or edit cross-task dependency edges", parents=[common])
+    edge.add_argument("action", choices=["add", "list", "remove"])
+    edge.add_argument("--from", dest="source")
+    edge.add_argument("--to", dest="target")
+    edge.add_argument("--kind", default="depends-on", choices=["depends-on", "provider-parity"])
+    edge.set_defaults(func=cmd_edge)
+
+    board = sub.add_parser("board", help="list boards or materialise a packet board", parents=[common])
+    board.add_argument("action", choices=["list", "sync", "import", "titles"])
+    board.add_argument("--board")
+    board.add_argument("--program", help="namespace for `board import` (e.g. iam)")
+    board.add_argument("--check", action="store_true")
+    board.set_defaults(func=cmd_board)
+
+    reconcile = sub.add_parser("reconcile", help="compare or adopt board packet statuses", parents=[common])
+    reconcile.add_argument("--board", required=True)
+    reconcile.add_argument("--apply", action="store_true")
+    reconcile.add_argument("--reason")
+    reconcile.set_defaults(func=cmd_reconcile)
+
+    ask = sub.add_parser("ask", help="ask another agent a question about a task", parents=[common])
+    ask.add_argument("task")
+    ask.add_argument("--to", required=True, help="agent identity expected to answer")
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--review-source", help="full Git commit for a green review submission")
+    ask.add_argument("--review-base", help="full base commit, defaulting to the first parent")
+    ask.add_argument("--review-evidence", help="evidence locator, defaulting to existing task evidence")
+    ask.add_argument("--needed-by", dest="needed_by", default=None,
+                     help="ISO date or datetime the answer is needed by")
+    ask.set_defaults(func=cmd_ask)
+
+    answer = sub.add_parser("answer", help="answer a question event", parents=[common])
+    answer.add_argument("task")
+    answer.add_argument("--question", type=int, required=True, help="seq of the ask event")
+    answer.add_argument("--decision", required=True)
+    answer.add_argument("--note", default=None)
+    answer.set_defaults(func=cmd_answer)
+
+    inbox = sub.add_parser("inbox", help="list questions addressed to an agent", parents=[common])
+    inbox.add_argument("--task")
+    inbox.add_argument("--all", action="store_true", help="include already answered questions")
+    inbox.add_argument("--json", action="store_true")
+    inbox.set_defaults(func=cmd_inbox)
+
+    decisions = sub.add_parser("decisions", help="what needs the owner, and nothing else", parents=[common])
+    decisions.add_argument("--owner", default=None, help="owner identity (default WORK_OWNER or hritvik)")
+    decisions.add_argument("--json", action="store_true")
+    decisions.set_defaults(func=cmd_decisions)
+
+    tick = sub.add_parser("tick", help="policy preview: what would be claimed and launched", parents=[common])
+    tick.add_argument("--max-implementer", type=int, default=3)
+    tick.add_argument("--max-reviewer", type=int, default=2)
+    tick.add_argument("--max-integrator", type=int, default=1)
+    tick.add_argument("--json", action="store_true")
+    tick.set_defaults(func=cmd_tick)
+
+    migrate = sub.add_parser("migrate", help="copy a file work home into SQLite", parents=[common])
+    migrate.add_argument("--from", dest="source", default=None, help="work home to read (default --root)")
+    migrate.add_argument("--to", required=True, help="SQLite database file to create")
+    migrate.add_argument("--force", action="store_true", help="replace events already in the target")
+    migrate.set_defaults(func=cmd_migrate)
+
+    export = sub.add_parser("export", help="render the store as YAML or JSON", parents=[common])
+    export.add_argument("--format", choices=["yaml", "json"], default="yaml")
+    export.add_argument("--out", help="write to a file instead of stdout")
+    export.set_defaults(func=cmd_export)
+
+    search = sub.add_parser("search", help="find tasks by text instead of namespace", parents=[common])
+    search.add_argument("terms", nargs="+")
+    search.add_argument("--limit", type=int)
+    search.add_argument("--json", action="store_true")
+    search.set_defaults(func=cmd_search)
+
+    dependents = sub.add_parser("dependents", help="who is waiting on a task", parents=[common])
+    dependents.add_argument("task")
+    dependents.add_argument("--json", action="store_true")
+    dependents.set_defaults(func=cmd_dependents)
+
+    graph = sub.add_parser("graph", help="render the dependency graph", parents=[common])
+    graph.add_argument("--program")
+    graph.add_argument("--board")
+    graph.add_argument("--task", help="focus on one task with its dependencies and dependents")
+    graph.add_argument("--open", action="store_true", help="only unfinished tasks")
+    graph.add_argument("--format", choices=["text", "mermaid", "dot", "html"], default="text")
+    graph.add_argument("--out", help="output path for --format html (default task-graph.html)")
+    graph.add_argument("--direction", choices=["lr", "tb"], default="lr",
+                       help="left-to-right (default) or top-to-bottom, which fits narrow screens")
+    graph.set_defaults(func=cmd_graph)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "board" and args.action == "sync" and not args.board:
+        parser.error("board sync requires --board")
+    store = make_store(Path(args.root).expanduser(), args.store, args.db)
+    try:
+        with store.lock():
+            return args.func(args, store)
+    except WorkError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

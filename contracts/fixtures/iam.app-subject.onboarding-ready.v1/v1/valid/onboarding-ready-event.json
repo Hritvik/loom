@@ -1,0 +1,8 @@
+{"schema":"https://contracts.distracted.dev/iam/events/iam.app-subject.onboarding-ready.v1.schema.json","instance":{
+  "eventId":"evt_0123456789abcdef","eventType":"iam.app-subject.onboarding-ready.v1","schemaVersion":1,
+  "occurredAt":"2026-10-23T10:15:30Z","producer":"iam","environment":"test",
+  "aggregate":{"type":"APP_ONBOARDING","id":"act_0123456789abcdef","version":1},
+  "correlationId":"correlation-001","causationId":"command-001",
+  "destination":{"appRegistrationId":"dutch-development"},
+  "payload":{"appRegistrationId":"dutch-development","appSubject":"aps_0123456789abcdefghijkL","activationId":"act_0123456789abcdef","activationState":"ACTIVE","activationVersion":1,"onboardingReason":"FIRST_ACTIVATION","onboardingVersion":1,"requiredProfileState":"PROFILE_REQUIRED"}
+}}

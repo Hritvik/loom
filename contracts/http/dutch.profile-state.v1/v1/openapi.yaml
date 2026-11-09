@@ -1,0 +1,383 @@
+openapi: 3.1.1
+info:
+  title: Dutch gateway foundation API
+  version: 2.0.0
+  description: >-
+    Dutch-owned profile surfaces. Profile state is separate from the gated profile resource (D-13).
+    No response exposes the App Subject, a global IAM identity, an identifier, a credential, an
+    authorization code or a token.
+paths:
+  /api/v1/me/profile-state:
+    get:
+      operationId: getProfileState
+      description: Returns only the honest profile state and safe retry guidance.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: The current profile state.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/me:
+    get:
+      operationId: getCurrentMemberProfile
+      description: >-
+        Returns 409 profile_required until UMS has created the member profile, then the closed
+        Dutch-owned Member Profile.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: The Dutch-owned member profile.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileReadyResponse'
+        '409':
+          description: The profile is required but not ready.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileRequiredResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/notifications/devices:
+    get:
+      operationId: gatewayNotificationDevices
+      description: Forwarded to the Notification service; device semantics live there.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: The owning service response is proxied unchanged.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError' 
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: gatewayRegisterDevice
+      description: Forwarded to the Notification service; device semantics live there.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: The owning service response is proxied unchanged.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError' 
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/privacy/export:
+    get:
+      operationId: gatewayPrivacyExport
+      description: Forwarded to the Ledger privacy export.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: The owning service response is proxied unchanged.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError' 
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/reports:
+    post:
+      operationId: gatewayCreateReport
+      description: Forwarded to the Ledger safety-report intake.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationIdHeader'
+      responses:
+        '200':
+          description: The owning service response is proxied unchanged.
+          headers:
+            X-Correlation-ID:
+              $ref: '#/components/headers/CorrelationId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError' 
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /actuator/health/readiness:
+    get:
+      operationId: getReadiness
+      responses:
+        '200':
+          description: The service is ready to accept traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: The service is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    CorrelationIdHeader:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+  headers:
+    CorrelationId:
+      description: Request correlation identifier echoed by the service.
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+  responses:
+    Unauthorized:
+      description: Authentication is required.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Access is denied.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: The request rate limit was exceeded.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unavailable:
+      description: The service is temporarily unavailable.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: The request could not be completed.
+      headers:
+        X-Correlation-ID:
+          $ref: '#/components/headers/CorrelationId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status:
+              type: string
+              enum: [UP]
+    ProfileStateResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [PROFILE_REQUIRED, PROFILE_PROVISIONING, PROFILE_READY]
+            retryAfterSeconds:
+              type: integer
+              minimum: 1
+              maximum: 3600
+    ProfileReadyResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [memberId, displayName, profileState, lifecycleState]
+          properties:
+            memberId:
+              type: string
+              pattern: '^mem_[A-Za-z0-9_-]{16,128}$'
+            displayName:
+              type: string
+              minLength: 1
+              maxLength: 120
+            profileState:
+              type: string
+              const: PROFILE_READY
+            lifecycleState:
+              type: string
+              enum: [ACTIVE, SUSPENDED, DEPARTED]
+    ProfileRequiredResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, correlationId]
+          properties:
+            code:
+              const: profile_required
+            message:
+              const: Complete your profile to continue.
+            correlationId:
+              type: string
+              pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+            details:
+              type: array
+              maxItems: 16
+              items:
+                type: object
+                additionalProperties: false
+                required: [field, code]
+                properties:
+                  field:
+                    type: string
+                    pattern: '^[a-zA-Z][a-zA-Z0-9]{0,63}$'
+                  code:
+                    enum: [missing, malformed, out_of_range]
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, correlationId]
+          properties:
+            code:
+              type: string
+              enum: [profile_required, invalid_request, unauthorized, forbidden, not_found,
+                rate_limited, internal_error, service_unavailable]
+            message:
+              type: string
+              enum: [Complete your profile to continue., Request is invalid, Authentication is required,
+                Access is denied, Resource was not found, Request rate limit exceeded,
+                Request could not be completed, Service is temporarily unavailable]
+            correlationId:
+              type: string
+              pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+            details:
+              type: array
+              maxItems: 16
+              items:
+                type: object
+                additionalProperties: false
+                required: [field, code]
+                properties:
+                  field:
+                    type: string
+                    pattern: '^[a-zA-Z][a-zA-Z0-9]{0,63}$'
+                  code:
+                    enum: [missing, malformed, out_of_range]
+          allOf:
+            - oneOf:
+                - properties: {code: {const: profile_required}, message: {const: Complete your profile to continue.}}
+                - properties: {code: {const: invalid_request}, message: {const: Request is invalid}}
+                - properties: {code: {const: unauthorized}, message: {const: Authentication is required}}
+                - properties: {code: {const: forbidden}, message: {const: Access is denied}}
+                - properties: {code: {const: not_found}, message: {const: Resource was not found}}
+                - properties: {code: {const: rate_limited}, message: {const: Request rate limit exceeded}}
+                - properties: {code: {const: internal_error}, message: {const: Request could not be completed}}
+                - properties: {code: {const: service_unavailable}, message: {const: Service is temporarily unavailable}}

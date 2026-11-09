@@ -1,0 +1,23 @@
+kind: work-coordination-home
+version: 1
+store: sqlite
+registry: ~/.local/state/loom/work.db
+
+artifact_roots:
+  decisions: decisions
+  evidence: evidence
+
+artifacts:
+  cli: task
+  store: store.py
+  schema: schemas/task.schema.json
+  validator: validate_work.py
+  tests: tests
+  a2a: a2a/server.py
+  mcp: mcp/server.py
+  programs: programs
+
+policy:
+  authoritative: true
+  allow_product_repo_task_copies: false
+  status_changes_require_events: true

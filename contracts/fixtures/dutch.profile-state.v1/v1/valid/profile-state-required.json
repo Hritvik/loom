@@ -1,0 +1,6 @@
+{
+  "data": {
+    "state": "PROFILE_REQUIRED",
+    "retryAfterSeconds": 5
+  }
+}
