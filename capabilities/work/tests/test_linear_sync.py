@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from linear_sync import SyncError, marker, mirror, ordered_cards
@@ -54,6 +55,26 @@ class LinearSyncTest(unittest.TestCase):
         self.assertIn(rows[0]["url"], rows[1]["description"])
         self.assertEqual(self.sync(), {"created": 0, "updated": 0, "unchanged": 2})
         self.assertEqual(len(self.client.writes), 2)
+
+    def test_linear_markdown_rewrites_are_not_treated_as_updates(self):
+        """Linear saves `- ` bullets as `* ` and wraps link destinations in angle brackets."""
+        self.sync()
+        for row in self.client.rows.values():
+            description = row["description"]
+            description = re.sub(r"^- ", "* ", description, flags=re.MULTILINE)
+            description = re.sub(r"\]\(([^)]+)\)", r"](<\1>)", description)
+            row["description"] = description
+
+        before = len(self.client.writes)
+        self.assertEqual(self.sync(), {"created": 0, "updated": 0, "unchanged": 2})
+        self.assertEqual(len(self.client.writes), before)
+
+    def test_a_real_change_still_updates_after_normalisation(self):
+        self.sync()
+        for row in self.client.rows.values():
+            row["description"] = re.sub(r"^- ", "* ", row["description"], flags=re.MULTILINE)
+        self.cards[0]["lane"] = "claimable"
+        self.assertEqual(self.sync()["updated"], 1)
 
     def test_updates_only_managed_fields_and_preserves_notes(self):
         self.sync()

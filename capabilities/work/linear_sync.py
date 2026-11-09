@@ -127,6 +127,27 @@ def index_issues(rows, desired_ids):
     return indexed
 
 
+def managed_slice(description: str) -> str | None:
+    """The managed section of a description, or None when it has no marker."""
+    match = MARKER_PATTERN.search(description or "")
+    if not match:
+        return None
+    end = description.find(END_MARKER, match.end())
+    if end == -1:
+        return None
+    return description[match.start():end + len(END_MARKER)]
+
+
+def normalise_markdown(text: str) -> str:
+    """Undo the rewrites Linear applies on save, so an unchanged card compares equal.
+
+    Linear turns `- ` bullets into `* ` and wraps link destinations in angle brackets.
+    """
+    text = re.sub(r"^\* ", "- ", text, flags=re.MULTILINE)
+    text = re.sub(r"\]\(<([^>]+)>\)", r"](\1)", text)
+    return "\n".join(line.rstrip() for line in text.splitlines())
+
+
 def merge_description(existing, managed):
     if not existing:
         return managed
@@ -154,11 +175,13 @@ def mirror(client, config, destination, cards, *, apply):
     for card in ordered:
         task_id = card["id"]
         issue = issues.get(task_id)
+        managed = managed_description(card, issues)
+        current = managed_slice(issue["description"]) if issue else None
+        description_changed = current is None or (
+            normalise_markdown(current) != normalise_markdown(managed))
         fields = {
             "title": f"[{task_id}] {card['title']}"[:250],
-            "description": merge_description(
-                issue.get("description") if issue else None, managed_description(card, issues),
-            ),
+            "description": merge_description(issue.get("description") if issue else None, managed),
             "stateId": states[card["lane"]],
         }
         if not issue:
@@ -169,14 +192,21 @@ def mirror(client, config, destination, cards, *, apply):
                 })
             result["created"] += 1
             continue
-        changed = {key: value for key, value in fields.items() if issue.get(key) != value}
+        changed = {key: value for key, value in fields.items()
+                   if key != "description" and issue.get(key) != value}
+        if description_changed:
+            changed["description"] = fields["description"]
         if changed and apply:
             fresh = client.get_issue(issue["id"], config["team_id"], config["project_id"])
             current = index_issues([fresh], {fresh["id"]: task_id})[task_id]
             if current.get("archivedAt"):
                 raise SyncError(f"{task_id} was archived during the sync")
-            fields["description"] = merge_description(current["description"], managed_description(card, issues))
-            changed = {key: value for key, value in fields.items() if current.get(key) != value}
+            managed = managed_description(card, issues)
+            fields["description"] = merge_description(current["description"], managed)
+            changed = {key: value for key, value in fields.items()
+                       if key != "description" and current.get(key) != value}
+            if normalise_markdown(managed_slice(current["description"]) or "") != normalise_markdown(managed):
+                changed["description"] = fields["description"]
         if changed:
             if apply:
                 issues[task_id] = client.update_issue(issue["id"], changed)
