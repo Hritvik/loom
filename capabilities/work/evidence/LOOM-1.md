@@ -60,3 +60,18 @@ nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validato
 - A2A agent card tags and examples, and the MCP input-schema descriptions, no longer name this
   portfolio's programs.
 - `work-home.yaml` marks `programs` optional; the remaining personal example paths are genericised.
+
+## Third rework after re-review (event 830, changes requested)
+
+The second pass fixed the named lines but left the same class of leak in neighbouring files. This
+pass replaced every remaining portfolio identifier in the engine with neutral ones:
+
+- `mcp/server.py` docstring and two input-schema descriptions; `mcp/README.md`, `a2a/README.md`,
+  `capabilities/work/README.md`, `PROTOCOL.md` examples
+- `task` CLI error-message examples and the A2A contextId sample
+- test fixtures across `test_work.py`, `test_mcp.py`, `test_linear_projection.py`,
+  `test_linear_sync.py`
+- the personal repository link in the top-level README
+
+Verification: `grep -rn -I -E "\biam\b|\bums\b|\bdutch\b|portfolio-contracts"` over the tracked tree
+returns nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validator PASS.

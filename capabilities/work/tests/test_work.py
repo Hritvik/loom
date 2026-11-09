@@ -1204,7 +1204,7 @@ class WorkCLITest(unittest.TestCase):
                 "artifact": "http/demo.thing.v1/v1/openapi.yaml",
                 "sha256": digest,
                 "fixtures": {"valid": [], "invalid": []},
-                "consumers": [{"service": "dutch",
+                "consumers": [{"service": "gamma",
                                "pin": {"sha256": digest, "commit": "abc1234"}}],
                 "gate": "demo/W-1",
                 "source": {"repo": "~/repositories/demo", "path": "contracts/x.yaml",
@@ -1240,7 +1240,7 @@ class WorkCLITest(unittest.TestCase):
         (programs / "demo.yaml").write_text(yaml.safe_dump({
             "kind": "integration-plan", "version": 1,
             "contracts": [{"id": "ghost.thing.v1", "kind": "http", "owner": "demo",
-                           "producers": ["demo"], "consumers": ["dutch"]}],
+                           "producers": ["demo"], "consumers": ["gamma"]}],
         }), encoding="utf-8")
         result = validate(self.ws.root, "--contracts", str(caps))
         self.assertIn("ghost.thing.v1 is not in contracts/registry.yaml", result.stdout)

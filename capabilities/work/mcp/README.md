@@ -12,8 +12,8 @@ The snippet contains absolute paths and optional defaults:
 ```bash
 python3 mcp/server.py \
   --root "/Users/…/capabilities/work" \
-  --repo iam \
-  --agent opencode/iam-agent \
+  --repo alpha \
+  --agent opencode/alpha-agent \
   --print-config opencode
 ```
 
@@ -51,14 +51,14 @@ write-path conflicts, review independence and the hash-chained event log.
 An agent asks for status:
 
 ```json
-{"name": "work_status", "arguments": {"repo": "ums"}}
+{"name": "work_status", "arguments": {"repo": "beta"}}
 ```
 
 Then reads and claims:
 
 ```json
-{"name": "work_get", "arguments": {"task": "ums/W-12"}}
-{"name": "work_claim", "arguments": {"task": "ums/W-12", "revision": 0, "ttl": "45m"}}
+{"name": "work_get", "arguments": {"task": "beta/W-3"}}
+{"name": "work_claim", "arguments": {"task": "beta/W-3", "revision": 0, "ttl": "45m"}}
 ```
 
 The claim result includes the new revision, lease expiry and agent. A stale revision, live lease,
@@ -70,8 +70,8 @@ Local MCP clients start the server in the workspace, so the server infers both d
 path:
 
 - `repo` = the closest parent directory matching a registered board's repository name
-  (`.../repositories/iam/docs` → `iam`).
-- `agent` = `<repo>-agent` (`iam-agent`) when no `--agent` / `WORK_AGENT` is set.
+  (`.../repositories/alpha/docs` → `alpha`).
+- `agent` = `<repo>-agent` (`alpha-agent`) when no `--agent` / `WORK_AGENT` is set.
 
 Explicit `--repo`/`--agent`, `WORK_REPO`/`WORK_AGENT`, or tool arguments override the inference.
 This is what lets one global server work in every repository without per-repo config. If the path

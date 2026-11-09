@@ -103,20 +103,20 @@ scope, evidence or write paths.
 ## Pick up work
 
 ```bash
-export WORK_AGENT=opencode/iam-agent-3      # identity recorded in every event
+export WORK_AGENT=opencode/alpha-agent-3      # identity recorded in every event
 
 ./task list --ready                          # claimable: ready + deps met + no path conflict
-./task show iam/W-12
-./task claim iam/W-12 --revision 0 --ttl 45m
+./task show alpha/W-1
+./task claim alpha/W-1 --revision 0 --ttl 45m
 ```
 
 `claim` is a compare-and-swap: the `--revision` you pass must equal the registry revision. A stale
 revision fails, a live lease held by another agent fails, and overlapping `write_paths` fail.
 
 ```bash
-./task renew   iam/W-12 --revision 1 --ttl 45m
-./task release iam/W-12 --revision 2 --reason "handing back for review"
-./task takeover iam/W-12 --revision 3 --reason "lease expired; agent went silent"
+./task renew   alpha/W-1 --revision 1 --ttl 45m
+./task release alpha/W-1 --revision 2 --reason "handing back for review"
+./task takeover alpha/W-1 --revision 3 --reason "lease expired; agent went silent"
 ```
 
 Heartbeat with `renew` before the lease expires. `takeover` only works after expiry and always
@@ -125,12 +125,12 @@ records the previous agent and a reason. Mutating another agent's live claim is 
 ## Move work through the state machine
 
 ```bash
-./task transition iam/W-12 --revision 1 --to red
-./task transition iam/W-12 --revision 2 --to green
-./task transition iam/W-12 --revision 3 --to reviewed \
+./task transition alpha/W-1 --revision 1 --to red
+./task transition alpha/W-1 --revision 2 --to green
+./task transition alpha/W-1 --revision 3 --to reviewed \
   --reviewer reviewer-7 --decision approve
-./task transition iam/W-12 --revision 4 --to integrated --evidence evidence/W-12.md
-./task transition iam/W-12 --revision 5 --to accepted   --evidence evidence/W-12.md
+./task transition alpha/W-1 --revision 4 --to integrated --evidence evidence/W-12.md
+./task transition alpha/W-1 --revision 5 --to accepted   --evidence evidence/W-12.md
 ```
 
 Rules enforced by the CLI:
@@ -148,16 +148,16 @@ Rules enforced by the CLI:
 New work starts here, not in a repository.
 
 ```bash
-./task create --id iam/W-15 --board iam.program --title "…" --goal "…" \
-  --status ready --depends-on ums/W-18 --write-path src/main/java/...
+./task create --id alpha/W-15 --board alpha.program --title "…" --goal "…" \
+  --status ready --depends-on beta/W-1 --write-path src/main/java/...
 ```
 
 Then add the detailed work-item section to the owning document (program) or materialise the packet:
 
 ```bash
-./task board sync  --board dutch.ref.w12
-./task board sync  --board dutch.ref.w12 --check   # CI: non-zero if stale
-./task board import --board iam.w07 --program iam  # adopt existing packets
+./task board sync  --board gamma.board
+./task board sync  --board gamma.board --check   # CI: non-zero if stale
+./task board import --board alpha.w07 --program alpha  # adopt existing packets
 ```
 
 ## A2A façade
@@ -198,8 +198,8 @@ task, gate and contract reference exists.
 ## Reconcile
 
 ```bash
-./task reconcile --board dutch.ref.w12                         # report drift, exit 1
-./task reconcile --board dutch.ref.w12 --apply --reason "board authoritative"
+./task reconcile --board gamma.board                         # report drift, exit 1
+./task reconcile --board gamma.board --apply --reason "board authoritative"
 ```
 
 `--apply` adopts the board status for imported/board-sourced tasks and writes a `reconcile` event.
@@ -209,7 +209,7 @@ Never silently overwrite another agent; record a reason.
 
 ```bash
 ./task events --verify                 # hash chain + terminal state vs registry
-./task events --task iam/W-12
+./task events --task alpha/W-1
 python3 validate_work.py               # full cross-repo check
 python3 -m unittest discover -s tests -v   # 56 tests across CLI, validator, A2A, MCP, surface and plans
 ```
@@ -226,10 +226,10 @@ Claims say who is working; messages say what is blocking. A question is an event
 message, so it survives session ends and is attributable.
 
 ```bash
-./task ask dutch-ref/W12-R --to opencode/reviewer --question "Who owns the privacy review?" \
-  --needed-by 2026-11-07 --agent opencode/dutch-agent
+./task ask gamma/R-1 --to opencode/reviewer --question "Who owns the privacy review?" \
+  --needed-by 2026-11-07 --agent opencode/gamma-agent
 ./task inbox --agent opencode/reviewer          # open questions only; --all includes answered
-./task answer dutch-ref/W12-R --question 454 --decision "I do, starting Monday" \
+./task answer gamma/R-1 --question 454 --decision "I do, starting Monday" \
   --agent opencode/reviewer
 ```
 
@@ -250,12 +250,12 @@ and edges at call time; nothing is cached.
 ```bash
 ./task search avatar                      # id, title, goal, program, board, write paths
 ./task search "association" --limit 5
-./task dependents ums/W-18                # who is blocked on it, directly and transitively
+./task dependents beta/W-1                # who is blocked on it, directly and transitively
 ./task graph --open --format html         # the whole picture, written to task-graph.html
-./task graph --task ums/W-18              # one chain: its dependencies and dependents
+./task graph --task beta/W-1              # one chain: its dependencies and dependents
 ./task list --ready                       # ranked by how much downstream work each releases
 ./task list --awaiting human              # decisions only the owner can make
-./task show dutch-ref/W12-R               # includes a `blocks:` line
+./task show gamma/R-1               # includes a `blocks:` line
 ```
 
 - `--ready` sorts by transitive downstream weight and prints `+N downstream`, so a task that
@@ -272,7 +272,7 @@ and edges at call time; nothing is cached.
 
 ## Rules
 
-- IDs are namespaced (`iam/W-12`, `ums/W-6`, `dutch-ref/W11-A`) and are never renumbered or reused.
+- IDs are namespaced (`alpha/W-1`, `beta/W-6`, `gamma/W11-A`) and are never renumbered or reused.
 - The registry owns identity/edges/claims; the repo board owns packet detail and evidence.
 - A shared contract has exactly one active owner; other repos pin it read-only.
 - Every mutation is CAS + a recorded agent identity; every acceptance has evidence.

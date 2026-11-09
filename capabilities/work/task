@@ -1883,7 +1883,7 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
 def require_agent(args) -> str:
     agent = args.agent or os.environ.get("WORK_AGENT")
     if not agent:
-        raise WorkError("mutating commands require --agent or WORK_AGENT (e.g. opencode/iam-agent-3)")
+        raise WorkError("mutating commands require --agent or WORK_AGENT (e.g. opencode/alpha-agent-3)")
     return agent
 
 

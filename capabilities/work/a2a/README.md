@@ -18,7 +18,7 @@ The Agent Card declares `JSONRPC` / protocol `1.0`, `streaming: false`,
 
 | A2A method | Behaviour |
 |---|---|
-| `ListTasks` | List central tasks; `contextId` is the program (`iam`, `ums`, `dutch-ref`); filters `status`, `statusTimestampAfter`; `pageSize` 1–100 with opaque `pageToken`; `includeArtifacts`; `historyLength`. Each `Task.metadata` carries `claimable` and `blockedBy` |
+| `ListTasks` | List central tasks; `contextId` is the program (`alpha`, `beta`, `gamma-ref`); filters `status`, `statusTimestampAfter`; `pageSize` 1–100 with opaque `pageToken`; `includeArtifacts`; `historyLength`. Each `Task.metadata` carries `claimable` and `blockedBy` |
 | `GetTask` | One task by registry id, with `metadata.revision`, claim, dependencies, write paths, evidence and review |
 | `SendMessage` | Mutating actions against an existing task, delegated to the `task` CLI |
 | `CancelTask` | Moves a ready/claimed/red/green task to `released` (A2A `TASK_STATE_CANCELED`) with a reason |
@@ -40,9 +40,9 @@ The message carries one `data` part. Identity is `message.metadata.agent`, falli
     "message": {
       "role": "ROLE_USER",
       "messageId": "msg-1",
-      "taskId": "iam/W-12",
+      "taskId": "alpha/W-1",
       "parts": [{"data": {"action": "claim", "revision": 0, "ttl": "45m"}}],
-      "metadata": {"agent": "opencode/iam-agent-3"}
+      "metadata": {"agent": "opencode/alpha-agent-3"}
     }
   }
 }
@@ -70,7 +70,7 @@ curl -s http://127.0.0.1:8787/.well-known/agent-card.json | jq .skills
 curl -s http://127.0.0.1:8787/ \
   -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
   -d '{"jsonrpc":"2.0","id":1,"method":"ListTasks",
-       "params":{"contextId":"iam","status":"TASK_STATE_SUBMITTED","pageSize":10}}'
+       "params":{"contextId":"alpha","status":"TASK_STATE_SUBMITTED","pageSize":10}}'
 ```
 
 `SendMessage` returns the updated A2A `Task`; `ListTasks` returns

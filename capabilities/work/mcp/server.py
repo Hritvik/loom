@@ -196,7 +196,7 @@ def infer_repo(registry: Registry, start: Path | str | None = None) -> str | Non
     """Infer the repo default from the workspace path.
 
     Local MCP servers run with cwd set to the workspace, so an agent working in
-    `.../repositories/iam/docs` gets `iam` without any per-repo configuration.
+    `.../repositories/alpha/docs` gets `alpha` without any per-repo configuration.
     """
     names = known_repo_names(registry)
     if not names:
@@ -543,7 +543,7 @@ TOOL_DEFS = [
             "type": "object",
             "additionalProperties": False,
             "required": ["task"],
-            "properties": {"task": {"type": "string", "description": "Namespaced id, e.g. iam/W-12"}},
+            "properties": {"task": {"type": "string", "description": "Namespaced id, e.g. alpha/W-1"}},
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
@@ -660,7 +660,7 @@ TOOL_DEFS = [
         "description": (
             "Search central tasks by text across id, title, goal, program, board and write paths, "
             "so you do not need to know the namespace first. Use this when the question is "
-            "'where is the avatar work?' rather than 'what is in ums?'."),
+            "'where is the avatar work?' rather than 'what is in beta?'."),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,

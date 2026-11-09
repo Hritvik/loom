@@ -46,7 +46,7 @@ Agents working in a product repository should read
 This repository holds the coordination engine and nothing else. It does not hold portfolio planning
 content — maps, plans, specs and evidence live in a private planning repository — and it does not
 hold task state, which lives in the database. Interaction contracts live in
-[`portfolio-contracts`](https://github.com/Hritvik/portfolio-contracts); the validator checks them,
+`portfolio-contracts` (your own repository); the validator checks them,
 it does not own them.
 
 ## Licence

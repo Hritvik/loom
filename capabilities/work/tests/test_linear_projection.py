@@ -51,29 +51,29 @@ class LinearProjectionTest(unittest.TestCase):
 
     def test_scope_is_focus_and_transitive_prerequisites(self):
         cards = self.cards([
-            task(FOCUS, depends_on=["iam/DEP-1"]),
-            task("iam/DEP-1"),
-            task("ums/W-1", status="accepted"),
+            task(FOCUS, depends_on=["alpha/DEP-1"]),
+            task("alpha/DEP-1"),
+            task("beta/W-1", status="accepted"),
             task("chat/W-1"),
         ], edges=[
-            {"from": "iam/DEP-1", "to": "ums/W-1"},
+            {"from": "alpha/DEP-1", "to": "beta/W-1"},
             {"from": FOCUS, "to": "chat/W-1", "kind": "provider-parity"},
         ])
-        self.assertEqual(set(cards), {FOCUS, "iam/DEP-1", "ums/W-1"})
+        self.assertEqual(set(cards), {FOCUS, "alpha/DEP-1", "beta/W-1"})
         self.assertEqual(cards[FOCUS]["lane"], "blocked")
-        self.assertEqual(cards[FOCUS]["blockers"], ["iam/DEP-1"])
-        self.assertEqual(cards["iam/DEP-1"]["lane"], "claimable")
-        self.assertEqual(cards["ums/W-1"]["lane"], "integrated")
-        self.assertEqual(cards["ums/W-1"]["dependents"], [FOCUS, "iam/DEP-1"])
+        self.assertEqual(cards[FOCUS]["blockers"], ["alpha/DEP-1"])
+        self.assertEqual(cards["alpha/DEP-1"]["lane"], "claimable")
+        self.assertEqual(cards["beta/W-1"]["lane"], "integrated")
+        self.assertEqual(sorted(cards["beta/W-1"]["dependents"]), sorted([FOCUS, "alpha/DEP-1"]))
 
     def test_all_tasks_include_groups_dependencies_and_last_implementers(self):
         cards = self.cards([
-            task(FOCUS, status="green", depends_on=["iam/DEP-1"]),
-            task("iam/DEP-1", status="integrated"),
+            task(FOCUS, status="green", depends_on=["alpha/DEP-1"]),
+            task("alpha/DEP-1", status="integrated"),
             task("chat/W-1"),
         ], [event(FOCUS, 1, "transition", agent="author")], focus=None)
-        self.assertEqual(set(cards), {FOCUS, "iam/DEP-1", "chat/W-1"})
-        self.assertEqual(cards[FOCUS]["dependencies"], ["iam/DEP-1"])
+        self.assertEqual(set(cards), {FOCUS, "alpha/DEP-1", "chat/W-1"})
+        self.assertEqual(cards[FOCUS]["dependencies"], ["alpha/DEP-1"])
         self.assertEqual(cards[FOCUS]["blockers"], [])
         self.assertEqual(cards[FOCUS]["owner"], "alpha")
         self.assertEqual(cards[FOCUS]["implementer"], "author")
@@ -81,11 +81,11 @@ class LinearProjectionTest(unittest.TestCase):
 
     def test_write_conflicts_use_live_claims_outside_focus_without_exporting_paths(self):
         target = task(FOCUS, write_paths=["private/source/path"])
-        other = task("iam/DEP-1", status="claimed", write_paths=["private/source"],
+        other = task("alpha/DEP-1", status="claimed", write_paths=["private/source"],
                      claim={"agent": "implementer-a", "lease_expires": AFTER_NOW})
         cards = self.cards([target, other])
         self.assertEqual(cards[FOCUS]["lane"], "blocked")
-        self.assertEqual(cards[FOCUS]["blockers"], ["iam/DEP-1"])
+        self.assertEqual(cards[FOCUS]["blockers"], ["alpha/DEP-1"])
         self.assertNotIn("private/source", json.dumps(cards))
         other["claim"]["lease_expires"] = BEFORE_NOW
         self.assertEqual(self.cards([target, other])[FOCUS]["lane"], "claimable")

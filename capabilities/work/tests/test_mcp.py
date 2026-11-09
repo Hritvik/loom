@@ -372,7 +372,7 @@ class MCPTest(unittest.TestCase):
     def test_print_config_contains_absolute_paths(self):
         result = subprocess.run(
             [sys.executable, str(SERVER), "--root", str(self.ws.root),
-             "--repo", "iam", "--agent", "opencode/iam-agent", "--print-config", "opencode"],
+             "--repo", "alpha", "--agent", "opencode/alpha-agent", "--print-config", "opencode"],
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         document = json.loads(result.stdout)

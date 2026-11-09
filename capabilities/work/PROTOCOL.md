@@ -68,7 +68,7 @@ A claim is a compare-and-swap on the task revision plus a time-boxed lease:
 
 ```yaml
 claim:
-  agent: opencode/iam-agent-3
+  agent: opencode/alpha-agent-3
   base_revision: 42
   lease_expires: 2026-10-31T12:30:00Z
   heartbeat: 2026-10-31T12:00:00Z
@@ -96,7 +96,7 @@ Rules enforced by the CLI:
 Every mutation appends one hash-chained row to the `events` table:
 
 ```json
-{"seq":2,"ts":"2026-10-31T10:00:00Z","event":"claim","task":"iam/W-12","agent":"opencode/iam-agent-3","status":"claimed","revision":1,"lease_expires":"2026-10-31T10:30:00Z","prev":"<sha256 of previous line>"}
+{"seq":2,"ts":"2026-10-31T10:00:00Z","event":"claim","task":"alpha/W-1","agent":"opencode/alpha-agent-3","status":"claimed","revision":1,"lease_expires":"2026-10-31T10:30:00Z","prev":"<sha256 of previous line>"}
 ```
 
 `seq` is contiguous, `prev` chains each record to its predecessor, and the terminal event for every
