@@ -43,7 +43,7 @@ identical on all three surfaces.
 | `release` | Return a claimed task to the ready pool with a reason |
 | `takeover` | Take over an expired lease with a recorded reason |
 | `transition` | Move through the state machine, enforcing evidence and review |
-| `annotate` | Record an integration receipt for a task integrated before receipts existed |
+| `annotate` | Record an integration receipt for a task integrated or accepted before receipts existed |
 | `ask` | Ask another agent a question about a task |
 | `inbox` | List unanswered questions addressed to an agent |
 | `answer` | Answer a question addressed to you, once |

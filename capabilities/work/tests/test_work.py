@@ -938,6 +938,24 @@ class WorkCLITest(unittest.TestCase):
                             "--reason", "second attempt", expect=2)
         self.assertIn("already records an integration receipt", again.stderr)
 
+    def test_annotate_keeps_an_accepted_status(self):
+        first, second = self.git_repo()
+        self.ws.board["packets"].append(packet("W-9", "accepted", ["src/one"]))
+        (self.ws.repo / "docs" / "board.json").write_text(
+            json.dumps(self.ws.board, indent=2) + "\n")
+        self.ws.registry["tasks"].append(self.ws.task("demo/W-9", "accepted", ["src/one"]))
+        self.ws.save()
+
+        self.invoke("annotate", "demo/W-9", "--revision", "0",
+                    "--integrated-source", second, "--agent", "agent-a",
+                    "--reason", "migrated accepted task")
+
+        record = self.ws.task_record("demo/W-9")
+        self.assertEqual(record["status"], "accepted")
+        event = next(e for e in self.ws.events() if e.get("event") == "annotate")
+        self.assertEqual(event["status"], "accepted")
+        self.assertEqual(validate(self.ws.root).returncode, 0)
+
     def test_annotate_refuses_an_unprovable_commit(self):
         first, second = self.git_repo()
         self.integrated_task()
@@ -950,7 +968,7 @@ class WorkCLITest(unittest.TestCase):
         wrong_state = self.invoke("annotate", "demo/W-1", "--revision", "0",
                                   "--integrated-source", second, "--agent", "agent-a",
                                   "--reason", "not integrated", expect=2)
-        self.assertIn("only an integrated task can be annotated", wrong_state.stderr)
+        self.assertIn("only an integrated or accepted task can be annotated", wrong_state.stderr)
 
     def test_the_validator_surfaces_a_missing_integration_receipt(self):
         first, second = self.git_repo()

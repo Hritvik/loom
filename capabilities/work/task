@@ -1123,8 +1123,9 @@ def cmd_annotate(args, store: Store) -> int:
     registry = store.load()
     task = find_task(registry, args.task)
     require_revision(task, args.revision)
-    if task.get("status") != "integrated":
-        raise WorkError(f"only an integrated task can be annotated; {task['id']} is {task['status']!r}")
+    if task.get("status") not in {"integrated", "accepted"}:
+        raise WorkError(
+            f"only an integrated or accepted task can be annotated; {task['id']} is {task['status']!r}")
     if not args.reason:
         raise WorkError("annotate requires --reason explaining how the commit was established")
     history = task_history(store, task)
@@ -1145,9 +1146,9 @@ def cmd_annotate(args, store: Store) -> int:
             args.integrated_source, integration_tip, "--", *paths,
         ).returncode:
             raise WorkError(f"paths changed since --base differ in {ref}")
-    bump(task, "integrated", parse_now(args.now))
+    bump(task, task["status"], parse_now(args.now))
     store.save()
-    store.append_event(event="annotate", task=task["id"], agent=agent, status="integrated",
+    store.append_event(event="annotate", task=task["id"], agent=agent, status=task["status"],
                        revision=task["revision"], integrated_source=args.integrated_source,
                        integration_tip=integration_tip, base=args.base or None,
                        path_check="verified" if args.base else "skipped",
