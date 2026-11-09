@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1342,6 +1343,95 @@ def cmd_decisions(args, store: Store) -> int:
     return 0
 
 
+WORKER_IDENTITY = "opencode/loom-worker"
+WORKER_BRIEF = """You are a worker for one task in the portfolio work registry.
+
+Task: {task}
+Revision when claimed: {revision}
+Your identity: {agent}
+Owner repository: {repo}
+Write paths you may touch: {paths}
+
+Do this:
+1. `cd {work}` and read the task: `./task show {task}`.
+2. Work in {repo}. Stay inside the write paths above; editing outside them breaks the claim.
+3. Report progress through the registry, not chat: `./task transition {task} --revision N --to red`,
+   then `--to green` when tests pass. Every mutation needs the current revision.
+4. Write evidence to {evidence} in the repository, then ask for review:
+   `./task ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
+    --review-evidence {evidence}`
+5. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
+   `./task transition {task} --revision N --to blocked --needs human --reason "..."` and stop.
+6. Do not touch Linear. The projection is read-only.
+"""
+
+
+def launches(store: Store) -> list[dict]:
+    """Launch events, newest last."""
+    return [record for _, record in store.read_events() if record.get("event") == "launch"]
+
+
+def launch_state(store: Store, task_id: str) -> dict:
+    """The latest launch for a task, and how many have failed."""
+    history = [item for item in launches(store) if item.get("task") == task_id]
+    failed = sum(1 for item in history if item.get("state") == "failed")
+    return {"latest": history[-1] if history else {}, "failed": failed}
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[str]:
+    """Mark launches whose process is gone, and escalate tasks that keep failing."""
+    problems = []
+    for task in registry["tasks"]:
+        state = launch_state(store, task["id"])
+        latest = state["latest"]
+        if latest.get("state") != "pending" or pid_alive(latest.get("pid")):
+            continue
+        store.append_event(event="launch", task=task["id"], agent=WORKER_IDENTITY,
+                           state="failed", pid=latest.get("pid"),
+                           role=latest.get("role"), now=iso(now))
+        if state["failed"] + 1 >= 2:
+            problems.append(f"{task['id']}: two worker launches failed; needs a human")
+            if task.get("status") in {"claimed", "red", "green"}:
+                task["claim"] = None
+                task["status"] = "blocked"
+                task["blocked_needs"] = "human"
+                task["updated_at"] = iso(now)
+        elif task.get("status") in {"claimed", "red"}:
+            task["claim"] = None
+            task["status"] = "ready"
+            task["updated_at"] = iso(now)
+    if problems:
+        store.save()
+    return problems
+
+
+def spawn_worker(args, task: dict, role: str, work_home: Path) -> int | None:
+    """Start a headless agent for one task and return its pid."""
+    repo = Path(str(task.get("owner_repo") or ".")).expanduser()
+    evidence = task.get("evidence") or f"evidence/{task['id'].split('/')[-1]}.md"
+    brief = WORKER_BRIEF.format(
+        task=task["id"], revision=task.get("revision", 0), agent=WORKER_IDENTITY,
+        repo=repo, work=work_home,
+        paths=", ".join(task.get("write_paths") or []) or "(none declared)",
+        evidence=evidence,
+    )
+    command = shlex.split(args.worker_command) + [brief]
+    log_dir = Path.home() / ".local/state/loom"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = (log_dir / f"worker-{task['id'].replace('/', '-')}.log").open("ab")
+    process = subprocess.Popen(command, cwd=str(repo), stdout=log, stderr=log,
+                               start_new_session=True)
+    return process.pid
+
+
 def cmd_tick(args, store: Store) -> int:
     """One policy pass: what would be claimed and launched, and what is stale."""
     registry = store.load()
@@ -1392,9 +1482,29 @@ def cmd_tick(args, store: Store) -> int:
             chosen.append(item)
         else:
             held.append({**item, "reason": f"no {item['role']} slot (limit {limits[item['role']]})"})
+    problems = reconcile_launches(store, registry, now) if args.apply else []
+    launched = []
+    if args.apply:
+        work_home = Path(__file__).resolve().parent
+        for item in chosen:
+            task = find_task(store.load(), item["task"])
+            claim_args = argparse.Namespace(task=item["task"], revision=task.get("revision", 0),
+                                            ttl=args.ttl, agent=WORKER_IDENTITY, now=args.now)
+            try:
+                cmd_claim(claim_args, store)
+            except WorkError as exc:
+                problems.append(f"{item['task']}: {exc}")
+                continue
+            task = find_task(store.load(), item["task"])
+            pid = spawn_worker(args, task, item["role"], work_home)
+            store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
+                               role=item["role"], state="pending", pid=pid, now=args.now)
+            launched.append({"task": item["task"], "role": item["role"], "pid": pid})
+
     if args.json:
         print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
-                          "held": held, "expired": expired}, indent=2))
+                          "held": held, "expired": expired, "launched": launched,
+                          "problems": problems}, indent=2))
         return 0
     print(f"Tick preview — {iso(now)}")
     print("  capacity: " + "  ".join(
@@ -1420,7 +1530,12 @@ def cmd_tick(args, store: Store) -> int:
         print("\nExpired leases to release or take over:")
         for item in expired:
             print(f"  {item['task']:<22} {item['agent']}  expired {item['expired']}")
-    print("\nPreview only. Nothing was claimed; wiring --apply needs a worker that consumes launches.")
+    for item in launched:
+        print(f"  launched {item['task']} ({item['role']}) pid {item['pid']}")
+    for problem in problems:
+        print(f"ESCALATE {problem}")
+    if not args.apply:
+        print("\nPreview only. Pass --apply to claim and launch a worker for each chosen task.")
     return 0
 
 
@@ -2136,6 +2251,10 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--max-reviewer", type=int, default=2)
     tick.add_argument("--max-integrator", type=int, default=1)
     tick.add_argument("--json", action="store_true")
+    tick.add_argument("--apply", action="store_true", help="claim and launch a worker for each chosen task")
+    tick.add_argument("--ttl", default="90m", help="lease for a launched worker (default 90m)")
+    tick.add_argument("--worker-command", default="opencode run",
+                      help="headless agent command, shell-quoted (default: opencode run)")
     tick.set_defaults(func=cmd_tick)
 
     migrate = sub.add_parser("migrate", help="copy a file work home into SQLite", parents=[common])

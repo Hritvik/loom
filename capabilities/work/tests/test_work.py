@@ -1110,6 +1110,41 @@ class WorkCLITest(unittest.TestCase):
         wide = json.loads(self.invoke("tick", "--json", "--max-implementer", "5").stdout)["chosen"]
         self.assertEqual({item["task"] for item in wide}, {"demo/W-1", "demo/W-5"})
 
+    def test_tick_apply_claims_and_records_a_launch(self):
+        result = self.invoke("tick", "--apply", "--max-implementer", "1", "--ttl", "30m",
+                             "--worker-command", "/usr/bin/true", "--agent", "opencode/loom-worker",
+                             "--now", T0)
+        self.assertIn("launched demo/W-1", result.stdout)
+        record = self.ws.task_record("demo/W-1")
+        self.assertEqual(record["status"], "claimed")
+        self.assertEqual(record["claim"]["agent"], "opencode/loom-worker")
+
+        launch = next(event for event in self.ws.events() if event.get("event") == "launch")
+        self.assertEqual(launch["task"], "demo/W-1")
+        self.assertEqual(launch["state"], "pending")
+        self.assertIsInstance(launch["pid"], int)
+
+    def test_tick_apply_is_idempotent_while_the_lease_lives(self):
+        for _ in range(2):
+            self.invoke("tick", "--apply", "--max-implementer", "1",
+                        "--worker-command", "/bin/sh -c 'sleep 5'",
+                        "--agent", "opencode/loom-worker", "--now", T0)
+        launches = [event for event in self.ws.events() if event.get("event") == "launch"]
+        self.assertEqual(len(launches), 1)
+
+    def test_dead_launch_is_reconciled_and_escalated_after_two_failures(self):
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        launch = next(event for event in self.ws.events() if event.get("event") == "launch")
+        self.ws.save()
+        # pretend the worker died and its lease expired
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
+                    "--agent", "opencode/loom-worker", "--now", "2030-01-01T12:00:00Z")
+        failed = [event for event in self.ws.events()
+                  if event.get("event") == "launch" and event.get("state") == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["pid"], launch["pid"])
+
     def test_tick_reports_expired_leases(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "1m",
                     "--agent", "agent-a", "--now", T0)

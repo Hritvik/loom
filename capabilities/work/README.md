@@ -34,7 +34,7 @@ identical on all three surfaces.
 | `dependents` | Who is waiting on a task, directly and transitively |
 | `graph` | Render the dependency graph: `text`, `mermaid`, `dot` or standalone `html` |
 | `decisions` | What needs the owner: human-blocked tasks and questions addressed to them |
-| `tick` | Policy preview: what would be claimed and launched under WIP limits |
+| `tick` | Policy pass: what would be claimed and launched; `--apply` launches a worker |
 | `migrate` | Copy a file work home into SQLite, verifying the event chain |
 | `export` | Render the store as YAML or JSON, replacing diffable state in git |
 | `show` | One task with dependencies, claim, evidence and review |
