@@ -50,4 +50,4 @@ holds task state, which lives in the database.
 
 ## Licence
 
-Private until a licence is chosen.
+No licence has been chosen yet; all rights reserved.
