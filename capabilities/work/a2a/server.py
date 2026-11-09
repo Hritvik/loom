@@ -679,7 +679,7 @@ class WorkCoordinationServer(ThreadingHTTPServer):
             "protocolVersion": A2A_VERSION,
             "name": "Distracted Work Coordination",
             "description": (
-                "Central coordination for IAM, UMS and Dutch work. Discover claimable tasks, "
+                "Central coordination for a portfolio of repositories. Discover claimable tasks, "
                 "claim them with a lease, renew or release, take over expired leases, and move "
                 "work through review to acceptance."
             ),

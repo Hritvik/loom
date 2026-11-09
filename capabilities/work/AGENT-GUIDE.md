@@ -228,7 +228,7 @@ the review surface. Use the team's authorization rules before posting them exter
 
 ```bash
 ./task search avatar                # id, title, goal, program, board, write paths
-./task dependents ums/W-18          # who is blocked on it, directly and transitively
+./task dependents <program>/<ID>    # who is blocked on it, directly and transitively
 ./task list --ready                 # "+4 downstream" = finishing it releases four tasks
 ```
 

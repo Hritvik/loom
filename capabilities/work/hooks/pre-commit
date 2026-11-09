@@ -30,7 +30,7 @@ from pathlib import Path
 
 import yaml
 
-DEFAULT_HOME = Path.home() / "repositories/portfolio-planning"
+DEFAULT_HOME = Path(__file__).resolve().parents[3]  # the engine repository
 ACTIVE = {"claimed", "red", "green", "in-progress"}
 SHARED_PREFIXES = ("capabilities/work/", ".ecc/memory/")
 SHARED_FILES = {"AGENTS.md", "README.md", "HANDOFF.md", ".gitignore"}

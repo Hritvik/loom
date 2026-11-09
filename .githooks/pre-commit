@@ -1,6 +1,9 @@
 #!/bin/sh
-# Coordination guard. The implementation is central so every repository behaves identically.
+# Coordination guard. The implementation lives in the engine so every repository behaves identically.
 # Install: git config core.hooksPath .githooks
-central="${WORK_COORDINATION_HOME:-$HOME/repositories/loom}/capabilities/work/hooks/pre-commit"
+# Point at the engine with WORK_COORDINATION_HOME or: git config --global coordination.home <path>
+home="${WORK_COORDINATION_HOME:-$(git config --get coordination.home)}"
+[ -n "$home" ] || exit 0
+central="$home/capabilities/work/hooks/pre-commit"
 [ -f "$central" ] || exit 0
 exec python3 "$central" "$@"

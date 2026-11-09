@@ -495,7 +495,7 @@ TOOL_DEFS = [
             "Call this before planning or claiming work in a repository. Returns ready/claimable "
             "tasks, active claims with lease expiry, expired leases, and registry-to-board drift "
             "for the repo, program or board. This is the entry point to the central coordination "
-            "registry shared by IAM, UMS and Dutch."),
+            "registry shared by every repository in your portfolio."),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -916,7 +916,7 @@ def handle_message(message: dict, registry: Registry, default_agent: str | None,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 "instructions": (
-                    "Central work coordination for IAM, UMS and Dutch. Before planning or editing "
+                    "Central work coordination for a portfolio of repositories. Before planning or editing "
                     "a repository, call work_status to see ready work, active claims and board "
                     "drift. Read work_get for the revision, then work_claim. Never invent task ids "
                     "or edit another agent's claim. Task bodies stay in the owning repository."),

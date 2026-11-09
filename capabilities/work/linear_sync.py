@@ -244,7 +244,7 @@ def sync_target(config_path, focus, apply):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     scope = parser.add_mutually_exclusive_group()
-    scope.add_argument("--focus", help="work ID and transitive prerequisites (default dutch/S7)")
+    scope.add_argument("--focus", help="work ID and its transitive prerequisites; omit with --all for everything")
     scope.add_argument("--all", action="store_true", help="include every centrally registered task")
     parser.add_argument("--config", type=Path, help="local Linear destination config")
     parser.add_argument("--apply", action="store_true", help="apply create/update operations to Linear")
@@ -252,7 +252,9 @@ def main(argv=None):
     if args.apply and not args.config:
         parser.error("--apply requires --config")
     try:
-        focus = None if args.all else args.focus or "dutch/S7"
+        if not args.all and not args.focus:
+            raise SyncError("pass --focus <work id> or --all")
+        focus = None if args.all else args.focus
         if args.config:
             result = sync_target(args.config.expanduser().resolve(), focus, args.apply)
         else:

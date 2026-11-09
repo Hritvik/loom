@@ -139,19 +139,12 @@ agent tool list ──tools/call──> mcp/server.py ──CLI──> work/task
 - Mutations delegate to the CLI, so CAS, leases, dependency gates, path conflicts and the audit log
   are shared with the CLI and A2A surfaces.
 
-## Integration map
+## Integration map (optional)
 
-`work/programs/identity-platform-integration.yaml` is the cross-service plan. It owns:
-
-- service ownership, which lives in your content repository;
-- the contract matrix (id, kind, owner, producers, consumers, gating task);
-- end-to-end journeys (onboarding, profile-required/ready, state change, deletion, snapshot repair,
-  member association);
-- slices classified as `startable`, `coordinated`, `blocked` or `owner-confirmation`;
-- agent-start assignments.
-
-It contains no task bodies. `validate_work.py` checks that every task, gate and contract reference
-exists, that each contract has exactly one owner, and that blocked slices name their blocker.
+A program map is an optional cross-service view held in the content repository. It owns service
+ownership, the contract matrix (id, kind, owner, producers, consumers, gating task), end-to-end
+journeys, and which slices an agent may start. It contains no task bodies. When present,
+`validate_work.py --programs <dir>` checks that every task, gate and contract reference exists.
 
 ## Review routing
 

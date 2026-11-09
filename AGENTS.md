@@ -2,7 +2,7 @@
 
 This repository is the coordination engine. It holds the CLI, the store, the MCP and A2A
 surfaces, the validator and the tests — not the interaction contracts, which live in
-`~/repositories/portfolio-contracts`.
+`$WORK_CONTRACTS`.
 
 ## Read first
 

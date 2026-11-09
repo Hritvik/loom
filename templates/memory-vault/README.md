@@ -15,7 +15,7 @@ decision or lesson written here is available to the next agent without a handoff
 
 | Kind | Example |
 |---|---|
-| `decision` | why the registry uses an app subject as the aggregate id |
+| `decision` | why the service keys a record by an immutable external id |
 | `lesson` | a suite that reports green while skipping every integration test |
 | `fact` | which repository owns which contract |
 | `runbook` | the exact command that reproduces a verification claim |
@@ -31,7 +31,7 @@ decision or lesson written here is available to the next agent without a handoff
 ## Use
 
 ```bash
-ecc memory search "profile state"                 # recall before writing
+ecc memory search "deployment"                    # recall before writing
 ecc memory save --title "…" --kind lesson --scope team \
   --source-harness <harness> --tag <tag> --stdin < note.md
 ecc memory read <memory-id>

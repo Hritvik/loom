@@ -33,3 +33,13 @@ Status: green, awaiting independent review
   have machine-checkable shapes today.
 - `docs/adr/0001` still describes this portfolio's split and should move to the content repository
   once an adopter has used the ADR template; LOOM-3 covers the example that replaces it.
+
+## Rework after review (event 746, changes requested)
+
+- `templates/agents-block.md`: the claim command now includes `--agent <you>`, and the block says
+  what `$WORK_COORDINATION_HOME` is and how to set it.
+- `templates/memory-vault/README.md`: the two portfolio-flavoured examples are replaced with neutral
+  ones.
+- `docs/artifacts.md`: the template table is headed "Template | For" so the eighth row is not
+  presented as an eighth artefact kind.
+- This evidence file corrected: the README does point at `templates/`, and the suite is 134 tests.

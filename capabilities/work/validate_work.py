@@ -332,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         "--capabilities", default=None,
         help="capability-steward home to cross-check (default: the parent holding capability-home.yaml)")
     parser.add_argument("--store", choices=["sqlite"], default="sqlite")
+    parser.add_argument("--programs", default=None,
+                        help="integration-plan directory to check (default: WORK_PROGRAMS, else skipped)")
     parser.add_argument("--db", default=os.environ.get("WORK_DB")
                         or str(Path.home() / ".local/state/loom/work.db"))
     parser.add_argument(
@@ -558,7 +560,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- integration plans ----------------------------------------------
     plan_count = 0
-    plans_dir = root / "programs"
+    plans_dir = (Path(args.programs).expanduser() if args.programs
+                 else Path(os.environ.get("WORK_PROGRAMS") or root / "programs"))
     services = {"iam", "ums", "dutch", "dutch-ref", "portfolio"}
     slice_states = {"startable", "coordinated", "blocked", "owner-confirmation"}
     if plans_dir.is_dir():

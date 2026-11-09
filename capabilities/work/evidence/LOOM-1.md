@@ -27,3 +27,24 @@ Status: green, awaiting independent review
 - `docs/adr/0001-state-leaves-git.md` still describes this portfolio's split decision. It is an
   example of an ADR more than an engine decision; it should move to the content repository once a
   generic ADR template exists.
+
+## Rework after review (event 740, changes requested)
+
+The first pass grepped one directory and declared the engine clean. Reviewer-1 grepped the tracked
+tree and found fourteen hits. Fixed:
+
+- `task`: `OWNER_DEFAULT` was a person's name; now `WORK_OWNER` or `owner`.
+- `hooks/pre-commit`: the engine path was hardcoded; now derived from the hook's own location, and
+  the wrapper resolves `WORK_COORDINATION_HOME` or `git config coordination.home`, else no-ops.
+- MCP and A2A tool descriptions no longer name this portfolio's services.
+- `linear_sync.py`: `--focus` no longer defaults to one portfolio task; it requires `--focus` or
+  `--all`.
+- `PROTOCOL.md` and `README.md`: the integration-map sections described a file this work deleted.
+  Both now describe an optional program map checked by `validate_work.py --programs <dir>`.
+- `AGENT-GUIDE.md`, `AGENTS.md`, `docs/artifacts.md`: example identifiers and paths genericised.
+- `validate_work.py` gained `--programs`; it previously globbed a directory that no longer exists
+  and silently skipped two checks while the docs promised them.
+- Tests no longer use a person's name or this portfolio's program ids as fixtures.
+
+Verification: `git grep -n -I -E "hritvik|IAM|UMS|Dutch|portfolio-planning|dutch/S7"` returns
+nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validator PASS.

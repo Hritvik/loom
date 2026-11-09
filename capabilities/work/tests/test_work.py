@@ -2,7 +2,7 @@
 """End-to-end tests for the work-coordination CLI and validator.
 
 Each test builds a disposable work home with a synthetic packet board, so the
-real IAM/Dutch/UMS checkouts are never touched.
+real product checkouts are never touched.
 
 Run: python3 -m unittest discover -s tests -v
 """
@@ -964,21 +964,21 @@ class WorkCLITest(unittest.TestCase):
         self.invoke("transition", "demo/W-3", "--revision", "0", "--to", "blocked",
                     "--needs", "human", "--reason", "owner must decide", "--agent", "agent-a",
                     "--now", T0)
-        self.invoke("ask", "demo/W-1", "--to", "hritvik", "--question", "Which fixture wins?",
+        self.invoke("ask", "demo/W-1", "--to", "owner", "--question", "Which fixture wins?",
                     "--agent", "agent-a", "--now", T0)
         self.invoke("ask", "demo/W-1", "--to", "agent-b", "--question", "Not for the owner",
                     "--agent", "agent-a", "--now", T0)
 
         out = self.invoke("decisions").stdout
-        self.assertIn("Decision queue for hritvik: 1 decision(s), 1 question(s)", out)
+        self.assertIn("Decision queue for owner: 1 decision(s), 1 question(s)", out)
         self.assertIn("demo/W-3", out)
         self.assertIn("owner must decide", out)
         self.assertIn("Which fixture wins?", out)
         self.assertNotIn("Not for the owner", out)
 
-        seq = json.loads(self.invoke("inbox", "--agent", "hritvik", "--json").stdout)[0]["seq"]
+        seq = json.loads(self.invoke("inbox", "--agent", "owner", "--json").stdout)[0]["seq"]
         self.invoke("answer", "demo/W-1", "--question", str(seq), "--decision", "src/one",
-                    "--agent", "hritvik", "--now", T0)
+                    "--agent", "owner", "--now", T0)
         after = self.invoke("decisions").stdout
         self.assertNotIn("Which fixture wins?", after)
 

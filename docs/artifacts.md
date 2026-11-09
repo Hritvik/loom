@@ -17,16 +17,16 @@ repository owns the instances.
 
 Copy the one that matches, fill it in, and put it where the table says.
 
-| Kind | Template |
+| Template | For |
 |---|---|
-| Wayfinder map | [`templates/wayfinder-map.md`](../templates/wayfinder-map.md) |
-| Spec | [`templates/spec.md`](../templates/spec.md) |
-| Plan | [`templates/plan.md`](../templates/plan.md) |
-| Capability map | [`templates/capability-map.yaml`](../templates/capability-map.yaml) |
-| Contract | [`templates/contract-registry.yaml`](../templates/contract-registry.yaml) |
-| Decision | [`templates/adr.md`](../templates/adr.md) |
-| Memory | [`templates/memory-vault/README.md`](../templates/memory-vault/README.md) |
-| Product-repo pointer | [`templates/agents-block.md`](../templates/agents-block.md) |
+| [`templates/wayfinder-map.md`](../templates/wayfinder-map.md) | Wayfinder map |
+| [`templates/spec.md`](../templates/spec.md) | Spec |
+| [`templates/plan.md`](../templates/plan.md) | Plan |
+| [`templates/capability-map.yaml`](../templates/capability-map.yaml) | Capability map |
+| [`templates/contract-registry.yaml`](../templates/contract-registry.yaml) | Contract |
+| [`templates/adr.md`](../templates/adr.md) | Decision |
+| [`templates/memory-vault/README.md`](../templates/memory-vault/README.md) | Memory |
+| [`templates/agents-block.md`](../templates/agents-block.md) | the coordination block a product repository carries — not an artefact kind |
 
 ## Why the split
 
@@ -48,7 +48,7 @@ Copy the one that matches, fill it in, and put it where the table says.
 Point the engine at the other two:
 
 ```bash
-export WORK_CONTENT_HOME=~/repositories/portfolio-planning
+export WORK_CONTENT_HOME=~/repositories/your-content
 export WORK_CONTRACTS=~/repositories/portfolio-contracts
 export WORK_DB=~/.local/state/loom/work.db
 ```

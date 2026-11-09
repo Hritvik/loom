@@ -8,7 +8,7 @@ import unittest
 from linear_projection import project_cards
 
 NOW = dt.datetime(2030, 1, 1, 10, tzinfo=dt.timezone.utc)
-FOCUS = "dutch/S7"
+FOCUS = "alpha/W-1"
 BEFORE_NOW = "2030-01-01T09:59:00Z"
 AFTER_NOW = "2030-01-01T10:01:00Z"
 COMMIT = "a98765e" + "0" * 33
@@ -75,7 +75,7 @@ class LinearProjectionTest(unittest.TestCase):
         self.assertEqual(set(cards), {FOCUS, "iam/DEP-1", "chat/W-1"})
         self.assertEqual(cards[FOCUS]["dependencies"], ["iam/DEP-1"])
         self.assertEqual(cards[FOCUS]["blockers"], [])
-        self.assertEqual(cards[FOCUS]["owner"], "dutch")
+        self.assertEqual(cards[FOCUS]["owner"], "alpha")
         self.assertEqual(cards[FOCUS]["implementer"], "author")
         self.assertEqual(cards["chat/W-1"]["lane"], "claimable")
 

@@ -1202,7 +1202,7 @@ def cmd_answer(args, store: Store) -> int:
 
 ROLE_BY_KIND = {"review": "reviewer", "integration": "integrator"}
 ROLES = ("implementer", "reviewer", "integrator")
-OWNER_DEFAULT = "hritvik"
+OWNER_DEFAULT = "owner"
 
 
 def task_role(task: dict) -> str:
@@ -2040,7 +2040,7 @@ def build_parser() -> argparse.ArgumentParser:
     inbox.set_defaults(func=cmd_inbox)
 
     decisions = sub.add_parser("decisions", help="what needs the owner, and nothing else", parents=[common])
-    decisions.add_argument("--owner", default=None, help="owner identity (default WORK_OWNER or hritvik)")
+    decisions.add_argument("--owner", default=None, help="owner identity (default WORK_OWNER or \"owner\")")
     decisions.add_argument("--json", action="store_true")
     decisions.set_defaults(func=cmd_decisions)
 
