@@ -975,7 +975,7 @@ class WorkCLITest(unittest.TestCase):
         self.integrated_task()
 
         before = validate(self.ws.root)
-        self.assertIn("integrated/accepted tasks have no integration receipt", before.stdout)
+        self.assertIn("pre-migration integrations are proven by evidence only", before.stdout)
         self.assertIn("demo/W-9", before.stdout)
 
         self.invoke("annotate", "demo/W-9", "--revision", "0",

@@ -673,8 +673,8 @@ def main(argv: list[str] | None = None) -> int:
         if unproven:
             preview = ", ".join(unproven[:5]) + (", …" if len(unproven) > 5 else "")
             warnings.append(
-                f"{len(unproven)} integrated/accepted tasks have no integration receipt"
-                f" ({preview}); record one with `./task annotate`")
+                f"{len(unproven)} pre-migration integrations are proven by evidence only"
+                f" (accepted by decisions/integration-receipts-001.md): {preview}")
     else:
         warnings.append("events.ndjson missing; run `./task genesis --agent <id>`")
 

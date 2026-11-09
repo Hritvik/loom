@@ -136,7 +136,9 @@ is integrated, accepted, or done.
    no such event: `task show` prints `integrated: NO RECEIPT` and the validator warns.
    Repair one with `./task annotate <id> --revision N --integrated-source <full-commit>
    --reason ... --agent <you>`; it refuses a commit that is not in the integration
-   branch's history, refuses when a receipt already exists, and never invents a hash. The board
+   branch's history, refuses when a receipt already exists, and never invents a hash.
+   Pre-migration integrations with no surviving commit are accepted as evidence-only by
+   `decisions/integration-receipts-001.md`; the validator reports them as a known gap. The board
    checks that the commit is on the owner repo's integration branch and that the paths changed
    between the submitted base and commit still match the approved commit. Review the new commit after
    squash, cherry-pick or conflicting changes. Production acceptance remains a separate gate.

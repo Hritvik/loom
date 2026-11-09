@@ -61,7 +61,10 @@ board's integration branch. Tasks migrated from the pre-SQLite registry have no 
 event, so `validate_work.py` warns and `task show` prints
 `integrated: NO RECEIPT`.
 
-`task annotate` repairs that without rewriting history and without inventing a hash:
+Pre-migration integrations whose commits no longer exist are accepted as proven by evidence
+only, per `decisions/integration-receipts-001.md`; the validator reports the count as one
+accepted-gap line. `task annotate` repairs a task when a provable commit exists, without
+rewriting history and without inventing a hash:
 
 ```bash
 ./task annotate <id> --revision <n> --integrated-source <full-commit> \
