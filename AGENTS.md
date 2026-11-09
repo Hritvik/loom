@@ -1,7 +1,8 @@
 # loom — agent orientation
 
-This repository is the coordination engine. It holds the CLI, the store, the MCP and A2A surfaces,
-the validator, the tests and the interaction contracts.
+This repository is the coordination engine. It holds the CLI, the store, the MCP and A2A
+surfaces, the validator and the tests — not the interaction contracts, which live in
+`~/repositories/portfolio-contracts`.
 
 ## Read first
 

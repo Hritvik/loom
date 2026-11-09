@@ -13,8 +13,7 @@ without colliding, without a human dispatching tasks, and without trusting each 
 | `capabilities/work/task` | the CLI: claim, renew, release, takeover, transition, ask, inbox, search, dependents, graph, tick, decisions, migrate, export |
 | `capabilities/work/mcp/` | MCP server, so the registry appears in an agent's tool list |
 | `capabilities/work/a2a/` | A2A v1.0 façade for agents that speak it |
-| `capabilities/work/validate_work.py` | schema, dependency, lease, claim and event-chain verification |
-| `contracts/` | interaction contracts between services, with consumer pins |
+| `capabilities/work/validate_work.py` | schema, dependency, lease, claim, event-chain and contract verification |
 | `docs/adr/` | decisions, including why state left git |
 
 ## Install
@@ -44,9 +43,11 @@ Agents working in a product repository should read
 
 ## Boundaries
 
-This repository holds the engine and the interaction contracts. It does not hold portfolio planning
-content — maps, plans, specs and evidence live in a private planning repository — and it never
-holds task state, which lives in the database.
+This repository holds the coordination engine and nothing else. It does not hold portfolio planning
+content — maps, plans, specs and evidence live in a private planning repository — and it does not
+hold task state, which lives in the database. Interaction contracts live in
+[`portfolio-contracts`](https://github.com/Hritvik/portfolio-contracts); the validator checks them,
+it does not own them.
 
 ## Licence
 

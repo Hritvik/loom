@@ -250,9 +250,13 @@ def check_contracts(root: Path, explicit: str | None, by_id: dict[str, dict], er
     The artifact is a copy of the provider's authoritative file; the consumer pins the hash it
     builds against, so a changed artifact without a new pin is visible rather than silent.
     """
-    contracts_dir = Path(explicit).expanduser() if explicit else root.parent.parent / "contracts"
+    target = explicit or os.environ.get("WORK_CONTRACTS")
+    if not target:
+        return {}
+    contracts_dir = Path(target).expanduser()
     registry_path = contracts_dir / "registry.yaml"
     if not registry_path.is_file():
+        errors.append(f"contracts: no registry at {registry_path}")
         return {}
     data = load_yaml(registry_path)
     if not isinstance(data, dict) or data.get("kind") != "wire-contract-registry":
@@ -323,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                         or str(Path.home() / ".local/state/loom/work.db"))
     parser.add_argument(
         "--contracts", default=None,
-        help="wire-contract home to validate (default: <repo>/contracts beside capabilities/)")
+        help="contract registry to validate (default: WORK_CONTRACTS, else skipped)")
     args = parser.parse_args(argv)
     root = Path(args.root).expanduser()
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()

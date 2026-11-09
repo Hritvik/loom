@@ -67,28 +67,23 @@ the importer `task migrate` reads a pre-SQLite work home with.
 The exported file is a snapshot for review, not the source of truth. `validate_work.py` reads the
 same store, so it validates live state.
 
-## Programs
+## Three repositories
 
-| Universe | Repository | Coordinate as | Role |
-|---|---|---|---|
-| IAM program (W-1…W-14) | `~/repositories/iam` | `iam/…` | production provider |
-| Dutch contracts + adapter (w10…w12) | `~/repositories/dutch` | `dutch-ref/…` | Dutch-owned contracts; reference adapter |
-| Dutch product slices | `~/repositories/dutch` | `dutch/…` | product delivery |
-| UMS program (W-1…W-18) | `~/repositories/ums` | `ums/…` | production provider |
-| Midas | `~/repositories/Midas` | `midas/…` | financial decision support |
-| Jarvis | `~/repositories/jarvis` | `jarvis/…` | life-portfolio coordinator |
-| Teach | `~/repositories/teach` | `teach/…` | lifelong tutor |
-| MyFitnessGuide | `~/repositories/gym-tracker` | `myfitnessguide/…` | household nutrition and training |
-| Portfolio site | `~/repositories/portfolio` | `portfolio/…` | personal site |
-| Portfolio Super App | `wayfinder/portfolio-super-app` | `superapp/…` | planning-only host program |
-| IAM deployment | `~/repositories/iam` | `iam/DEP-…` | packaging, transport, workload auth, staging, operations |
+| Repository | Holds | Visibility |
+|---|---|---|
+| **loom** (this one) | the engine: CLI, store, MCP, A2A, validator, templates, examples | public |
+| **content** | the portfolio's own artefacts: maps, plans, specs, capability stewardship, evidence, memory | private |
+| **contracts** | the wire formats services exchange, with fixtures and consumer pins | public |
 
-Dutch ADR 0009 makes `dutch/services/iam` and `dutch/services/ums` non-production reference adapters,
-so `dutch-ref/…` acceptance never counts as provider delivery. `dutch/…` tasks own the product
-surface and depend on provider gates such as `ums/W-18` and `iam/W-13`.
+loom knows the *kinds*; a content repository holds the *instances*. Point it at yours:
 
-Current registry: **20 boards, 183 tasks, 143 edges**. Jarvis and MyFitnessGuide use ticket-level
-tasks (`ARCH-*`, `WEB-*`) reconciled from their Wayfinder maps.
+```bash
+export WORK_CONTENT_HOME=~/repositories/portfolio-planning   # your content repository
+export WORK_CONTRACTS=~/repositories/portfolio-contracts     # your contract registry
+export WORK_DB=~/.local/state/loom/work.db                   # the task database
+```
+
+`docs/artifacts.md` lists every kind, where it lives, and how it is promoted.
 
 ## Authority
 
@@ -200,7 +195,7 @@ do not carry: who owns which contract, which task appears in which journey, and 
 can start. It links to real task IDs and is checked by `validate_work.py`.
 
 ```bash
-./task edge list        # 59 dependency edges across IAM, UMS and Dutch
+./task edge list        # dependency edges between tasks
 ```
 
 ## Reconcile

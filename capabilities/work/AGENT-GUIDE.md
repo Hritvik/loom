@@ -10,7 +10,7 @@ surface over those two files. The state model is in [`PROTOCOL.md`](PROTOCOL.md)
 ## Start every session
 
 ```bash
-cd ~/repositories/portfolio-planning/capabilities/work
+cd ~/repositories/loom/capabilities/work
 python3 validate_work.py            # is the registry healthy?
 ./task list --ready                 # claimable work, ranked by what it unblocks
 ./task inbox --agent <your-id>      # questions other agents asked you
@@ -29,15 +29,12 @@ as a separate task that depends on both implementations. Keep owner decisions on
 their own gates so local work can continue. Use `./task list --ready` to check
 claimability. A task can display Ready while a prerequisite is still open.
 
-The [Dutch deployment dispatch](../../plans/dutch/2026-11-08-deployment-dispatch.md)
-applies this flow to the first Super App release.
-
 ## Where things live
 
 | Thing | Where | Rule |
 |---|---|---|
-| Plans, specs, designs, maps, tickets | this repo — `plans/`, `specs/`, `wayfinder/`, `capabilities/` | author here, never in a product repo |
-| Interaction contracts | this repo — `contracts/` | artifact + fixtures + a `registry.yaml` entry; consumers pin a hash |
+| Plans, specs, designs, maps, tickets | your content repository (`$WORK_CONTENT_HOME`) | author there, never in a product repo |
+| Interaction contracts | your contract registry (`$WORK_CONTRACTS`) | artifact + fixtures + a `registry.yaml` entry; consumers pin a hash |
 | Task state, claims, dependencies | `~/.local/state/loom/work.db` | mutate only through `./task` |
 | Code, tests, migrations, evidence | your product repository | the registry points at it, never stores it |
 | Durable memory | `.ecc/memory/team/` | `ecc memory save --scope team`; inherited by every harness |
@@ -198,22 +195,6 @@ about the change. Normal and adversarial are methods for answering it.
 | User experience and accessibility | UI, mobile flows, forms, navigation or copy | Check focus and assistive technology, keyboard and touch, loading and errors, offline behavior, deep links and whether visible state reflects the actual outcome. |
 | External effects and AI safety | Agent tools, model calls, approvals, outbound actions or untrusted content | Check authority at execution, approval scope and expiry, untrusted content handling, isolation, evidence of side effects, quotas and what happens when the result is unknown. |
 | Verification and handoff | Every submission, with extra scrutiny for shared or irreversible changes | Can someone reproduce the checks from the pinned revision? Do the tests fail for the right reasons? Label fixture, integration and deployed evidence. Update the relevant contracts, docs and runbooks. |
-
-#### Portfolio examples
-
-| Change | Start with these lenses |
-|---|---|
-| IAM workload auth and relay | Authorization, contract compatibility, delivery and verification. Try wrong audience, repeat proof and a lost response after the consumer commits. |
-| UMS profile closure or restore | Privacy lifecycle, migration, persistence and recovery. Restore an older backup and prove erasure fences still hold. |
-| Dutch ledger or profile binding | Domain integrity, authorization, contracts and delivery. Show that a ready profile without an active Member mapping cannot grant Ledger access. |
-| Infra bootstrap or deployment | Operations, supply chain, isolation, capacity and cost. Verify image architecture, private dependencies, readiness failure, restore and rollback. |
-| Super App host or module | Contracts, authorization, accessibility and rollout. Check deep-link and session cleanup, module portability and whether signed host evidence covers the real module. |
-| Chat execution or realtime | External effects, isolation, delivery, privacy and cost. Check approval replay, reconnect, cancellation and unknown execution outcomes. |
-
-For a small change, direct normal review may cover the selected lenses in one pass.
-For a large change, split subagent scopes by lens and use adversarial checks on the
-guarantees with the greatest consequences. Route each finding to one owner. Only
-unresolved issues that affect the scoped guarantees or release criteria block the verdict.
 
 ### Choose how to run the review
 

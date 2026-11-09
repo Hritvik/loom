@@ -143,7 +143,7 @@ agent tool list ──tools/call──> mcp/server.py ──CLI──> work/task
 
 `work/programs/identity-platform-integration.yaml` is the cross-service plan. It owns:
 
-- service ownership (IAM, UMS, Dutch, Dutch reference adapter);
+- service ownership, which lives in your content repository;
 - the contract matrix (id, kind, owner, producers, consumers, gating task);
 - end-to-end journeys (onboarding, profile-required/ready, state change, deletion, snapshot repair,
   member association);
