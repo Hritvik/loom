@@ -1,7 +1,7 @@
 # Integration receipts for pre-migration tasks
 
 Status: accepted
-Owner: portfolio-owner
+Owner: engine maintainer
 Date: 2026-11-09
 Task: none (coordination policy)
 
@@ -15,19 +15,18 @@ place to put one.
 
 `./task annotate` repairs a task when a provable commit exists. 24 tasks were
 annotated this way: 17 from the commit named in their own integrated-transition
-reason, six `dutch-ref` tasks from the commit that introduced their declared write
-paths, and `dutch/PROFILE-BINDING` at `59eb55e`.
+reason, six from the commit that introduced their declared write paths, and one
+whose commit its evidence records.
 
 The remaining 45 cannot be repaired honestly:
 
-- **IAM (23) and UMS (8):** both repositories were squashed to a root
-  `Initial commit` (IAM `767fd70`, UMS `d9524df`) that already contains the task
-  evidence. The per-task commits no longer exist in history.
-- **`dutch-ref` W10-R/W10-F/W11-R/W11-F:** only the scaffold commit `0b5d193`
-  contains their artifacts; that is not an integration point.
-- **Dutch slices, Jarvis and portfolio tasks:** evidence and transition reasons
-  name no commit, or name a commit only as a reference ("before `65c2e60`"),
-  which is not proof of integration.
+- **Two squashed repositories (31 tasks):** both were reduced to a root
+  `Initial commit` that already contains the task evidence. The per-task commits
+  no longer exist in history.
+- **Four scaffold-only tasks:** only the scaffold commit contains their artifacts;
+  that is not an integration point.
+- **The remaining tasks:** evidence and transition reasons name no commit, or name
+  a commit only as a reference ("before `65c2e60`"), which is not proof of integration.
 
 ## Decision
 
@@ -48,7 +47,7 @@ recur for new work.
 - A future reader cannot tell which commit landed a pre-migration task from the
   registry alone; they must read the evidence file in the owning repository and the
   repository history.
-- If an IAM or UMS task is later re-opened and redone, it earns a normal receipt and
-  drops out of the count.
+- If one of these tasks is later re-opened and redone, it earns a normal receipt
+  and drops out of the count.
 - `./task annotate` remains available for any pre-migration task whose commit is
   later found and verified.

@@ -64,7 +64,7 @@ class LinearProjectionTest(unittest.TestCase):
         self.assertEqual(cards[FOCUS]["blockers"], ["alpha/DEP-1"])
         self.assertEqual(cards["alpha/DEP-1"]["lane"], "claimable")
         self.assertEqual(cards["beta/W-1"]["lane"], "integrated")
-        self.assertEqual(sorted(cards["beta/W-1"]["dependents"]), sorted([FOCUS, "alpha/DEP-1"]))
+        self.assertEqual(cards["beta/W-1"]["dependents"], ["alpha/DEP-1", FOCUS])
 
     def test_all_tasks_include_groups_dependencies_and_last_implementers(self):
         cards = self.cards([

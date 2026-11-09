@@ -340,7 +340,7 @@ def cmd_create(args, store: Store) -> int:
     now = parse_now(args.now)
     registry = store.load()
     if not ID_PATTERN.match(args.id):
-        raise WorkError(f"invalid task id {args.id!r}; expected <program>/<NAME>, e.g. iam/W-15")
+        raise WorkError(f"invalid task id {args.id!r}; expected <program>/<NAME>, e.g. alpha/W-1")
     if any(task["id"] == args.id for task in registry["tasks"]):
         raise WorkError(f"task {args.id} already exists; ids are never reused or renumbered")
     board = find_board(registry, args.board)
@@ -1735,7 +1735,7 @@ def import_board(args, store: Store, board: dict, registry: dict) -> int:
         raise WorkError("only packet boards can be imported; program boards are markdown authority")
     program = args.program
     if not program:
-        raise WorkError("--program is required, e.g. --program iam for iam.w07")
+        raise WorkError("--program is required, e.g. --program alpha for alpha.w07")
     if not re.fullmatch(r"[a-z][a-z0-9.-]{2,63}", program):
         raise WorkError(f"invalid program namespace {program!r}")
     path = Path(board["repo"]).expanduser() / board["path"]
@@ -2092,7 +2092,7 @@ def build_parser() -> argparse.ArgumentParser:
     board.add_argument("--role", default="provider")
     board.add_argument("--integration-ref", help="ref a reviewed commit must be an ancestor of")
     board.add_argument("--board")
-    board.add_argument("--program", help="namespace for `board import` (e.g. iam)")
+    board.add_argument("--program", help="namespace for `board import` (e.g. alpha)")
     board.add_argument("--check", action="store_true")
     board.set_defaults(func=cmd_board)
 

@@ -153,8 +153,8 @@ records the previous agent and a reason. Mutating another agent's live claim is 
 ./task transition alpha/W-1 --revision 2 --to green
 ./task transition alpha/W-1 --revision 3 --to reviewed \
   --reviewer reviewer-7 --decision approve
-./task transition alpha/W-1 --revision 4 --to integrated --evidence evidence/W-12.md
-./task transition alpha/W-1 --revision 5 --to accepted   --evidence evidence/W-12.md
+./task transition alpha/W-1 --revision 4 --to integrated --evidence evidence/W-1.md
+./task transition alpha/W-1 --revision 5 --to accepted   --evidence evidence/W-1.md
 ```
 
 Rules enforced by the CLI:
@@ -235,7 +235,7 @@ Never silently overwrite another agent; record a reason.
 ./task events --verify                 # hash chain + terminal state vs registry
 ./task events --task alpha/W-1
 python3 validate_work.py               # full cross-repo check
-python3 -m unittest discover -s tests -v   # 56 tests across CLI, validator, A2A, MCP, surface and plans
+python3 -m unittest discover -s tests -v   # full suite: CLI, validator, A2A, MCP, surface and plans
 ```
 
 `validate_work.py` checks: task schema, duplicate IDs, board/status drift, unregistered packets,
@@ -305,5 +305,6 @@ and edges at call time; nothing is cached.
 
 ### Linear mirror
 
-The [Linear sync runbook](linear-sync.md) covers the one-way Portfolio Delivery mirror.
-The registry continues to own claims, review and integration.
+The read-only projection used by the Linear mirror lives in `linear_projection.py`; where and how the
+mirror runs belongs to your planning repository. The registry continues to own claims, review and
+integration.

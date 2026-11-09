@@ -563,7 +563,9 @@ def main(argv: list[str] | None = None) -> int:
     plans_dir = (Path(args.programs).expanduser() if args.programs
                  else Path(os.environ.get("WORK_PROGRAMS") or root / "programs"))
     slice_states = {"startable", "coordinated", "blocked", "owner-confirmation"}
-    if not plans_dir.is_dir():
+    if args.programs and not plans_dir.is_dir():
+        errors.append(f"--programs directory not found: {plans_dir}")
+    elif not plans_dir.is_dir():
         print(f"  programs: none (pass --programs <dir> to check an integration map)")
     if plans_dir.is_dir():
         for path in sorted(plans_dir.glob("*.yaml")):

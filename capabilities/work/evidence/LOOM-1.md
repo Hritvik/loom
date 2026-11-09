@@ -1,7 +1,7 @@
 # Evidence — LOOM-1 remove portfolio content from the public engine
 
 Repository: `~/repositories/loom`
-Status: green, awaiting independent review
+Status: green, submitted for independent review (round 4)
 
 ## Delivered
 
@@ -75,3 +75,32 @@ pass replaced every remaining portfolio identifier in the engine with neutral on
 
 Verification: `grep -rn -I -E "\biam\b|\bums\b|\bdutch\b|portfolio-contracts"` over the tracked tree
 returns nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validator PASS.
+
+Correction (round 4): that claim was false. The pattern still matched `README.md:49`
+(`portfolio-contracts`), three `task` CLI examples still used `iam`, and BSD `grep -E` does not treat
+`\b` as a word boundary here, so `iam/W-15` never matched. The sweep now uses explicit character
+classes; see the fourth rework below.
+
+## Fourth rework after re-review (event 886, changes requested)
+
+- `task`: the last three program examples were still this portfolio's — the create-id error,
+  the board-import `--program` error and the `board import` help. They now use `alpha`.
+- `README.md`: the boundaries section names the contracts registry as `$WORK_CONTRACTS` instead of
+  a personal repository slug.
+- `capabilities/work/README.md`: the state-machine example uses `evidence/W-1.md` for `alpha/W-1`
+  (it said `W-12`), the audit section no longer claims "56 tests", and the Linear mirror section no
+  longer links the runbook that moved to the planning repository.
+- `validate_work.py`: an explicitly supplied `--programs` directory that does not exist is now an
+  error; only the implicit default prints the "programs: none" hint.
+- `decisions/integration-receipts-001.md`: the pre-migration receipt decision states its counts
+  without naming the programs or the private repository commits. The policy is unchanged.
+- `tests/test_linear_projection.py`: the dependents assertion is back to the exact ordered list, so
+  the ordering `transitive_dependents` guarantees is tested again.
+
+Verification at the commit named in the review request:
+
+- `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
+  over the tracked tree returns only the engine's own clone URL (`README.md:22`,
+  `docs/adopting.md:8`), `docs/adr/0001` (the accepted limit recorded above) and this file.
+- `python3 validate_work.py` — PASS.
+- `python3 -m unittest discover -s tests` — 140 tests, all pass.
