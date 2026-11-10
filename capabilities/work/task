@@ -2304,8 +2304,10 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--ttl", default="90m", help="lease for a launched worker (default 90m)")
     tick.add_argument("--java-home", default=None,
                       help="JAVA_HOME for the worker (default: detect a local JDK)")
-    tick.add_argument("--worker-command", default="opencode run",
-                      help="headless agent command, shell-quoted (default: opencode run)")
+    tick.add_argument("--worker-command",
+                      default="opencode run --model opencode-go/deepseek-v4.1-flash",
+                      help="headless agent command, shell-quoted "
+                           "(default: opencode run --model opencode-go/deepseek-v4.1-flash)")
     tick.set_defaults(func=cmd_tick)
 
     migrate = sub.add_parser("migrate", help="copy a file work home into SQLite", parents=[common])
