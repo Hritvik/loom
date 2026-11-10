@@ -71,6 +71,8 @@ class Workspace:
         self.db = self.root / "work.db"
         self._previous_db = os.environ.get("WORK_DB")
         os.environ["WORK_DB"] = str(self.db)
+        self._previous_trees = os.environ.get("LOOM_WORKTREES")
+        os.environ["LOOM_WORKTREES"] = str(self.root / "worktrees")
         self.repo = self.root / "repo"
         (self.repo / "docs").mkdir(parents=True)
 
@@ -167,6 +169,10 @@ class Workspace:
             os.environ.pop("WORK_DB", None)
         else:
             os.environ["WORK_DB"] = self._previous_db
+        if self._previous_trees is None:
+            os.environ.pop("LOOM_WORKTREES", None)
+        else:
+            os.environ["LOOM_WORKTREES"] = self._previous_trees
         self.tmp.cleanup()
 
 
@@ -1144,6 +1150,32 @@ class WorkCLITest(unittest.TestCase):
                   if event.get("event") == "launch" and event.get("state") == "failed"]
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0]["pid"], launch["pid"])
+
+    def test_tick_gives_the_worker_a_worktree_and_a_jdk(self):
+        repo = self.ws.repo
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "README.md").write_text("fixture\n")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@t.invalid",
+                        "commit", "-qm", "fixture"], check=True)
+
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        launch = next(event for event in self.ws.events() if event.get("event") == "launch")
+        self.assertIn("worktrees", launch["worktree"])
+        self.assertEqual(launch["branch"], "loom/demo-w-1")
+        self.assertTrue(Path(launch["worktree"]).is_dir())
+
+        worktrees = subprocess.run(["git", "-C", str(repo), "worktree", "list"],
+                                   capture_output=True, text=True).stdout
+        self.assertIn(launch["worktree"], worktrees)
+
+    def test_tick_falls_back_when_the_repo_is_not_git(self):
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        launch = next(event for event in self.ws.events() if event.get("event") == "launch")
+        self.assertIsNone(launch["branch"])
+        self.assertEqual(Path(launch["worktree"]), self.ws.repo)
 
     def test_tick_reports_expired_leases(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "1m",

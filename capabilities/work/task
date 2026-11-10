@@ -1349,19 +1349,24 @@ WORKER_BRIEF = """You are a worker for one task in the portfolio work registry.
 Task: {task}
 Revision when claimed: {revision}
 Your identity: {agent}
-Owner repository: {repo}
+Your checkout: {repo}   (an isolated git worktree)
+Your branch: {branch}
 Write paths you may touch: {paths}
 
 Do this:
 1. `cd {work}` and read the task: `./task show {task}`.
-2. Work in {repo}. Stay inside the write paths above; editing outside them breaks the claim.
-3. Report progress through the registry, not chat: `./task transition {task} --revision N --to red`,
-   then `--to green` when tests pass. Every mutation needs the current revision.
+2. Work in {repo} on branch {branch}. Stay inside the write paths above; editing outside them
+   breaks the claim. Commit your work to that branch; do not push and do not merge.
+3. Report progress through the registry, not chat. Every mutation needs your identity and the
+   current revision:
+   `./task transition {task} --revision N --to red --agent {agent}`
+   then `--to green` when tests pass. Re-read the revision before each call.
 4. Write evidence to {evidence} in the repository, then ask for review:
    `./task ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
-    --review-evidence {evidence}`
+    --review-evidence {evidence} --agent {agent}`
 5. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
-   `./task transition {task} --revision N --to blocked --needs human --reason "..."` and stop.
+   `./task transition {task} --revision N --to blocked --needs human --reason "..." --agent {agent}`
+   and stop.
 6. Do not touch Linear. The projection is read-only.
 """
 
@@ -1413,13 +1418,55 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
     return problems
 
 
-def spawn_worker(args, task: dict, role: str, work_home: Path) -> int | None:
-    """Start a headless agent for one task and return its pid."""
+def worker_worktree(repo: Path, task_id: str) -> tuple[Path, str | None]:
+    """An isolated checkout for one task, or the repository itself when it is not a git repo."""
+    probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True)
+    if probe.returncode != 0:
+        return repo, None
+    slug = task_id.replace("/", "-").lower()
+    branch = f"loom/{slug}"
+    base = Path(os.environ.get("LOOM_WORKTREES")
+                or Path.home() / ".local/state/loom/worktrees").expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / slug
+    if path.exists():
+        return path, branch
+    added = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch,
+                            str(path), "HEAD"], capture_output=True, text=True)
+    if added.returncode != 0:
+        existing = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), branch],
+                                  capture_output=True, text=True)
+        if existing.returncode != 0:
+            raise WorkError(f"cannot create a worktree for {task_id}: {added.stderr.strip()}")
+    return path, branch
+
+
+def worker_environment(args) -> dict:
+    """The worker's environment, with a JDK on JAVA_HOME when one can be found."""
+    env = dict(os.environ)
+    java = args.java_home or env.get("JAVA_HOME")
+    if not java:
+        for candidate in (Path.home() / ".sdkman/candidates/java/21-tem",
+                          Path.home() / ".sdkman/candidates/java/current",
+                          Path("/opt/homebrew/opt/openjdk@21")):
+            if candidate.exists():
+                java = str(candidate)
+                break
+    if java:
+        env["JAVA_HOME"] = str(java)
+        env["PATH"] = f"{java}/bin:" + env.get("PATH", "")
+    return env
+
+
+def spawn_worker(args, task: dict, role: str, work_home: Path) -> tuple[int | None, Path, str | None]:
+    """Start a headless agent for one task and return its pid, worktree and branch."""
     repo = Path(str(task.get("owner_repo") or ".")).expanduser()
+    tree, branch = worker_worktree(repo, task["id"])
     evidence = task.get("evidence") or f"evidence/{task['id'].split('/')[-1]}.md"
     brief = WORKER_BRIEF.format(
         task=task["id"], revision=task.get("revision", 0), agent=WORKER_IDENTITY,
-        repo=repo, work=work_home,
+        repo=tree, work=work_home, branch=branch or "(no branch: not a git repository)",
         paths=", ".join(task.get("write_paths") or []) or "(none declared)",
         evidence=evidence,
     )
@@ -1427,9 +1474,9 @@ def spawn_worker(args, task: dict, role: str, work_home: Path) -> int | None:
     log_dir = Path.home() / ".local/state/loom"
     log_dir.mkdir(parents=True, exist_ok=True)
     log = (log_dir / f"worker-{task['id'].replace('/', '-')}.log").open("ab")
-    process = subprocess.Popen(command, cwd=str(repo), stdout=log, stderr=log,
-                               start_new_session=True)
-    return process.pid
+    process = subprocess.Popen(command, cwd=str(tree), env=worker_environment(args),
+                               stdout=log, stderr=log, start_new_session=True)
+    return process.pid, tree, branch
 
 
 def cmd_tick(args, store: Store) -> int:
@@ -1496,10 +1543,12 @@ def cmd_tick(args, store: Store) -> int:
                 problems.append(f"{item['task']}: {exc}")
                 continue
             task = find_task(store.load(), item["task"])
-            pid = spawn_worker(args, task, item["role"], work_home)
+            pid, tree, branch = spawn_worker(args, task, item["role"], work_home)
             store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
-                               role=item["role"], state="pending", pid=pid, now=args.now)
-            launched.append({"task": item["task"], "role": item["role"], "pid": pid})
+                               role=item["role"], state="pending", pid=pid,
+                               worktree=str(tree), branch=branch, now=args.now)
+            launched.append({"task": item["task"], "role": item["role"], "pid": pid,
+                             "worktree": str(tree), "branch": branch})
 
     if args.json:
         print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
@@ -2253,6 +2302,8 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--json", action="store_true")
     tick.add_argument("--apply", action="store_true", help="claim and launch a worker for each chosen task")
     tick.add_argument("--ttl", default="90m", help="lease for a launched worker (default 90m)")
+    tick.add_argument("--java-home", default=None,
+                      help="JAVA_HOME for the worker (default: detect a local JDK)")
     tick.add_argument("--worker-command", default="opencode run",
                       help="headless agent command, shell-quoted (default: opencode run)")
     tick.set_defaults(func=cmd_tick)
