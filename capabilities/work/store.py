@@ -289,7 +289,7 @@ class SqliteStore(Store):
 
     def __init__(self, root: Path, db_path: Path | None = None):
         self.root = Path(root)
-        self.db_path = Path(db_path).expanduser() if db_path else DEFAULT_DB
+        self.db_path = (Path(db_path).expanduser() if db_path else DEFAULT_DB).resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
         self.connection.row_factory = sqlite3.Row

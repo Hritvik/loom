@@ -1533,7 +1533,8 @@ def process_start(pid) -> dt.datetime | None:
     """
     try:
         result = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart="],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True,
+                                env=dict(os.environ, LC_ALL="C", LANG="C"))
     except (OSError, TypeError, ValueError):
         return None
     if result.returncode != 0 or not result.stdout.strip():

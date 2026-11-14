@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     if not store.has_registry():
         print(f"FAIL: no registry in {store.describe()}", file=sys.stderr)
         return 1
-    registry = store.load()
+    registry, stored_events = store.snapshot()
 
     schema = json.loads((root / "schemas/task.schema.json").read_text(encoding="utf-8"))
 
@@ -644,7 +644,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- event log -------------------------------------------------------
     records: list[tuple[bytes, dict]] = []
-    stored_events = store.read_events()
     if stored_events:
         for raw, _parsed in stored_events:
             if raw.strip():

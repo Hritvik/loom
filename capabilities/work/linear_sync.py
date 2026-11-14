@@ -243,6 +243,13 @@ def snapshot(focus):
         registry, records = store.snapshot()
         if cli["verify_event_chain"](records) or cli["verify_registry_events"](registry, records):
             raise SyncError("work registry audit validation failed; mirror left unchanged")
+        checkpoint = store.checkpoint()
+        if records and checkpoint is not None:
+            last_raw, last = records[-1]
+            if checkpoint != (last.get("seq"), hashlib.sha256(last_raw).hexdigest()):
+                raise SyncError(
+                    "work registry audit head does not match the external checkpoint; "
+                    "mirror left unchanged")
     return project_cards(registry, [event for _, event in records], dt.datetime.now(dt.timezone.utc), focus)
 
 
