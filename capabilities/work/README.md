@@ -76,6 +76,25 @@ The commit must exist in the owner checkout and be in the history of the board's
 commit changed are unchanged at the integration tip. Annotating is refused when a
 receipt already exists, and the event is appended to the audit log like any other.
 
+## One front door
+
+`./loom` wraps the entry points without hiding them. Policy lives in
+`~/.config/loom/loom.json`, not in a launchd plist.
+
+```bash
+./loom work list --ready        # the task CLI, unchanged
+./loom tick                     # preview; limits come from the config
+./loom tick --apply             # claim and launch
+./loom workers                  # running, with pid, branch and worktree
+./loom workers stop <task>
+./loom schedule status          # label, plist, job state and the last log lines
+./loom schedule start|stop
+./loom linear sync --all --apply
+./loom logs <task>
+```
+
+`./task` keeps working; `loom work` is the same binary with the same verbs.
+
 ## Storage
 
 State lives in SQLite at `~/.local/state/loom/work.db`. The database is outside every repository,

@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""One front door for the loom coordination engine.
+
+The engine already works through several entry points — the `task` CLI, the Linear sync script, and
+launchd. This wraps them behind one vocabulary without hiding any of them: `loom schedule status`
+prints the real label, plist and log, so a job that stops firing is visible rather than mysterious.
+
+    loom work list --ready          the task CLI, unchanged
+    loom tick [--apply]             policy pass, limits from loom.json
+    loom workers [stop <task>]      what is running, in which worktree
+    loom schedule status|start|stop the launchd job
+    loom linear sync [--all]        the Linear projection
+    loom logs <task>                the worker's log
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+WORK = Path(__file__).resolve().parent
+TASK = WORK / "task"
+LINEAR = WORK / "linear_sync.py"
+CONFIG_PATH = Path(os.environ.get("LOOM_CONFIG") or Path.home() / ".config/loom/loom.json")
+
+DEFAULTS = {
+    "db": str(Path.home() / ".local/state/loom/work.db"),
+    "worker": {
+        "command": "opencode run --model opencode-go/deepseek-v4.1-flash",
+        "ttl": "90m",
+        "limits": {"implementer": 2, "reviewer": 2, "integrator": 1},
+    },
+    "linear": {"config": str(Path.home() / ".config/loom/linear-portfolio.json")},
+    "schedule": {"tick_label": "com.hritvik.loom-tick", "linear_label": "com.hritvik.loom-linear"},
+}
+
+
+def _merge(base: dict, override: dict) -> dict:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def load_config(path: Path = CONFIG_PATH) -> dict:
+    config = json.loads(json.dumps(DEFAULTS))
+    if path.is_file():
+        _merge(config, json.loads(path.read_text()))
+    return config
+
+
+def state_home() -> Path:
+    home = Path.home() / ".local/state/loom"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def delegate(command: list[str], env_extra: dict | None = None) -> int:
+    env = dict(os.environ)
+    env.update(env_extra or {})
+    return subprocess.run(command, env=env).returncode
+
+
+# --------------------------------------------------------------------------
+# work
+# --------------------------------------------------------------------------
+
+
+def cmd_work(args: list[str], config: dict) -> int:
+    return delegate([sys.executable, str(TASK), "--db", config["db"], *args])
+
+
+# --------------------------------------------------------------------------
+# tick
+# --------------------------------------------------------------------------
+
+
+def cmd_tick(args: argparse.Namespace, config: dict) -> int:
+    worker = config["worker"]
+    limits = worker.get("limits", {})
+    command = [sys.executable, str(TASK), "--db", config["db"], "tick"]
+    if args.apply:
+        command.append("--apply")
+    command += ["--ttl", str(worker.get("ttl", "90m"))]
+    command += ["--worker-command", worker.get("command", DEFAULTS["worker"]["command"])]
+    for role in ("implementer", "reviewer", "integrator"):
+        value = getattr(args, role, None)
+        if value is None:
+            value = limits.get(role)
+        if value is not None:
+            command += [f"--max-{role}", str(value)]
+    return delegate(command + (args.extra or []))
+
+
+# --------------------------------------------------------------------------
+# workers
+# --------------------------------------------------------------------------
+
+
+def pending_launches(config: dict) -> list[dict]:
+    sys.path.insert(0, str(WORK))
+    from store import make_store
+
+    store = make_store(WORK, "sqlite", config["db"])
+    try:
+        records = [record for _, record in store.read_events()]
+    finally:
+        store.close()
+    latest: dict[str, dict] = {}
+    for record in records:
+        if record.get("event") == "launch" and record.get("task"):
+            latest[record["task"]] = record
+    return [record for record in latest.values() if record.get("state") == "pending"]
+
+
+def pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def cmd_workers(args: argparse.Namespace, config: dict) -> int:
+    launches = pending_launches(config)
+    running = [item for item in launches if pid_alive(item.get("pid"))]
+    if args.action == "stop":
+        target = next((item for item in running if item.get("task") == args.task), None)
+        if target is None:
+            print(f"no running worker for {args.task}", file=sys.stderr)
+            return 2
+        os.kill(int(target["pid"]), 15)
+        print(f"sent SIGTERM to {args.task} (pid {target['pid']})")
+        return 0
+    if not running:
+        print("no workers running")
+        return 0
+    for item in running:
+        print(f"{item['task']:<24} {item.get('role', ''):<12} pid {item['pid']:<8} "
+              f"{item.get('branch') or '(no branch)'}")
+        if item.get("worktree"):
+            print(f"    worktree {item['worktree']}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# schedule
+# --------------------------------------------------------------------------
+
+
+def plist_path(label: str) -> Path:
+    return Path.home() / "Library/LaunchAgents" / f"{label}.plist"
+
+
+def cmd_schedule(args: argparse.Namespace, config: dict) -> int:
+    label = config["schedule"].get("tick_label", DEFAULTS["schedule"]["tick_label"])
+    uid = os.getuid()
+    plist = plist_path(label)
+    log = state_home() / "tick.log"
+    if args.action == "start":
+        if not plist.is_file():
+            print(f"no plist at {plist}", file=sys.stderr)
+            return 2
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
+        result = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"launchctl bootstrap failed: {result.stderr.strip()}", file=sys.stderr)
+            return 2
+        print(f"started {label}")
+        return 0
+    if args.action == "stop":
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
+        print(f"stopped {label}")
+        return 0
+    listing = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
+    row = next((line for line in listing.splitlines() if label in line), None)
+    print(f"label:  {label}")
+    print(f"plist:  {plist} {'(present)' if plist.is_file() else '(missing)'}")
+    print(f"job:    {row.strip() if row else 'not loaded'}")
+    print(f"log:    {log}")
+    if log.is_file():
+        tail = log.read_text(errors="replace").splitlines()[-3:]
+        for line in tail:
+            print(f"  | {line}")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# linear
+# --------------------------------------------------------------------------
+
+
+def cmd_linear(args: argparse.Namespace, config: dict) -> int:
+    command = [sys.executable, str(LINEAR), "--config", config["linear"]["config"]]
+    command += ["--all"] if args.all else (["--focus", args.focus] if args.focus else ["--all"])
+    if args.apply:
+        command.append("--apply")
+    key_file = Path.home() / ".config/loom/linear.key"
+    if not key_file.is_file():
+        print(f"missing Linear API key at {key_file}", file=sys.stderr)
+        return 2
+    return delegate(command, {"LINEAR_API_KEY": key_file.read_text().strip()})
+
+
+# --------------------------------------------------------------------------
+# logs
+# --------------------------------------------------------------------------
+
+
+def cmd_logs(args: argparse.Namespace, config: dict) -> int:
+    log = state_home() / f"worker-{args.task.replace('/', '-')}.log"
+    if not log.is_file():
+        print(f"no log at {log}", file=sys.stderr)
+        return 2
+    lines = log.read_text(errors="replace").splitlines()[-args.lines:]
+    for line in lines:
+        print(line)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="loom", description="One front door for the loom engine.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    work = sub.add_parser("work", help="the task CLI, unchanged")
+    work.add_argument("args", nargs=argparse.REMAINDER)
+
+    tick = sub.add_parser("tick", help="policy pass; limits come from loom.json")
+    tick.add_argument("--apply", action="store_true")
+    tick.add_argument("--implementer", type=int)
+    tick.add_argument("--reviewer", type=int)
+    tick.add_argument("--integrator", type=int)
+    tick.add_argument("extra", nargs=argparse.REMAINDER)
+
+    workers = sub.add_parser("workers", help="what is running")
+    workers.add_argument("action", nargs="?", choices=["list", "stop"], default="list")
+    workers.add_argument("task", nargs="?")
+
+    schedule = sub.add_parser("schedule", help="the launchd job")
+    schedule.add_argument("action", choices=["status", "start", "stop"], default="status", nargs="?")
+
+    linear = sub.add_parser("linear", help="the Linear projection")
+    linear.add_argument("--all", action="store_true")
+    linear.add_argument("--focus")
+    linear.add_argument("--apply", action="store_true")
+
+    logs = sub.add_parser("logs", help="a worker's log")
+    logs.add_argument("task")
+    logs.add_argument("--lines", type=int, default=40)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    config = load_config()
+    if args.command == "work":
+        return cmd_work(args.args, config)
+    if args.command == "tick":
+        return cmd_tick(args, config)
+    if args.command == "workers":
+        if args.action == "stop" and not args.task:
+            print("workers stop needs a task id", file=sys.stderr)
+            return 2
+        return cmd_workers(args, config)
+    if args.command == "schedule":
+        return cmd_schedule(args, config)
+    if args.command == "linear":
+        return cmd_linear(args, config)
+    return cmd_logs(args, config)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
