@@ -199,6 +199,34 @@ Rules enforced by the CLI:
 - Illegal transitions are refused; `claim` is the only way to enter `claimed`.
 - Reviewing clears the implementation claim.
 
+## Reviewing
+
+An implementer submits by asking an independent reviewer:
+
+```bash
+./task ask alpha/W-1 --to opencode/reviewer-agent --question "Review the submitted revision" \
+  --review-source <40-char commit> --review-evidence evidence/W-1.md
+```
+
+The reviewer answers with a recorded verdict — `approve` or `changes requested`, with a nonblank
+note. The reviewer of record may never be the acting agent or an earlier claimant.
+
+`./loom tick --apply` runs the reviewer side unattended:
+
+1. **Launch** — for each open request addressed to `opencode/reviewer-agent`, start an independent
+   reviewer in a *detached* checkout at the exact source commit (under `~/.local/state/loom/reviews/`,
+   separate from the implementer's branch). The reviewer reads the diff, the evidence and the code,
+   runs what it can, and answers.
+2. **Record** — for each green task whose latest request carries an approval, the coordinator
+   (`opencode/loom-coordinator`) records `reviewed`, naming the reviewer and the answer event. The
+   reviewer decides; the coordinator records, so the acting agent is never the reviewer of record.
+3. **Bound** — a request that crashes `--max-review-attempts` times is reported as *stalled* and
+   left for a human. A `changes requested` verdict leaves the task green for rework and is never
+   auto-transitioned.
+
+Requests addressed to a human (for example `hritvik`) are never picked up by a reviewer worker.
+The reviewer identity, attempt bound and coordinator are policy in `~/.config/loom/loom.json`.
+
 ## Create work centrally
 
 New work starts here, not in a repository.

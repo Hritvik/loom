@@ -16,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,8 @@ class Workspace:
         os.environ["WORK_DB"] = str(self.db)
         self._previous_trees = os.environ.get("LOOM_WORKTREES")
         os.environ["LOOM_WORKTREES"] = str(self.root / "worktrees")
+        self._previous_reviews = os.environ.get("LOOM_REVIEWS")
+        os.environ["LOOM_REVIEWS"] = str(self.root / "reviews")
         self.repo = self.root / "repo"
         (self.repo / "docs").mkdir(parents=True)
 
@@ -173,6 +176,10 @@ class Workspace:
             os.environ.pop("LOOM_WORKTREES", None)
         else:
             os.environ["LOOM_WORKTREES"] = self._previous_trees
+        if self._previous_reviews is None:
+            os.environ.pop("LOOM_REVIEWS", None)
+        else:
+            os.environ["LOOM_REVIEWS"] = self._previous_reviews
         self.tmp.cleanup()
 
 
@@ -1294,6 +1301,146 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("Expired leases to release or take over:", later)
         self.assertIn("demo/W-1", later)
         self.assertIn("agent-a", later)
+
+    # -- reviewer workers -------------------------------------------------
+
+    def test_tick_launches_a_reviewer_for_an_open_request(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "1",
+                    "--worker-command", "/usr/bin/true",
+                    "--reviewer-identity", "opencode/reviewer-agent", "--now", T0)
+        launch = [event for event in self.ws.events()
+                  if event.get("event") == "launch" and event.get("role") == "reviewer"][-1]
+        self.assertEqual(launch["task"], "demo/W-1")
+        self.assertEqual(launch["question"], int(request))
+        self.assertEqual(launch["source"], source)
+        self.assertEqual(launch["agent"], "opencode/reviewer-agent")
+        self.assertEqual(launch["state"], "pending")
+        tree = self.ws.root / "reviews" / "demo-w-1"
+        self.assertTrue(tree.exists())
+        head = subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True).strip()
+        self.assertEqual(head, source)
+
+    def test_the_reviewer_brief_names_the_identity_and_request(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        capture = self.ws.root / "capture.sh"
+        capture.write_text("#!/bin/sh\nprintf '%s' \"$1\" > " + str(self.ws.root / "brief.txt") + "\n")
+        capture.chmod(0o755)
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "1",
+                    "--worker-command", str(capture),
+                    "--reviewer-identity", "opencode/reviewer-agent", "--now", T0)
+        brief_file = self.ws.root / "brief.txt"
+        deadline = time.time() + 5
+        while not brief_file.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(brief_file.exists(), "the reviewer brief was never written")
+        brief = brief_file.read_text()
+        self.assertIn("independent reviewer", brief)
+        self.assertIn("opencode/reviewer-agent", brief)
+        self.assertIn(f"event {request}", brief)
+        self.assertIn(source, brief)
+        self.assertIn("Do not transition the task", brief)
+
+    def test_tick_does_not_answer_a_request_addressed_to_a_human(self):
+        self.mark_green()
+        self.request_review(self.commit(), reviewer="hritvik")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "2",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        roles = [event.get("role") for event in self.ws.events() if event.get("event") == "launch"]
+        self.assertNotIn("reviewer", roles)
+
+    def test_the_coordinator_records_reviewed_from_an_approval(self):
+        self.mark_green()
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+        transition = [event for event in self.ws.events()
+                      if event.get("event") == "transition"
+                      and event.get("status") == "reviewed"][-1]
+        self.assertEqual(transition["agent"], "opencode/loom-coordinator")
+        self.assertEqual(transition["reviewer"], "opencode/reviewer-agent")
+        self.assertEqual(transition["epoch"], 1)
+
+    def test_changes_requested_leaves_the_task_green(self):
+        self.mark_green()
+        request = self.request_review(self.commit(), reviewer="opencode/reviewer-agent")
+        self.invoke("answer", "demo/W-1", "--question", request, "--decision", "changes requested",
+                    "--note", "Regression found in the error path",
+                    "--agent", "opencode/reviewer-agent", "--now", T0)
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "green")
+
+    def test_a_spawned_reviewer_can_answer_and_the_next_tick_records_it(self):
+        self.mark_green()
+        source = self.commit()
+        self.request_review(source, reviewer="opencode/reviewer-agent")
+        script = self.ws.root / "review.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            "brief=\"$1\"\n"
+            "task=$(printf '%s\\n' \"$brief\" | sed -n 's/^Task: //p')\n"
+            "question=$(printf '%s\\n' \"$brief\" | sed -n 's/^Review request: event //p')\n"
+            f"exec {TASK} --root {self.ws.root} answer \"$task\" --question \"$question\" "
+            "--decision approve --note \"Verified the diff and the focused tests\" "
+            "--agent opencode/reviewer-agent\n"
+        )
+        script.chmod(0o755)
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "1",
+                    "--worker-command", str(script),
+                    "--reviewer-identity", "opencode/reviewer-agent", "--now", T0)
+        deadline = time.time() + 10
+        while (not any(event.get("event") == "answer" for event in self.ws.events())
+               and time.time() < deadline):
+            time.sleep(0.02)
+        self.assertTrue(any(event.get("event") == "answer" for event in self.ws.events()),
+                        "the spawned reviewer never answered")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+
+    def test_a_reviewer_launch_that_answered_is_done_not_failed(self):
+        self.mark_green()
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        store = self.ws.store()
+        try:
+            store.append_event(event="launch", task="demo/W-1", agent="opencode/reviewer-agent",
+                               role="reviewer", state="pending", pid=999999, revision=2,
+                               question=int(request), source=source, now=T0)
+        finally:
+            store.close()
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("role") == "reviewer"]
+        self.assertEqual(launches[-1]["state"], "done")
+
+    def test_a_review_request_stops_after_repeated_launch_failures(self):
+        self.mark_green()
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        store = self.ws.store()
+        try:
+            for _ in range(2):
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/reviewer-agent", role="reviewer",
+                                   state="failed", pid=999999, revision=2,
+                                   question=int(request), source=source, now=T0)
+        finally:
+            store.close()
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "2",
+                             "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("Review stalled", result.stdout)
+        self.assertNotIn("launched review of demo/W-1", result.stdout)
 
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)

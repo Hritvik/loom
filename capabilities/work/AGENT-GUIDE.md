@@ -110,6 +110,10 @@ holder. If the lease is taken over, the epoch increments and your writes are ref
 retry with the new epoch. A lease that has expired is no authority either — renew before it runs
 out, and if it has already run out, use `blocked` or `release` rather than asserting `red`/`green`.
 
+Review is a separate identity (`opencode/reviewer-agent`) and a separate process. You submit; it
+answers; the coordinator records `reviewed`. Never answer a review request for work you implemented
+or held a claim on, and never approve on trust.
+
 Code, tests, packet bodies and evidence stay in **your** product repository. The registry holds
 identity, state, revision, claims and dependencies — nothing else.
 

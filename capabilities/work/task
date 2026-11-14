@@ -1450,6 +1450,38 @@ Do this:
 7. Do not touch Linear. The projection is read-only.
 """
 
+REVIEWER_IDENTITY = "opencode/reviewer-agent"
+REVIEW_COORDINATOR = "opencode/loom-coordinator"
+MAX_REVIEW_ATTEMPTS = 2
+
+REVIEWER_BRIEF = """You are an independent reviewer for one task in the portfolio work registry.
+
+Task: {task}
+Revision under review: {revision}
+Review request: event {question}
+Source commit: {source}
+Base commit: {base}
+Evidence: {evidence}
+Your identity: {agent}
+Your checkout: {repo}   (detached at the source commit; treat it as read-only)
+Owner repository: {owner_repo}
+
+You did not write this work and you must not change it.
+
+Do this:
+1. Read the task: `cd {work} && ./task show {task}`.
+2. Read the evidence at {evidence} in {owner_repo} or in your checkout.
+3. Verify rather than trust: inspect `git -C {owner_repo} diff {base}..{source}`, check the
+   claims against the code, and run the tests you can. Do not accept a summary as proof.
+4. Record exactly one verdict, with a nonblank note saying what you checked and what you found:
+   `./task answer {task} --question {question} --decision approve --note "..." --agent {agent}`
+   or `--decision "changes requested"` with specific, actionable findings.
+5. Do not transition the task, claim it, edit files, commit, push or touch Linear. The coordinator
+   records `reviewed` from an approval; a changes-requested answer leaves the task green for rework.
+6. If you cannot verify the work, answer `changes requested` and say what is missing. Never approve
+   on trust, and never review work you implemented or held a claim on.
+"""
+
 
 def launches(store: Store) -> list[dict]:
     """Launch events, newest last."""
@@ -1474,10 +1506,24 @@ def pid_alive(pid: int) -> bool:
 def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[str]:
     """Mark launches whose process is gone, and escalate tasks that keep failing."""
     problems = []
+    records = [record for _, record in store.read_events()]
+    answers = {(record.get("task"), record.get("in_reply_to")): record.get("seq")
+               for record in records if record.get("event") == "answer"}
     for task in registry["tasks"]:
         state = launch_state(store, task["id"])
         latest = state["latest"]
         if latest.get("state") != "pending" or pid_alive(latest.get("pid")):
+            continue
+        if latest.get("role") == "reviewer":
+            # A reviewer succeeds by recording a verdict, not by moving the task: a
+            # changes-requested answer leaves it green. A crash is retried, not escalated,
+            # because the review request is still open and the attempt counter bounds it.
+            answered = answers.get((task["id"], latest.get("question")), -1) > int(latest.get("seq") or 0)
+            store.append_event(event="launch", task=task["id"],
+                               agent=latest.get("agent") or REVIEWER_IDENTITY,
+                               state="done" if answered else "failed", pid=latest.get("pid"),
+                               role="reviewer", revision=latest.get("revision"),
+                               question=latest.get("question"), now=iso(now))
             continue
         advanced = (task.get("revision", 0) > int(latest.get("revision") or -1)
                     or task.get("status") in {"green", "reviewed", "integrated", "accepted", "done"})
@@ -1566,10 +1612,146 @@ def spawn_worker(args, task: dict, role: str, work_home: Path) -> tuple[int | No
     return process.pid, tree, branch
 
 
-def cmd_tick(args, store: Store) -> int:
-    """One policy pass: what would be claimed and launched, and what is stale."""
+def review_worktree(repo: Path, task_id: str, source: str) -> Path:
+    """A detached checkout of the exact commit under review, separate from the worker's branch."""
+    probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True)
+    if probe.returncode != 0:
+        return repo
+    slug = task_id.replace("/", "-").lower()
+    base = Path(os.environ.get("LOOM_REVIEWS")
+                or Path.home() / ".local/state/loom/reviews").expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / slug
+    if not path.exists():
+        added = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach",
+                                str(path), source], capture_output=True, text=True)
+        if added.returncode != 0:
+            raise WorkError(f"cannot create a review worktree for {task_id}: {added.stderr.strip()}")
+    else:
+        moved = subprocess.run(["git", "-C", str(path), "checkout", "-q", "--detach", source],
+                               capture_output=True, text=True)
+        if moved.returncode != 0:
+            raise WorkError(
+                f"cannot check out {source[:12]} for review of {task_id}: {moved.stderr.strip()}")
+    return path
+
+
+def spawn_reviewer(args, task: dict, item: dict, work_home: Path) -> tuple[int, Path]:
+    """Start an independent reviewer on one open request, in a detached checkout."""
+    repo = Path(str(task.get("owner_repo") or ".")).expanduser()
+    tree = review_worktree(repo, task["id"], item["source"])
+    brief = REVIEWER_BRIEF.format(
+        task=task["id"], revision=item["revision"], question=item["question"],
+        source=item["source"], base=item.get("base") or "(none: diff from the empty tree)",
+        evidence=item.get("evidence") or "(none recorded)", agent=args.reviewer_identity,
+        repo=tree, owner_repo=repo, work=work_home,
+    )
+    command = shlex.split(args.worker_command) + [brief]
+    log_dir = Path.home() / ".local/state/loom"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = (log_dir / f"review-{task['id'].replace('/', '-')}.log").open("ab")
+    process = subprocess.Popen(command, cwd=str(tree), env=worker_environment(args),
+                               stdout=log, stderr=log, start_new_session=True)
+    return process.pid, tree
+
+
+def open_review_requests(store: Store, registry: dict, reviewer_identity: str,
+                         max_attempts: int) -> tuple[list[dict], list[dict]]:
+    """Open review requests addressed to the reviewer, and those that exhausted their attempts."""
+    records = [record for _, record in store.read_events()]
+    by_id = {task["id"]: task for task in registry["tasks"]}
+    answered = {record.get("in_reply_to") for record in records if record.get("event") == "answer"}
+    latest_launch: dict[str, dict] = {}
+    failures: dict[tuple[str, int], int] = {}
+    for record in records:
+        if record.get("event") != "launch" or not record.get("task"):
+            continue
+        latest_launch[record["task"]] = record
+        if record.get("role") == "reviewer" and record.get("state") == "failed":
+            key = (record["task"], record.get("question"))
+            failures[key] = failures.get(key, 0) + 1
+    open_requests, stalled = [], []
+    seen: set[tuple[str, int]] = set()
+    for record in reversed(records):
+        if record.get("event") != "ask" or not record.get("review_source"):
+            continue
+        task = by_id.get(record.get("task"))
+        if not task or task.get("status") != "green":
+            continue
+        if record.get("revision") != task.get("revision"):
+            continue
+        key = (task["id"], task["revision"])
+        if key in seen:
+            continue  # only the latest request for a green revision counts
+        seen.add(key)
+        if record.get("seq") in answered or record.get("to") != reviewer_identity:
+            continue
+        launch = latest_launch.get(task["id"])
+        if (launch and launch.get("role") == "reviewer" and launch.get("state") == "pending"
+                and launch.get("question") == record.get("seq") and pid_alive(launch.get("pid"))):
+            continue
+        entry = {
+            "task": task["id"], "revision": task["revision"], "question": record["seq"],
+            "source": record["review_source"], "base": record.get("review_base"),
+            "evidence": record.get("review_evidence"), "requested_by": record.get("agent"),
+        }
+        if failures.get((task["id"], record["seq"]), 0) >= max_attempts:
+            stalled.append(entry)
+        else:
+            open_requests.append(entry)
+    open_requests.sort(key=lambda entry: entry["task"])
+    return open_requests, stalled
+
+
+def sweep_approved_reviews(store: Store, now: dt.datetime, agent: str,
+                           dry_run: bool = False) -> list[dict]:
+    """Record `reviewed` for every green task whose latest request carries an approval.
+
+    The reviewer decides and answers; the coordinator records the state change, so the acting
+    agent is never the reviewer of record. With `dry_run`, report what would be recorded.
+    """
+    recorded = []
     registry = store.load()
+    for task in registry["tasks"]:
+        if task.get("status") != "green":
+            continue
+        history = task_history(store, task)
+        request = latest_review_request(task, history)
+        if not request:
+            continue
+        answer = next((event for event in history if event.get("event") == "answer"
+                       and event.get("in_reply_to") == request["seq"]), None)
+        if not answer or answer.get("decision") != "approve":
+            continue
+        review_args = argparse.Namespace(
+            task=task["id"], revision=task.get("revision", 0), to="reviewed",
+            epoch=claim_epoch(task), reviewer=answer.get("agent"), decision="approve",
+            review_answer=answer.get("seq"), evidence=request.get("review_evidence"),
+            severity=None, reason=None, needs=None, integrated_source=None,
+            agent=agent, now=iso(now),
+        )
+        if dry_run:
+            recorded.append({"task": task["id"], "reviewer": answer.get("agent"),
+                             "answer": answer.get("seq"), "would": True})
+            continue
+        try:
+            cmd_transition(review_args, store)
+            recorded.append({"task": task["id"], "reviewer": answer.get("agent"),
+                             "answer": answer.get("seq")})
+        except WorkError as exc:
+            recorded.append({"task": task["id"], "error": str(exc)})
+    return recorded
+
+
+def cmd_tick(args, store: Store) -> int:
+    """One policy pass: what would be claimed, launched or reviewed, and what is stale."""
     now = parse_now(args.now)
+    problems = []
+    if args.apply:
+        problems = reconcile_launches(store, store.load(), now)
+    reviewed = sweep_approved_reviews(store, now, args.coordinator, dry_run=not args.apply)
+    registry = store.load()
     index = dependents_index(registry)
     limits = {
         "implementer": args.max_implementer,
@@ -1591,6 +1773,23 @@ def cmd_tick(args, store: Store) -> int:
                 "agent": claim.get("agent"),
                 "expired": claim.get("lease_expires"),
             })
+
+    records = [record for _, record in store.read_events()]
+    latest_launch: dict[str, dict] = {}
+    for record in records:
+        if record.get("event") == "launch" and record.get("task"):
+            latest_launch[record["task"]] = record
+    live_reviewers = [
+        record for record in latest_launch.values()
+        if record.get("role") == "reviewer" and record.get("state") == "pending"
+        and pid_alive(record.get("pid"))
+    ]
+    review_requests, stalled_reviews = open_review_requests(
+        store, registry, args.reviewer_identity, args.max_review_attempts)
+    review_slots = max(0, limits["reviewer"] - len(live_reviewers))
+    review_chosen = review_requests[:review_slots]
+    review_held = review_requests[review_slots:]
+
     candidates = []
     for task in registry["tasks"]:
         if task.get("status") not in CLAIMABLE_FROM:
@@ -1616,8 +1815,8 @@ def cmd_tick(args, store: Store) -> int:
             chosen.append(item)
         else:
             held.append({**item, "reason": f"no {item['role']} slot (limit {limits[item['role']]})"})
-    problems = reconcile_launches(store, registry, now) if args.apply else []
-    launched = []
+
+    launched, launched_reviews = [], []
     if args.apply:
         work_home = Path(__file__).resolve().parent
         for item in chosen:
@@ -1637,15 +1836,32 @@ def cmd_tick(args, store: Store) -> int:
                                worktree=str(tree), branch=branch, now=args.now)
             launched.append({"task": item["task"], "role": item["role"], "pid": pid,
                              "worktree": str(tree), "branch": branch})
+        for item in review_chosen:
+            task = find_task(store.load(), item["task"])
+            try:
+                pid, tree = spawn_reviewer(args, task, item, work_home)
+            except WorkError as exc:
+                problems.append(f"{item['task']} review: {exc}")
+                continue
+            store.append_event(event="launch", task=item["task"], agent=args.reviewer_identity,
+                               role="reviewer", state="pending", pid=pid,
+                               revision=item["revision"], worktree=str(tree), branch=None,
+                               source=item["source"], question=item["question"], now=args.now)
+            launched_reviews.append({"task": item["task"], "pid": pid,
+                                     "question": item["question"], "source": item["source"],
+                                     "worktree": str(tree)})
 
     if args.json:
         print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
                           "held": held, "expired": expired, "launched": launched,
-                          "problems": problems}, indent=2))
+                          "review": review_chosen, "reviewHeld": review_held,
+                          "reviewStalled": stalled_reviews, "reviewLaunched": launched_reviews,
+                          "reviewed": reviewed, "problems": problems}, indent=2))
         return 0
     print(f"Tick preview — {iso(now)}")
     print("  capacity: " + "  ".join(
-        f"{role} {active[role]}/{limits[role]}" for role in ROLES))
+        f"{role} {active[role]}/{limits[role]}" for role in ROLES)
+        + f"  reviewers live {len(live_reviewers)}/{limits['reviewer']}")
     print()
     if chosen:
         print("Would claim and launch:")
@@ -1663,16 +1879,40 @@ def cmd_tick(args, store: Store) -> int:
             shown = ", ".join(entry["task"] for entry in items[:4])
             more = f" (+{len(items) - 4} more)" if len(items) > 4 else ""
             print(f"  {reason}: {shown}{more}")
+    if review_chosen:
+        print("\nWould review:")
+        for item in review_chosen:
+            print(f"  {item['task']:<22} r{item['revision']:<3} request {item['question']:<5}"
+                  f" {item['source'][:12]}")
+    if review_held:
+        print(f"\nReview held back (no reviewer slot, limit {limits['reviewer']}): "
+              + ", ".join(item["task"] for item in review_held[:6])
+              + (f" (+{len(review_held) - 6} more)" if len(review_held) > 6 else ""))
+    if stalled_reviews:
+        print("\nReview stalled (attempts exhausted; needs a human):")
+        for item in stalled_reviews:
+            print(f"  {item['task']:<22} request {item['question']}  {item['source'][:12]}")
+    if reviewed:
+        heading = ("Would record reviewed from an approval:" if not args.apply
+                   else "Recorded reviewed from an approval:")
+        print(f"\n{heading}")
+        for item in reviewed:
+            if item.get("error"):
+                print(f"  {item['task']:<22} ERROR {item['error']}")
+            else:
+                print(f"  {item['task']:<22} by {item['reviewer']} (answer {item['answer']})")
     if expired:
         print("\nExpired leases to release or take over:")
         for item in expired:
             print(f"  {item['task']:<22} {item['agent']}  expired {item['expired']}")
     for item in launched:
         print(f"  launched {item['task']} ({item['role']}) pid {item['pid']}")
+    for item in launched_reviews:
+        print(f"  launched review of {item['task']} pid {item['pid']}")
     for problem in problems:
         print(f"ESCALATE {problem}")
     if not args.apply:
-        print("\nPreview only. Pass --apply to claim and launch a worker for each chosen task.")
+        print("\nPreview only. Pass --apply to claim, launch and review.")
     return 0
 
 
@@ -2395,6 +2635,12 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--max-implementer", type=int, default=3)
     tick.add_argument("--max-reviewer", type=int, default=2)
     tick.add_argument("--max-integrator", type=int, default=1)
+    tick.add_argument("--reviewer-identity", default=REVIEWER_IDENTITY,
+                      help="agent that reviews open requests (never a human address)")
+    tick.add_argument("--max-review-attempts", type=int, default=MAX_REVIEW_ATTEMPTS,
+                      help="launch attempts per review request before it is reported as stalled")
+    tick.add_argument("--coordinator", default=REVIEW_COORDINATOR,
+                      help="acting agent that records `reviewed` from an approval")
     tick.add_argument("--json", action="store_true")
     tick.add_argument("--apply", action="store_true", help="claim and launch a worker for each chosen task")
     tick.add_argument("--ttl", default="90m", help="lease for a launched worker (default 90m)")

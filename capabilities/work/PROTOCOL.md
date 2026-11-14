@@ -102,6 +102,29 @@ Rules enforced by the CLI:
 - Default lease is 30 minutes; heartbeat with `renew` before expiry.
 - One file lock serialises mutations, so concurrent processes cannot interleave writes.
 
+## Review protocol
+
+An implementer submits green work by asking a reviewer; the ask is an audit event, not a mutation:
+
+```bash
+task ask    <id> --to opencode/reviewer-agent --question TEXT \
+  --review-source <40-char commit> [--review-base <commit>] --review-evidence <path>
+task answer <id> --question <ask-seq> --decision "approve|changes requested" --note TEXT \
+  --agent opencode/reviewer-agent
+```
+
+- Only the addressee may answer, only once, and only for the latest request at the current green
+  revision. A superseded request cannot be answered.
+- The reviewer must be independent: not the acting agent, not the live claim holder, and not any
+  agent that claimed the task or moved it to green.
+- `reviewed` requires the reviewer's approval event. The acting agent records the transition and
+  names the reviewer, so the reviewer of record is never the acting agent.
+- The tick's reviewer side launches an independent reviewer per open request addressed to
+  `opencode/reviewer-agent`, in a detached checkout at the source commit, bounded by
+  `--max-review-attempts`. An approval is recorded as `reviewed` by the coordinator; a
+  changes-requested answer leaves the task green for rework.
+- Requests addressed to a human are never answered by a worker.
+
 ## Event log
 
 Every mutation appends one hash-chained row to the `events` table:

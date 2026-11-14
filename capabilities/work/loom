@@ -32,6 +32,9 @@ DEFAULTS = {
         "command": "opencode run --model opencode-go/deepseek-v4.1-flash",
         "ttl": "90m",
         "limits": {"implementer": 2, "reviewer": 2, "integrator": 1},
+        "reviewer_identity": "opencode/reviewer-agent",
+        "review_attempts": 2,
+        "coordinator": "opencode/loom-coordinator",
     },
     "linear": {"config": str(Path.home() / ".config/loom/linear-portfolio.json")},
     "schedule": {"tick_label": "com.hritvik.loom-tick", "linear_label": "com.hritvik.loom-linear"},
@@ -88,6 +91,11 @@ def cmd_tick(args: argparse.Namespace, config: dict) -> int:
         command.append("--apply")
     command += ["--ttl", str(worker.get("ttl", "90m"))]
     command += ["--worker-command", worker.get("command", DEFAULTS["worker"]["command"])]
+    command += ["--reviewer-identity",
+                worker.get("reviewer_identity", DEFAULTS["worker"]["reviewer_identity"])]
+    command += ["--max-review-attempts",
+                str(worker.get("review_attempts", DEFAULTS["worker"]["review_attempts"]))]
+    command += ["--coordinator", worker.get("coordinator", DEFAULTS["worker"]["coordinator"])]
     for role in ("implementer", "reviewer", "integrator"):
         value = getattr(args, role, None)
         if value is None:
