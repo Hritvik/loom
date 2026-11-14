@@ -22,12 +22,14 @@ API_KEY_VAR = "LINEAR_API_KEY"
 LANES = {
     "claimable": "Claimable",
     "implementing": "Implementing",
-    "needs_review": "Needs Review Submission",
+    "needs_review": "Needs Review",
     "in_review": "In Review",
     "changes_requested": "Changes Requested",
     "awaiting_integration": "Awaiting Integration",
     "integrated": "Integrated",
     "blocked": "Blocked",
+    "planned": "Planned",
+    "rejected": "Rejected",
 }
 
 
@@ -158,6 +160,8 @@ def merge_description(existing, managed):
 
 def mirror(client, config, destination, cards, *, apply):
     ordered = ordered_cards(cards)
+    labels = config.get("labels", {})
+    needs_human_label = labels.get("Needs Human")
     states = {}
     for lane in {card["lane"] for card in ordered}:
         name = config["states"].get(lane)
@@ -179,10 +183,18 @@ def mirror(client, config, destination, cards, *, apply):
         current = managed_slice(issue["description"]) if issue else None
         description_changed = current is None or (
             normalise_markdown(current) != normalise_markdown(managed))
+        label_ids = []
+        program_label = labels.get(card["program"])
+        if program_label:
+            label_ids.append(program_label)
+        if card.get("needs_human") and needs_human_label:
+            label_ids.append(needs_human_label)
         fields = {
             "title": f"[{task_id}] {card['title']}"[:250],
             "description": merge_description(issue.get("description") if issue else None, managed),
             "stateId": states[card["lane"]],
+            "priority": card.get("priority", 0),
+            "labelIds": label_ids,
         }
         if not issue:
             if apply:
@@ -193,7 +205,9 @@ def mirror(client, config, destination, cards, *, apply):
             result["created"] += 1
             continue
         changed = {key: value for key, value in fields.items()
-                   if key != "description" and issue.get(key) != value}
+                   if key not in {"description", "labelIds"} and issue.get(key) != value}
+        if set(issue.get("labelIds") or []) != set(label_ids):
+            changed["labelIds"] = label_ids
         if description_changed:
             changed["description"] = fields["description"]
         if changed and apply:
@@ -204,7 +218,9 @@ def mirror(client, config, destination, cards, *, apply):
             managed = managed_description(card, issues)
             fields["description"] = merge_description(current["description"], managed)
             changed = {key: value for key, value in fields.items()
-                       if key != "description" and current.get(key) != value}
+                       if key not in {"description", "labelIds"} and current.get(key) != value}
+            if set(current.get("labelIds") or []) != set(label_ids):
+                changed["labelIds"] = label_ids
             if normalise_markdown(managed_slice(current["description"]) or "") != normalise_markdown(managed):
                 changed["description"] = fields["description"]
         if changed:
@@ -230,6 +246,13 @@ def load_config(path):
         key not in LANES or not isinstance(value, str) or not value.strip() for key, value in states.items()
     ):
         raise SyncError("Linear states must map lane keys to workflow state names")
+    labels = config.get("labels", {})
+    if not isinstance(labels, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) or not value.strip()
+        for key, value in labels.items()
+    ):
+        raise SyncError("Linear labels must map names to label ids")
+    config["labels"] = labels
     config["states"] = LANES | states
     return config
 

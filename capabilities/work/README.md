@@ -395,6 +395,30 @@ and edges at call time; nothing is cached.
 
 ### Linear mirror
 
-The read-only projection used by the Linear mirror lives in `linear_projection.py`; where and how the
-mirror runs belongs to your planning repository. The registry continues to own claims, review and
-integration.
+The read-only projection lives in `linear_projection.py`; the sync is `linear_sync.py` and the front
+door is `loom linear sync --all --apply`. The registry owns claims, review and integration; the
+mirror is one-way and never writes back.
+
+Cards are one per task, titled `[task-id] title`, with a managed description block (runway, next
+actor, implementer, reviewer, dependencies, blockers, unlocks, revision). Human notes outside the
+markers are preserved. The machine config lives in `~/.config/loom/linear-portfolio.json`;
+`templates/linear-portfolio.example.json` shows the state and label map.
+
+The board is organised for the questions a human actually asks:
+
+| State | Lanes |
+|---|---|
+| Todo | claimable |
+| In Progress | implementing, changes_requested |
+| Needs Review | needs_review |
+| In Review | in_review |
+| Awaiting Integration | awaiting_integration |
+| Blocked | blocked |
+| Backlog | planned, draft |
+| Canceled | rejected |
+| Done | integrated, accepted, done |
+
+Each card carries one program label and `Needs Human` when the next actor is the human or the task
+is blocked on a human decision. Priority comes from transitive downstream weight: 6+ urgent, 3–5
+high, 1–2 medium, 0 low; Done cards stay No priority. The sync is idempotent: a run that changes
+nothing writes nothing.

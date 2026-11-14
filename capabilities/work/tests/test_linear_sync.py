@@ -56,6 +56,17 @@ class LinearSyncTest(unittest.TestCase):
         self.assertEqual(self.sync(), {"created": 0, "updated": 0, "unchanged": 2})
         self.assertEqual(len(self.client.writes), 2)
 
+    def test_labels_priority_and_human_flag_are_projected(self):
+        self.config["labels"] = {"alpha": "alpha-label", "Needs Human": "human-label"}
+        self.cards[0]["priority"] = 2
+        self.cards[0]["needs_human"] = True
+        self.sync()
+        row = next(row for row in self.client.rows.values()
+                   if marker("alpha/W-1") in row["description"])
+        self.assertEqual(row["priority"], 2)
+        self.assertEqual(set(row["labelIds"]), {"alpha-label", "human-label"})
+        self.assertEqual(self.sync()["unchanged"], 2)
+
     def test_linear_markdown_rewrites_are_not_treated_as_updates(self):
         """Linear saves `- ` bullets as `* ` and wraps link destinations in angle brackets."""
         self.sync()

@@ -1,0 +1,20 @@
+{
+  "team_id": "<linear-team-uuid>",
+  "project_id": "<linear-project-uuid>",
+  "states": {
+    "claimable": "Todo",
+    "implementing": "In Progress",
+    "changes_requested": "In Progress",
+    "needs_review": "Needs Review",
+    "in_review": "In Review",
+    "awaiting_integration": "Awaiting Integration",
+    "blocked": "Blocked",
+    "planned": "Backlog",
+    "rejected": "Canceled",
+    "integrated": "Done"
+  },
+  "labels": {
+    "<program>": "<linear-label-uuid>",
+    "Needs Human": "<linear-label-uuid>"
+  }
+}

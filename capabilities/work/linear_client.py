@@ -10,7 +10,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 ENDPOINT = "https://api.linear.app/graphql"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 PAGE_INFO = "pageInfo { hasNextPage endCursor }"
-ISSUE_FIELDS = "id title description state { id } team { id } project { id } url archivedAt"
+ISSUE_FIELDS = ("id title description state { id } team { id } project { id } url archivedAt "
+                "priority labels { nodes { id name } }")
 
 DESTINATION = f"""
 query PortfolioDestination($teamId: String!, $projectId: String!, $teamFilter: TeamFilter!, $after: String) {{
@@ -84,6 +85,13 @@ def _issue(node):
     archived_at = node.get("archivedAt")
     if any(value is not None and not isinstance(value, str) for value in (description, archived_at)):
         raise LinearError("Linear API returned an unexpected issue field")
+    priority = node.get("priority")
+    if not isinstance(priority, int) or isinstance(priority, bool):
+        priority = 0
+    labels = node.get("labels")
+    label_ids = []
+    if labels is not None:
+        label_ids = [_required_text(_object(item).get("id")) for item in _nodes(labels)]
     return {
         "id": _required_text(node.get("id")),
         "title": _required_text(node.get("title")),
@@ -91,6 +99,8 @@ def _issue(node):
         "stateId": _required_text(_object(node.get("state")).get("id")),
         "url": _required_text(node.get("url")),
         "archivedAt": archived_at,
+        "priority": priority,
+        "labelIds": label_ids,
     }
 
 

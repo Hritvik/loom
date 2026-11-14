@@ -95,6 +95,10 @@ def _lane(
             return "awaiting_integration", implementer or "integrator", reviewer
         blockers.append("Independent review receipt required")
         return "needs_review", "coordinator", reviewer
+    if state in {"planned", "draft"}:
+        return "planned", None, None
+    if state == "rejected":
+        return "rejected", None, None
     if state == "green":
         return _review_state(task, history, implementer)
     if active:
@@ -157,12 +161,24 @@ def project_cards(
         implementer = _implementer(task, history[task_id])
         lane, next_actor, reviewer = _lane(task, history[task_id], implementer, task_id in active, blockers)
         program = task.get("program") or task_id.partition("/")[0]
+        dependents = _WORK["transitive_dependents"](reverse, task_id)
+        if lane == "integrated":
+            priority = 0
+        elif len(dependents) >= 6:
+            priority = 1
+        elif len(dependents) >= 3:
+            priority = 2
+        elif dependents:
+            priority = 3
+        else:
+            priority = 4
+        needs_human = next_actor in {"human", "hritvik"} or task.get("blocked_needs") == "human"
         cards.append({
             "id": task_id, "title": task.get("title") or task_id,
             "lane": lane, "program": program, "owner": program,
             "next_actor": next_actor, "implementer": implementer, "reviewer": reviewer,
             "dependencies": dependencies[task_id], "blockers": blockers,
-            "dependents": _WORK["transitive_dependents"](reverse, task_id),
+            "dependents": dependents, "priority": priority, "needs_human": needs_human,
             "revision": int(task.get("revision", 0)),
         })
     return cards

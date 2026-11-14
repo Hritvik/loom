@@ -14,6 +14,7 @@ without colliding, without a human dispatching tasks, and without trusting each 
 | `capabilities/work/engine.py` | the engine verbs and the policy pass, imported by `loom` |
 | `capabilities/work/mcp/` | MCP server, so the registry appears in an agent's tool list |
 | `capabilities/work/a2a/` | A2A v1.0 façade for agents that speak it |
+| `capabilities/work/linear_sync.py` | one-way Linear projection, organised by runway, program and priority |
 | `capabilities/work/validate_work.py` | schema, dependency, lease, epoch, review, event-chain and contract verification |
 | `docs/adr/` | decisions, including why state left git |
 

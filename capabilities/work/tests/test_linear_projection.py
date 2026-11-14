@@ -49,6 +49,25 @@ class LinearProjectionTest(unittest.TestCase):
         registry = {"tasks": tasks, "edges": list(edges)}
         return {card["id"]: card for card in project_cards(registry, list(events), NOW, focus)}
 
+    def test_planned_and_rejected_have_their_own_lanes(self):
+        cards = self.cards([
+            task("alpha/P", status="planned"),
+            task("alpha/R", status="rejected"),
+        ], focus=None)
+        self.assertEqual(cards["alpha/P"]["lane"], "planned")
+        self.assertEqual(cards["alpha/R"]["lane"], "rejected")
+
+    def test_priority_and_needs_human(self):
+        cards = self.cards([
+            task("alpha/H", status="blocked", blocked_needs="human"),
+            task("alpha/T"),
+            task("alpha/D", status="integrated"),
+        ], edges=[{"from": "alpha/T", "to": "alpha/H"}], focus=None)
+        self.assertTrue(cards["alpha/H"]["needs_human"])
+        self.assertEqual(cards["alpha/H"]["priority"], 3)
+        self.assertEqual(cards["alpha/T"]["priority"], 4)
+        self.assertEqual(cards["alpha/D"]["priority"], 0)
+
     def test_scope_is_focus_and_transitive_prerequisites(self):
         cards = self.cards([
             task(FOCUS, depends_on=["alpha/DEP-1"]),

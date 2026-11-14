@@ -305,6 +305,7 @@ def front_parser() -> argparse.ArgumentParser:
     schedule.set_defaults(func=cmd_schedule)
 
     linear = sub.add_parser("linear", help="the Linear projection")
+    linear.add_argument("action", nargs="?", choices=["sync"], default="sync")
     linear.add_argument("--all", action="store_true")
     linear.add_argument("--focus")
     linear.add_argument("--apply", action="store_true")
