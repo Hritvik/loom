@@ -1442,6 +1442,18 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("Review stalled", result.stdout)
         self.assertNotIn("launched review of demo/W-1", result.stdout)
 
+    def test_tick_quiet_is_silent_when_nothing_happened(self):
+        result = self.invoke("tick", "--apply", "--quiet", "--max-implementer", "0",
+                             "--max-reviewer", "0", "--worker-command", "/usr/bin/true",
+                             "--now", T0)
+        self.assertEqual(result.stdout.strip(), "")
+
+    def test_tick_quiet_still_reports_a_launch(self):
+        result = self.invoke("tick", "--apply", "--quiet", "--max-implementer", "1",
+                             "--max-reviewer", "0", "--worker-command", "/usr/bin/true",
+                             "--now", T0)
+        self.assertIn("launched demo/W-1", result.stdout)
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -89,6 +90,8 @@ def cmd_tick(args: argparse.Namespace, config: dict) -> int:
     command = [sys.executable, str(TASK), "--db", config["db"], "tick"]
     if args.apply:
         command.append("--apply")
+    if args.quiet:
+        command.append("--quiet")
     command += ["--ttl", str(worker.get("ttl", "90m"))]
     command += ["--worker-command", worker.get("command", DEFAULTS["worker"]["command"])]
     command += ["--reviewer-identity",
@@ -190,6 +193,13 @@ def cmd_schedule(args: argparse.Namespace, config: dict) -> int:
     row = next((line for line in listing.splitlines() if label in line), None)
     print(f"label:  {label}")
     print(f"plist:  {plist} {'(present)' if plist.is_file() else '(missing)'}")
+    if plist.is_file():
+        try:
+            interval = plistlib.loads(plist.read_bytes()).get("StartInterval")
+        except Exception:
+            interval = None
+        if interval:
+            print(f"interval: {interval}s")
     print(f"job:    {row.strip() if row else 'not loaded'}")
     print(f"log:    {log}")
     if log.is_file():
@@ -241,6 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     tick = sub.add_parser("tick", help="policy pass; limits come from loom.json")
     tick.add_argument("--apply", action="store_true")
+    tick.add_argument("--quiet", action="store_true",
+                      help="print nothing when the pass did nothing")
     tick.add_argument("--implementer", type=int)
     tick.add_argument("--reviewer", type=int)
     tick.add_argument("--integrator", type=int)

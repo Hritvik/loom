@@ -85,6 +85,7 @@ receipt already exists, and the event is appended to the audit log like any othe
 ./loom work list --ready        # the task CLI, unchanged
 ./loom tick                     # preview; limits come from the config
 ./loom tick --apply             # claim and launch
+./loom tick --apply --quiet     # the scheduled form: silent when it did nothing
 ./loom workers                  # running, with pid, branch and worktree
 ./loom workers stop <task>
 ./loom schedule status          # label, plist, job state and the last log lines
@@ -94,6 +95,10 @@ receipt already exists, and the event is appended to the audit log like any othe
 ```
 
 `./task` keeps working; `loom work` is the same binary with the same verbs.
+
+The launchd job runs `loom tick --apply --quiet` every **120 seconds**. An idle pass is ~0.25s and
+prints nothing; a pass that claims, reviews, records or escalates prints its report. `schedule status`
+shows the interval alongside the label and plist, so the cadence is visible rather than implied.
 
 ## Storage
 

@@ -34,7 +34,7 @@ class LoomConfigTest(unittest.TestCase):
         self.assertIn("deepseek", config["worker"]["command"])
 
     def test_tick_builds_its_command_from_config(self):
-        args = loom.build_parser().parse_args(["tick", "--apply"])
+        args = loom.build_parser().parse_args(["tick", "--apply", "--quiet"])
         config = loom.load_config(Path("/nonexistent"))
         captured = {}
         original = loom.delegate
@@ -45,6 +45,7 @@ class LoomConfigTest(unittest.TestCase):
             loom.delegate = original
         command = captured["command"]
         self.assertIn("--apply", command)
+        self.assertIn("--quiet", command)
         self.assertIn("--max-implementer", command)
         self.assertIn(config["worker"]["command"], command)
         self.assertIn(config["db"], command)

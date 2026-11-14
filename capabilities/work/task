@@ -1858,6 +1858,10 @@ def cmd_tick(args, store: Store) -> int:
                           "reviewStalled": stalled_reviews, "reviewLaunched": launched_reviews,
                           "reviewed": reviewed, "problems": problems}, indent=2))
         return 0
+    activity = bool(chosen or review_chosen or reviewed or stalled_reviews
+                    or launched or launched_reviews or problems)
+    if args.quiet and not activity:
+        return 0
     print(f"Tick preview — {iso(now)}")
     print("  capacity: " + "  ".join(
         f"{role} {active[role]}/{limits[role]}" for role in ROLES)
@@ -2642,6 +2646,8 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--coordinator", default=REVIEW_COORDINATOR,
                       help="acting agent that records `reviewed` from an approval")
     tick.add_argument("--json", action="store_true")
+    tick.add_argument("--quiet", action="store_true",
+                      help="print nothing when nothing was claimed, reviewed or launched")
     tick.add_argument("--apply", action="store_true", help="claim and launch a worker for each chosen task")
     tick.add_argument("--ttl", default="90m", help="lease for a launched worker (default 90m)")
     tick.add_argument("--java-home", default=None,
