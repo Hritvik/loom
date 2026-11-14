@@ -1,6 +1,10 @@
 import re
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
+import linear_sync
 from linear_sync import SyncError, marker, mirror, ordered_cards
 
 
@@ -55,6 +59,14 @@ class LinearSyncTest(unittest.TestCase):
         self.assertIn(rows[0]["url"], rows[1]["description"])
         self.assertEqual(self.sync(), {"created": 0, "updated": 0, "unchanged": 2})
         self.assertEqual(len(self.client.writes), 2)
+
+    def test_head_marker_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "linear.head"
+            with patch.object(linear_sync, "HEAD_PATH", path):
+                self.assertIsNone(linear_sync.read_head())
+                linear_sync.write_head((3, "abc"))
+                self.assertEqual(linear_sync.read_head(), (3, "abc"))
 
     def test_labels_priority_and_human_flag_are_projected(self):
         self.config["labels"] = {"alpha": "alpha-label", "Needs Human": "human-label"}

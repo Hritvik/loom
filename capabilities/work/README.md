@@ -93,7 +93,7 @@ receipt already exists, and the event is appended to the audit log like any othe
 ./loom workers stop <task>
 ./loom schedule status          # label, plist, interval, job state and the last log lines
 ./loom schedule start|stop
-./loom linear sync --all --apply
+./loom linear sync --all --apply --if-changed
 ./loom logs <task>
 ```
 
@@ -422,3 +422,8 @@ Each card carries one program label and `Needs Human` when the next actor is the
 is blocked on a human decision. Priority comes from transitive downstream weight: 6+ urgent, 3–5
 high, 1–2 medium, 0 low; Done cards stay No priority. The sync is idempotent: a run that changes
 nothing writes nothing.
+
+The launchd job runs `loom linear sync --all --apply --if-changed` every **300 seconds**.
+`~/.local/state/loom/linear.head` records the `(seq, hash)` last projected; an unchanged head exits
+without an API call. A rewritten database with the same event count still has a different hash, so
+it triggers a sync, and the chain/checkpoint verification then refuses to project it.

@@ -16,6 +16,8 @@ import uuid
 
 
 WORK_HOME = Path(__file__).resolve().parent
+HEAD_PATH = Path(os.environ.get("LOOM_LINEAR_HEAD")
+                 or Path.home() / ".local/state/loom/linear.head")
 END_MARKER = "End work registry mirror."
 MARKER_PATTERN = re.compile(r"^Work registry ID: `([a-z][a-z0-9-]+/[A-Za-z0-9._-]+)`$", re.MULTILINE)
 API_KEY_VAR = "LINEAR_API_KEY"
@@ -257,6 +259,32 @@ def load_config(path):
     return config
 
 
+def read_head():
+    try:
+        seq, digest = HEAD_PATH.read_text().split()
+        return int(seq), digest
+    except (OSError, ValueError):
+        return None
+
+
+def write_head(head) -> None:
+    if head is None:
+        return
+    HEAD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(HEAD_PATH) + ".tmp")
+    tmp.write_text(f"{head[0]} {head[1]}\n")
+    os.replace(tmp, HEAD_PATH)
+
+
+def current_head():
+    cli = runpy.run_path(str(WORK_HOME / "engine.py"))
+    store = cli["make_store"](WORK_HOME, "sqlite", os.environ.get("WORK_DB"))
+    try:
+        return store.checkpoint()
+    finally:
+        store.close()
+
+
 def snapshot(focus):
     from linear_projection import project_cards
 
@@ -307,6 +335,8 @@ def main(argv=None):
     scope.add_argument("--all", action="store_true", help="include every centrally registered task")
     parser.add_argument("--config", type=Path, help="local Linear destination config")
     parser.add_argument("--apply", action="store_true", help="apply create/update operations to Linear")
+    parser.add_argument("--if-changed", action="store_true",
+                        help="exit without syncing when the registry head is unchanged")
     args = parser.parse_args(argv)
     if args.apply and not args.config:
         parser.error("--apply requires --config")
@@ -314,8 +344,14 @@ def main(argv=None):
         if not args.all and not args.focus:
             raise SyncError("pass --focus <work id> or --all")
         focus = None if args.all else args.focus
+        head = current_head() if args.apply or args.if_changed else None
+        if args.if_changed and head is not None and read_head() == head:
+            print(json.dumps({"mode": "skipped", "reason": "registry head unchanged"}, indent=2))
+            return 0
         if args.config:
             result = sync_target(args.config.expanduser().resolve(), focus, args.apply)
+            if args.apply:
+                write_head(head)
         else:
             result = {"mode": "local preview", "cards": ordered_cards(snapshot(focus))}
         print(json.dumps(result, indent=2, ensure_ascii=False))

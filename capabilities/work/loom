@@ -232,22 +232,31 @@ def cmd_schedule(args: argparse.Namespace, config: dict) -> int:
         print(f"stopped {label}")
         return 0
     listing = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
-    row = next((line for line in listing.splitlines() if label in line), None)
-    print(f"label:  {label}")
-    print(f"plist:  {plist} {'(present)' if plist.is_file() else '(missing)'}")
-    if plist.is_file():
-        try:
-            interval = plistlib.loads(plist.read_bytes()).get("StartInterval")
-        except Exception:
-            interval = None
-        if interval:
-            print(f"interval: {interval}s")
-    print(f"job:    {row.strip() if row else 'not loaded'}")
-    print(f"log:    {log}")
-    if log.is_file():
-        tail = log.read_text(errors="replace").splitlines()[-3:]
-        for line in tail:
-            print(f"  | {line}")
+    linear_label = config["schedule"].get("linear_label", DEFAULTS["schedule"]["linear_label"])
+    jobs = [
+        (label, state_home() / "tick.log"),
+        (linear_label, state_home() / "linear-sync.log"),
+    ]
+    for index, (job_label, job_log) in enumerate(jobs):
+        if index:
+            print()
+        job_plist = plist_path(job_label)
+        row = next((line for line in listing.splitlines() if job_label in line), None)
+        print(f"label:  {job_label}")
+        print(f"plist:  {job_plist} {'(present)' if job_plist.is_file() else '(missing)'}")
+        if job_plist.is_file():
+            try:
+                interval = plistlib.loads(job_plist.read_bytes()).get("StartInterval")
+            except Exception:
+                interval = None
+            if interval:
+                print(f"interval: {interval}s")
+        print(f"job:    {row.strip() if row else 'not loaded'}")
+        print(f"log:    {job_log}")
+        if job_log.is_file():
+            tail = job_log.read_text(errors="replace").splitlines()[-3:]
+            for line in tail:
+                print(f"  | {line}")
     return 0
 
 
@@ -261,6 +270,8 @@ def cmd_linear(args: argparse.Namespace, config: dict) -> int:
     command += ["--all"] if args.all else (["--focus", args.focus] if args.focus else ["--all"])
     if args.apply:
         command.append("--apply")
+    if args.if_changed:
+        command.append("--if-changed")
     key_file = Path.home() / ".config/loom/linear.key"
     if not key_file.is_file():
         print(f"missing Linear API key at {key_file}", file=sys.stderr)
@@ -309,6 +320,7 @@ def front_parser() -> argparse.ArgumentParser:
     linear.add_argument("--all", action="store_true")
     linear.add_argument("--focus")
     linear.add_argument("--apply", action="store_true")
+    linear.add_argument("--if-changed", action="store_true")
     linear.set_defaults(func=cmd_linear)
 
     logs = sub.add_parser("logs", help="a worker's log")
