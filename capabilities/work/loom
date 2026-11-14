@@ -181,7 +181,7 @@ def pid_alive(pid) -> bool:
 
 def cmd_workers(args: argparse.Namespace, config: dict) -> int:
     launches = pending_launches(config)
-    running = [item for item in launches if pid_alive(item.get("pid"))]
+    running = [item for item in launches if engine.launch_is_live(item)]
     if args.action == "stop":
         target = next((item for item in running if item.get("task") == args.task), None)
         if target is None:

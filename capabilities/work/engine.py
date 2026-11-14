@@ -1511,7 +1511,8 @@ def launches(store: Store) -> list[dict]:
 
 def launch_state(store: Store, task_id: str) -> dict:
     """The latest launch for a task, and how many have failed."""
-    history = [item for item in launches(store) if item.get("task") == task_id]
+    history = [item for item in launches(store)
+               if item.get("task") == task_id and item.get("state") != "superseded"]
     failed = sum(1 for item in history if item.get("state") == "failed")
     return {"latest": history[-1] if history else {}, "failed": failed}
 
@@ -1524,37 +1525,110 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def process_start(pid) -> dt.datetime | None:
+    """When the process behind a pid started, or None if it cannot be read.
+
+    PIDs are reused. A launch is only ours if the process that holds the pid now started when
+    the launch was recorded, not hours later as an unrelated daemon.
+    """
+    try:
+        result = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart="],
+                                capture_output=True, text=True)
+    except (OSError, TypeError, ValueError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        naive = dt.datetime.strptime(result.stdout.strip(), "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    return naive.astimezone(dt.timezone.utc)
+
+
+def launch_is_live(launch: dict) -> bool:
+    """A pending launch is live only if the same process still holds the pid."""
+    pid = launch.get("pid")
+    if not pid_alive(pid):
+        return False
+    started = process_start(pid)
+    if started is None:
+        return True  # cannot prove reuse; do not close a process we cannot identify
+    expected = launch.get("started_at") or launch.get("ts")
+    if not expected:
+        return True
+    try:
+        expected_at = parse_time(expected)
+    except (TypeError, ValueError):
+        return True
+    return abs((started - expected_at).total_seconds()) <= 120
+
+
 def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[str]:
-    """Mark launches whose process is gone, and escalate tasks that keep failing."""
+    """Close every pending launch that is gone or superseded, then escalate the latest failure."""
     problems = []
     records = [record for _, record in store.read_events()]
     answers = {(record.get("task"), record.get("in_reply_to")): record.get("seq")
                for record in records if record.get("event") == "answer"}
+    launches = [record for record in records
+                if record.get("event") == "launch" and record.get("task")]
+    last_seq: dict[str, int] = {}
+    terminal_after: dict[str, int] = {}
+    closed = {launch.get("closes") for launch in launches if launch.get("closes") is not None}
+    for launch in launches:
+        last_seq[launch["task"]] = int(launch.get("seq") or 0)
+        if launch.get("state") in {"done", "failed", "superseded"}:
+            terminal_after[launch["task"]] = max(
+                terminal_after.get(launch["task"], 0), int(launch.get("seq") or 0))
+    by_id = {task["id"]: task for task in registry["tasks"]}
     with store.transaction():
+        for launch in launches:
+            if launch.get("state") != "pending":
+                continue
+            sequence = int(launch.get("seq") or 0)
+            if sequence in closed:
+                continue
+            if sequence < terminal_after.get(launch["task"], 0):
+                # A legacy closure (written before `closes` existed) already accounts for this.
+                continue
+            task = by_id.get(launch["task"])
+            if task is None:
+                state, reason = "superseded", "the task left the registry"
+            else:
+                superseded = int(launch.get("seq") or 0) < last_seq.get(launch["task"], 0)
+                if superseded:
+                    state, reason = "superseded", "a later launch replaced this attempt"
+                elif launch_is_live(launch):
+                    continue
+                elif launch.get("role") == "reviewer":
+                    answered = answers.get((task["id"], launch.get("question")), -1) > int(launch.get("seq") or 0)
+                    state, reason = ("done" if answered else "failed"), None
+                else:
+                    launch_revision = launch.get("revision")
+                    advanced = (task.get("revision", 0)
+                                > (int(launch_revision) if launch_revision is not None else -1)
+                                or task.get("status") in {"green", "reviewed", "integrated",
+                                                          "accepted", "done"})
+                    state, reason = ("done" if advanced else "failed"), None
+            store.append_event(event="launch", task=launch["task"],
+                               agent=launch.get("agent") or WORKER_IDENTITY,
+                               state=state, pid=launch.get("pid"), role=launch.get("role"),
+                               revision=launch.get("revision"),
+                               question=launch.get("question"), closes=sequence,
+                               **({"reason": reason} if reason else {}), now=iso(now))
+
+        # Only the latest attempt can requeue or block the task. Superseded attempts are history.
+        failed_by_role: dict[tuple[str, str], int] = {}
+        for _, record in store.read_events():
+            if record.get("event") == "launch" and record.get("state") == "failed":
+                key = (record.get("task"), record.get("role"))
+                failed_by_role[key] = failed_by_role.get(key, 0) + 1
         for task in registry["tasks"]:
             state = launch_state(store, task["id"])
             latest = state["latest"]
-            if latest.get("state") != "pending" or pid_alive(latest.get("pid")):
+            if latest.get("state") != "failed" or latest.get("role") == "reviewer":
                 continue
-            if latest.get("role") == "reviewer":
-                # A reviewer succeeds by recording a verdict, not by moving the task: a
-                # changes-requested answer leaves it green. A crash is retried, not escalated,
-                # because the review request is still open and the attempt counter bounds it.
-                answered = answers.get((task["id"], latest.get("question")), -1) > int(latest.get("seq") or 0)
-                store.append_event(event="launch", task=task["id"],
-                                   agent=latest.get("agent") or REVIEWER_IDENTITY,
-                                   state="done" if answered else "failed", pid=latest.get("pid"),
-                                   role="reviewer", revision=latest.get("revision"),
-                                   question=latest.get("question"), now=iso(now))
-                continue
-            advanced = (task.get("revision", 0) > int(latest.get("revision") or -1)
-                        or task.get("status") in {"green", "reviewed", "integrated", "accepted", "done"})
-            store.append_event(event="launch", task=task["id"], agent=WORKER_IDENTITY,
-                               state="done" if advanced else "failed", pid=latest.get("pid"),
-                               role=latest.get("role"), revision=latest.get("revision"), now=iso(now))
-            if advanced:
-                continue
-            if state["failed"] + 1 >= 2:
+            failures = failed_by_role.get((task["id"], latest.get("role")), 0)
+            if failures >= 2:
                 problems.append(f"{task['id']}: two worker launches failed; needs a human")
                 if task.get("status") in {"claimed", "red", "green"}:
                     task["claim"] = None
@@ -1771,6 +1845,76 @@ def sweep_approved_reviews(store: Store, now: dt.datetime, agent: str,
     return recorded
 
 
+def changes_requested_tasks(store: Store, registry: dict, now: dt.datetime) -> list[dict]:
+    """Green tasks whose latest review request was answered `changes requested`."""
+    items = []
+    for task in registry["tasks"]:
+        if task.get("status") != "green":
+            continue
+        history = task_history(store, task)
+        request = latest_review_request(task, history)
+        if not request:
+            continue
+        answer = next((event for event in history if event.get("event") == "answer"
+                       and event.get("in_reply_to") == request["seq"]), None)
+        if not answer or answer.get("decision") != "changes requested":
+            continue
+        owner = claim_owner(task)
+        expiry = lease_expiry(task)
+        live = any(
+            record.get("event") == "launch" and record.get("task") == task["id"]
+            and record.get("role") == "implementer"
+            and record.get("state") == "pending" and launch_is_live(record)
+            for _, record in store.read_events())
+        if owner == WORKER_IDENTITY and not live:
+            action = "release"
+        elif owner and expiry and expiry <= now:
+            action = "takeover"
+        else:
+            action = "hold"
+        items.append({
+            "task": task["id"], "revision": task.get("revision", 0),
+            "request": request["seq"], "answer": answer["seq"],
+            "reviewer": answer.get("agent"), "owner": owner, "action": action,
+        })
+    return items
+
+
+def apply_rework(store: Store, items: list[dict], args) -> tuple[list[dict], list[dict]]:
+    """Release or take over the claim so a changes-requested task becomes claimable."""
+    queued, held = [], []
+    for item in items:
+        if item["action"] == "hold":
+            held.append({**item, "reason": f"claim held by {item['owner']}"})
+            continue
+        task = find_task(store.load(), item["task"])
+        if item["action"] == "takeover":
+            takeover_args = argparse.Namespace(
+                task=task["id"], revision=task.get("revision", 0),
+                reason=f"changes requested on review request {item['request']}; taking over for rework",
+                ttl=args.ttl, lock_delay=DEFAULT_LOCK_DELAY,
+                agent=WORKER_IDENTITY, now=args.now)
+            try:
+                cmd_takeover(takeover_args, store)
+            except WorkError as exc:
+                held.append({**item, "reason": str(exc)})
+                continue
+            task = find_task(store.load(), task["id"])
+        release_args = argparse.Namespace(
+            task=task["id"], revision=task.get("revision", 0),
+            epoch=claim_epoch(task),
+            reason=f"changes requested on review request {item['request']}; requeueing for rework",
+            agent=WORKER_IDENTITY, now=args.now)
+        try:
+            cmd_release(release_args, store)
+        except WorkError as exc:
+            held.append({**item, "reason": str(exc)})
+            continue
+        queued.append({**item, "action": "released" if item["action"] == "release"
+                       else "taken over and released"})
+    return queued, held
+
+
 def cmd_tick(args, store: Store) -> int:
     """One policy pass: what would be claimed, launched or reviewed, and what is stale."""
     now = parse_now(args.now)
@@ -1779,6 +1923,14 @@ def cmd_tick(args, store: Store) -> int:
         problems = reconcile_launches(store, store.load(), now)
     reviewed = sweep_approved_reviews(store, now, args.coordinator, dry_run=not args.apply)
     registry = store.load()
+    rework_items = changes_requested_tasks(store, registry, now)
+    rework_queued, rework_held = [], []
+    if args.apply and rework_items:
+        rework_queued, rework_held = apply_rework(store, rework_items, args)
+        if rework_queued:
+            registry = store.load()
+    elif not args.apply:
+        rework_held = rework_items
     index = dependents_index(registry)
     limits = {
         "implementer": args.max_implementer,
@@ -1874,9 +2026,11 @@ def cmd_tick(args, store: Store) -> int:
                                    role=item["role"], state="failed", pid=None,
                                    revision=task.get("revision", 0), now=args.now)
                 continue
+            started = process_start(pid)
             store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
                                role=item["role"], state="pending", pid=pid,
                                revision=task.get("revision", 0),
+                               started_at=iso(started) if started else None,
                                worktree=str(tree), branch=branch, now=args.now)
             launched.append({"task": item["task"], "role": item["role"], "pid": pid,
                              "worktree": str(tree), "branch": branch})
@@ -1892,9 +2046,11 @@ def cmd_tick(args, store: Store) -> int:
                                    question=item["question"], source=item["source"],
                                    now=args.now)
                 continue
+            started = process_start(pid)
             store.append_event(event="launch", task=item["task"], agent=args.reviewer_identity,
                                role="reviewer", state="pending", pid=pid,
                                revision=item["revision"], worktree=str(tree), branch=None,
+                               started_at=iso(started) if started else None,
                                source=item["source"], question=item["question"], now=args.now)
             launched_reviews.append({"task": item["task"], "pid": pid,
                                      "question": item["question"], "source": item["source"],
@@ -1905,10 +2061,13 @@ def cmd_tick(args, store: Store) -> int:
                           "held": held, "expired": expired, "launched": launched,
                           "review": review_chosen, "reviewHeld": review_held,
                           "reviewStalled": stalled_reviews, "reviewLaunched": launched_reviews,
-                          "reviewed": reviewed, "problems": problems}, indent=2))
+                          "reviewed": reviewed, "rework": rework_items,
+                          "reworkQueued": rework_queued, "reworkHeld": rework_held,
+                          "problems": problems}, indent=2))
         return 0
     activity = bool(chosen or review_chosen or reviewed or stalled_reviews
-                    or launched or launched_reviews or problems)
+                    or launched or launched_reviews or problems
+                    or rework_queued or rework_held)
     if args.quiet and not activity:
         return 0
     print(f"Tick preview — {iso(now)}")
@@ -1945,6 +2104,18 @@ def cmd_tick(args, store: Store) -> int:
         print("\nReview stalled (attempts exhausted; needs a human):")
         for item in stalled_reviews:
             print(f"  {item['task']:<22} request {item['question']}  {item['source'][:12]}")
+    if rework_queued:
+        print("\nRework queued (changes requested):")
+        for item in rework_queued:
+            print(f"  {item['task']:<22} request {item['request']} answer {item['answer']}"
+                  f" -> {item['action']}")
+    if rework_held:
+        heading = ("Would queue rework (changes requested):" if not args.apply
+                   else "Rework held (changes requested):")
+        print(f"\n{heading}")
+        for item in rework_held:
+            print(f"  {item['task']:<22} request {item['request']} {item['action']}"
+                  f" ({item['owner']})")
     if reviewed:
         heading = ("Would record reviewed from an approval:" if not args.apply
                    else "Recorded reviewed from an approval:")

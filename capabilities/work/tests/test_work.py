@@ -1472,6 +1472,108 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(branch, "loom/demo-w-1")
         self.assertTrue((path / ".git").exists())
 
+    def test_launch_is_live_rejects_a_reused_pid(self):
+        import datetime as dt
+        from engine import launch_is_live
+        from store import iso
+
+        now = dt.datetime.now(dt.timezone.utc)
+        self.assertFalse(launch_is_live({"pid": os.getpid(), "ts": "2020-01-01T00:00:00Z"}))
+        self.assertTrue(launch_is_live({"pid": os.getpid(), "ts": iso(now)}))
+
+    def test_reconcile_closes_superseded_pending_launches(self):
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                                   role="implementer", state="pending", pid=999998,
+                                   revision=0, now=T0)
+                store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                                   role="implementer", state="pending", pid=999999,
+                                   revision=0, now=T0)
+        finally:
+            store.close()
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
+        self.assertEqual([event.get("state") for event in launches][-2:], ["superseded", "failed"])
+
+    def test_reconcile_closes_a_pending_launch_with_a_reused_pid(self):
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                                   role="implementer", state="pending", pid=os.getpid(),
+                                   revision=0, now=T0)
+        finally:
+            store.close()
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
+        self.assertEqual(launches[-1].get("state"), "failed")
+
+    def changes_requested_task(self, agent="agent-a", ttl="30m"):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", ttl,
+                    "--agent", agent, "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
+                    "--agent", agent, "--now", T0)
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.invoke("answer", "demo/W-1", "--question", request, "--decision", "changes requested",
+                    "--note", "Regression found in the error path",
+                    "--agent", "opencode/reviewer-agent", "--now", T0)
+        return request
+
+    def test_tick_requeues_a_changes_requested_task_owned_by_the_worker(self):
+        self.changes_requested_task(agent="opencode/loom-worker")
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("Rework queued", result.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "ready")
+        release = [event for event in self.ws.events()
+                   if event.get("event") == "release" and event.get("task") == "demo/W-1"][-1]
+        self.assertIn("changes requested", release.get("reason"))
+
+    def test_tick_takes_over_an_expired_changes_requested_task(self):
+        self.changes_requested_task(agent="agent-a", ttl="1m")
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--worker-command", "/usr/bin/true",
+                             "--now", "2030-01-01T10:05:00Z")
+        self.assertIn("Rework queued", result.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "ready")
+        takeover = [event for event in self.ws.events()
+                    if event.get("event") == "takeover" and event.get("task") == "demo/W-1"][-1]
+        self.assertIn("taking over for rework", takeover.get("reason"))
+
+    def test_a_live_reviewer_does_not_hold_rework(self):
+        import datetime as dt
+        from store import iso
+
+        request = self.changes_requested_task(agent="opencode/loom-worker")
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/reviewer-agent", role="reviewer",
+                                   state="pending", pid=os.getpid(), revision=2,
+                                   question=int(request),
+                                   started_at=iso(dt.datetime.now(dt.timezone.utc)), now=T0)
+        finally:
+            store.close()
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "ready")
+
+    def test_tick_holds_rework_while_the_owner_lease_is_live(self):
+        self.changes_requested_task(agent="agent-a", ttl="30m")
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--worker-command", "/usr/bin/true",
+                             "--now", "2030-01-01T10:01:00Z")
+        self.assertIn("Rework held", result.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "green")
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",
