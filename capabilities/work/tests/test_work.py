@@ -1458,6 +1458,20 @@ class WorkCLITest(unittest.TestCase):
                              "--now", T0)
         self.assertIn("launched demo/W-1", result.stdout)
 
+    def test_worker_worktree_prunes_a_stale_registration(self):
+        from engine import worker_worktree
+
+        self.commit()
+        repo = self.ws.repo
+        subprocess.run(["git", "-C", str(repo), "branch", "loom/demo-w-1"], check=True)
+        stale = self.ws.root / "stale-wt"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", str(stale),
+                        "loom/demo-w-1"], check=True)
+        shutil.rmtree(stale)
+        path, branch = worker_worktree(repo, "demo/W-1")
+        self.assertEqual(branch, "loom/demo-w-1")
+        self.assertTrue((path / ".git").exists())
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",

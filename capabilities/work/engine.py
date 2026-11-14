@@ -1588,7 +1588,14 @@ def worker_worktree(repo: Path, task_id: str) -> tuple[Path, str | None]:
         existing = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), branch],
                                   capture_output=True, text=True)
         if existing.returncode != 0:
-            raise WorkError(f"cannot create a worktree for {task_id}: {added.stderr.strip()}")
+            # A stale worktree registration can still hold the branch after its directory is gone.
+            subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+            retry = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), branch],
+                                   capture_output=True, text=True)
+            if retry.returncode != 0:
+                raise WorkError(
+                    f"cannot create a worktree for {task_id}: "
+                    f"{retry.stderr.strip() or added.stderr.strip()}")
     return path, branch
 
 
@@ -1849,7 +1856,24 @@ def cmd_tick(args, store: Store) -> int:
                 problems.append(f"{item['task']}: {exc}")
                 continue
             task = find_task(store.load(), item["task"])
-            pid, tree, branch = spawn_worker(args, task, item["role"], work_home)
+            try:
+                pid, tree, branch = spawn_worker(args, task, item["role"], work_home)
+            except (WorkError, OSError) as exc:
+                # The claim was taken before the spawn. Leaving it behind would hold a slot
+                # with no worker until the lease expires, so give it back and record the failure.
+                problems.append(f"{item['task']}: {exc}")
+                release_args = argparse.Namespace(
+                    task=item["task"], revision=task.get("revision", 0),
+                    epoch=claim_epoch(task), reason=f"launch failed: {exc}",
+                    agent=WORKER_IDENTITY, now=args.now)
+                try:
+                    cmd_release(release_args, store)
+                except WorkError as release_error:
+                    problems.append(f"{item['task']}: claim left in place: {release_error}")
+                store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
+                                   role=item["role"], state="failed", pid=None,
+                                   revision=task.get("revision", 0), now=args.now)
+                continue
             store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
                                role=item["role"], state="pending", pid=pid,
                                revision=task.get("revision", 0),
@@ -1860,8 +1884,13 @@ def cmd_tick(args, store: Store) -> int:
             task = find_task(store.load(), item["task"])
             try:
                 pid, tree = spawn_reviewer(args, task, item, work_home)
-            except WorkError as exc:
+            except (WorkError, OSError) as exc:
                 problems.append(f"{item['task']} review: {exc}")
+                store.append_event(event="launch", task=item["task"],
+                                   agent=args.reviewer_identity, role="reviewer",
+                                   state="failed", pid=None, revision=item["revision"],
+                                   question=item["question"], source=item["source"],
+                                   now=args.now)
                 continue
             store.append_event(event="launch", task=item["task"], agent=args.reviewer_identity,
                                role="reviewer", state="pending", pid=pid,
