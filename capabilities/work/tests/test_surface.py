@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-surface contract tests.
 
-The registry is reachable through three front doors: the `task` CLI, the MCP server and the A2A
+The registry is reachable through three surfaces: the `loom` CLI, the MCP server and the A2A
 façade. Each keeps its own list of capabilities, and a capability added to one and forgotten in
 another is invisible until an agent hits a refusal. These tests compare the lists.
 

@@ -1,15 +1,10 @@
 """Storage for the work registry: one interface, file and SQLite backends.
 
-The CLI works in whole-registry units — load, mutate, save — so both backends implement that same
-coarse contract. What differs is what the backend guarantees:
-
-- `FileStore` keeps `registry.yaml` and `events.ndjson` in a directory. A lock serialises writers.
-- `SqliteStore` keeps the same data in tables inside one SQLite file. Writes are transactional and
-  `events` keeps the same hash chain, so the audit property survives the move.
-
-The interface is deliberately narrow. Intent-level methods (claim, transition) arrive when the
-commands stop mutating a whole dict; until then the backends differ only in durability, not in
-semantics. `tests/test_store.py` runs the same operations against both.
+The CLI works in whole-registry units — load, decide, commit — so both backends implement that
+coarse contract. Writes require the sidecar lock. `SqliteStore` commits the registry and its event
+in one transaction, keeps tasks and boards as documents, reads registry+events as one snapshot, and
+mirrors the chain head outside the database. `FileStore` is the legacy importer only; its writes
+are sequential, not atomic. See `docs/adr/0002-store-is-a-document-log.md`.
 """
 from __future__ import annotations
 
@@ -203,7 +198,7 @@ class _TrackedLock:
 
 
 class FileStore(Store):
-    """`registry.yaml` plus `events.ndjson` in a work home."""
+    """`registry.yaml` plus `events.ndjson` in a work home. Legacy importer; not atomic."""
 
     def __init__(self, root: Path):
         self.root = Path(root)

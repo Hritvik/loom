@@ -10,7 +10,7 @@ Supported operations:
 Everything else is refused with the A2A capability error that matches the Agent
 Card (streaming/push/extended card are all false).
 
-Mutations are delegated to the `task` CLI, so CAS, leases, dependency gates,
+Mutations are delegated to the `loom` CLI, so CAS, leases, dependency gates,
 write-path conflicts and the hash-chained audit log behave identically over A2A
 and over the command line. The server binds loopback by default and declares no
 authentication scheme: do not expose it beyond a trusted host without adding

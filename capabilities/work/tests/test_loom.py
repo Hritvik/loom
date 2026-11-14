@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the loom front door: config resolution and the pure dispatch helpers."""
+"""Tests for the loom CLI: config resolution and the pure dispatch helpers."""
 from __future__ import annotations
 
 import importlib.util

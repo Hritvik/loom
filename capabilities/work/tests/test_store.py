@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Conformance tests for the SQLite store and the legacy file import.
 
-SQLite is the only runtime backend. `FileStore` survives as the importer that `task migrate` reads
+SQLite is the only runtime backend. `FileStore` survives as the importer that `loom migrate` reads
 a pre-SQLite work home with, so the tests cover two things: SQLite round-trips state and builds the
 same hash-chained event log, and a legacy file home migrates without losing events.
 

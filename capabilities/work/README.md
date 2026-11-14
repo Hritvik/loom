@@ -126,6 +126,11 @@ State lives in SQLite at `~/.local/state/loom/work.db`. The database is outside 
 so state is not a git artifact any more. The file backend is retired; `FileStore` survives only as
 the importer `loom migrate` reads a pre-SQLite work home with.
 
+Tasks and boards are documents `(id, body)`; status and program are expression indexes, not
+duplicated columns. A mutation commits the registry and its event in one transaction, and
+`work.db.head` mirrors the chain head. `loom events --verify` checks both; see
+`docs/adr/0002-store-is-a-document-log.md` for the threat model.
+
 ```bash
 ./loom list --ready                                                    # default store
 ./loom migrate --from <old work home> --to ~/.local/state/loom/work.db # import a file home
