@@ -9,7 +9,7 @@ from pathlib import Path
 
 # The CLI file defines the canonical graph and lease rules. Loading its definitions
 # under a non-main name avoids opening a registry or executing a command.
-_WORK = runpy.run_path(str(Path(__file__).with_name("task")))
+_WORK = runpy.run_path(str(Path(__file__).with_name("engine.py")))
 _REVIEW_FIELDS = ("review_source", "review_base", "review_evidence")
 
 

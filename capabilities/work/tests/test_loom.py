@@ -34,21 +34,24 @@ class LoomConfigTest(unittest.TestCase):
         self.assertIn("deepseek", config["worker"]["command"])
 
     def test_tick_builds_its_command_from_config(self):
-        args = loom.build_parser().parse_args(["tick", "--apply", "--quiet"])
         config = loom.load_config(Path("/nonexistent"))
-        captured = {}
-        original = loom.delegate
-        loom.delegate = lambda command, env=None: captured.setdefault("command", command) and 0
-        try:
-            loom.cmd_tick(args, config)
-        finally:
-            loom.delegate = original
-        command = captured["command"]
+        command = loom.build_tick_args(["--apply", "--quiet"], [], config)
         self.assertIn("--apply", command)
         self.assertIn("--quiet", command)
         self.assertIn("--max-implementer", command)
         self.assertIn(config["worker"]["command"], command)
         self.assertIn(config["db"], command)
+        self.assertEqual(command[-2], "--max-integrator")
+
+    def test_an_explicit_limit_beats_the_config(self):
+        config = loom.load_config(Path("/nonexistent"))
+        command = loom.build_tick_args(["--max-implementer", "5"], [], config)
+        self.assertEqual(command[command.index("--max-implementer") + 1], "5")
+
+    def test_global_flags_are_separated_from_the_command(self):
+        globals_, rest = loom.split_globals(["--root", "/tmp/x", "claim", "demo/W-1", "--now", "2030-01-01T00:00:00Z"])
+        self.assertEqual(globals_, ["--root", "/tmp/x", "--now", "2030-01-01T00:00:00Z"])
+        self.assertEqual(rest, ["claim", "demo/W-1"])
 
     def test_pid_alive_rejects_junk(self):
         self.assertFalse(loom.pid_alive(None))

@@ -43,7 +43,7 @@ python3 mcp/server.py \
 `work_status` is written to be called first; its description tells the model to use it before
 planning or claiming work. That description is the discovery mechanism.
 
-Mutations delegate to `work/task`, so MCP, CLI and A2A share CAS, leases, dependency gates,
+Mutations delegate to `work/loom`, so MCP, CLI and A2A share CAS, leases, dependency gates,
 write-path conflicts, review independence and the hash-chained event log.
 
 ## Example session

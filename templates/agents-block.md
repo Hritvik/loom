@@ -7,9 +7,9 @@ Active maps, tickets, specs, designs and implementation plans live in the conten
 
 - Read `$WORK_COORDINATION_HOME/capabilities/work/AGENT-GUIDE.md` first: the coordination loop, the
   enforced rules, and how to escalate.
-- Find work with `cd $WORK_COORDINATION_HOME/capabilities/work && ./task list --ready`,
-  check `./task inbox --agent <you>`, and claim with
-  `./task claim <id> --revision N --ttl 45m --agent <you>`.
+- Find work with `cd $WORK_COORDINATION_HOME/capabilities/work && ./loom list --ready`,
+  check `./loom inbox --agent <you>`, and claim with
+  `./loom claim <id> --revision N --ttl 45m --agent <you>`.
 - `$WORK_COORDINATION_HOME` is your loom checkout; export it, or replace it with the path.
 - Task state lives in `$WORK_DB`; inherited memory lives in the content repository.
 - Promote only accepted specs/ADRs here, under `docs/`; active planning stays central.

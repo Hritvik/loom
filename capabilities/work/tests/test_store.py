@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_work import T0, Workspace, run  # noqa: E402
 
-from store import FileStore, SqliteStore, make_store  # noqa: E402
+from store import (FileStore, SqliteStore, WorkError, event_bytes, make_store)  # noqa: E402
 
 
 def normalised(value):
@@ -34,10 +34,11 @@ def legacy_home(root: Path, registry: dict, events: int = 1) -> FileStore:
     root.mkdir(parents=True, exist_ok=True)
     store = FileStore(root)
     store.registry = normalised(registry)
-    store.save()
-    for index in range(events):
-        store.append_event(event="note", agent="agent-a", task="demo/W-1",
-                           revision=0, status="ready", now=T0)
+    with store.lock():
+        store.save()
+        for index in range(events):
+            store.append_event(event="note", agent="agent-a", task="demo/W-1",
+                               revision=0, status="ready", now=T0)
     return store
 
 
@@ -60,7 +61,8 @@ class StoreTest(unittest.TestCase):
         sqlite = self.sqlite()
         try:
             sqlite.registry = expected
-            sqlite.save()
+            with sqlite.lock():
+                sqlite.save()
             loaded = sqlite.load()
         finally:
             sqlite.close()
@@ -73,8 +75,9 @@ class StoreTest(unittest.TestCase):
     def test_event_chain_is_hash_linked(self):
         sqlite = self.sqlite()
         try:
-            sqlite.append_event(event="note", agent="agent-a", task="demo/W-1", now=T0)
-            sqlite.append_event(event="note", agent="agent-b", task="demo/W-2", now=T0)
+            with sqlite.lock():
+                sqlite.append_event(event="note", agent="agent-a", task="demo/W-1", now=T0)
+                sqlite.append_event(event="note", agent="agent-b", task="demo/W-2", now=T0)
             records = sqlite.read_events()
         finally:
             sqlite.close()
@@ -155,6 +158,152 @@ class StoreTest(unittest.TestCase):
         as_json = run("--root", str(self.ws.root), "--db", str(self.ws.db),
                       "export", "--format", "json")
         self.assertIn('"tasks"', as_json.stdout)
+
+    def test_a_write_without_the_lock_is_refused(self):
+        sqlite = self.sqlite()
+        try:
+            sqlite.registry = self.ws.load()
+            with self.assertRaises(WorkError):
+                sqlite.save()
+            with self.assertRaises(WorkError):
+                sqlite.commit(event="note", agent="agent-a", task="demo/W-1", now=T0)
+            with self.assertRaises(WorkError):
+                sqlite.append_event(event="note", agent="agent-a", task="demo/W-1", now=T0)
+        finally:
+            sqlite.close()
+
+    def test_commit_rolls_back_state_when_the_event_fails(self):
+        sqlite = self.sqlite()
+        try:
+            sqlite.registry = self.ws.load()
+            with sqlite.lock():
+                sqlite.save()
+            registry = sqlite.load()
+            task = registry["tasks"][0]
+            original = sqlite._append_event
+
+            def boom(**fields):
+                raise RuntimeError("event append failed")
+
+            sqlite._append_event = boom
+            try:
+                with sqlite.lock():
+                    task["title"] = "changed"
+                    with self.assertRaises(RuntimeError):
+                        sqlite.commit(event="transition", task=task["id"], status="red",
+                                      revision=task.get("revision", 0) + 1, now=T0)
+            finally:
+                sqlite._append_event = original
+            fresh = sqlite.load()
+            self.assertEqual(fresh["tasks"][0]["title"], "Task demo/W-1")
+            self.assertEqual(len(sqlite.read_events()), 0)
+        finally:
+            sqlite.close()
+
+    def test_append_event_writes_an_external_checkpoint(self):
+        import hashlib
+
+        sqlite = self.sqlite()
+        try:
+            with sqlite.lock():
+                event = sqlite.append_event(event="note", agent="agent-a",
+                                            task="demo/W-1", now=T0)
+            seq, digest = sqlite.checkpoint()
+            self.assertEqual(seq, event["seq"])
+            self.assertEqual(digest, hashlib.sha256(event_bytes(event)).hexdigest())
+        finally:
+            sqlite.close()
+
+    def test_events_verify_detects_a_rewritten_event(self):
+        sqlite = self.sqlite()
+        try:
+            with sqlite.lock():
+                sqlite.append_event(event="note", agent="agent-a", task="demo/W-1", now=T0)
+            sqlite.connection.execute(
+                "UPDATE events SET body = replace(body, 'agent-a', 'agent-x') WHERE seq = 1")
+        finally:
+            sqlite.close()
+        result = run("--root", str(self.ws.root), "--db", str(self.db), "events", "--verify")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("external checkpoint", result.stdout)
+
+    def test_events_reanchor_repairs_a_stale_checkpoint(self):
+        sqlite = self.sqlite()
+        try:
+            with sqlite.lock():
+                sqlite.append_event(event="note", agent="agent-a", task="demo/W-1", now=T0)
+            head = Path(str(self.db) + ".head")
+            head.write_text("1 " + "0" * 64 + "\n")
+        finally:
+            sqlite.close()
+        repaired = run("--root", str(self.ws.root), "--db", str(self.db),
+                       "events", "--verify", "--reanchor")
+        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+        self.assertIn("re-anchored", repaired.stdout)
+        verified = run("--root", str(self.ws.root), "--db", str(self.db), "events", "--verify")
+        self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+
+    def test_tasks_are_documents_without_duplicate_columns(self):
+        sqlite = self.sqlite()
+        try:
+            sqlite.registry = self.ws.load()
+            with sqlite.lock():
+                sqlite.save()
+            task_columns = {row["name"] for row in
+                            sqlite.connection.execute("PRAGMA table_info(tasks)")}
+            board_columns = {row["name"] for row in
+                             sqlite.connection.execute("PRAGMA table_info(boards)")}
+        finally:
+            sqlite.close()
+        self.assertEqual(task_columns, {"id", "body"})
+        self.assertEqual(board_columns, {"id", "body"})
+
+    def test_an_old_wide_task_table_is_rebuilt_as_a_document(self):
+        sqlite = self.sqlite()
+        try:
+            sqlite.registry = self.ws.load()
+            with sqlite.lock():
+                sqlite.save()
+            sqlite.connection.execute("ALTER TABLE tasks ADD COLUMN status TEXT")
+            sqlite.connection.execute("UPDATE tasks SET status = 'ready'")
+        finally:
+            sqlite.close()
+        reopened = self.sqlite()
+        try:
+            columns = {row["name"] for row in reopened.connection.execute("PRAGMA table_info(tasks)")}
+            self.assertEqual(columns, {"id", "body"})
+            self.assertEqual(len(reopened.load()["tasks"]), 4)
+        finally:
+            reopened.close()
+
+    def test_a_batch_transaction_anchors_its_last_event(self):
+        import hashlib
+
+        sqlite = self.sqlite()
+        try:
+            sqlite.registry = self.ws.load()
+            with sqlite.lock():
+                with sqlite.transaction():
+                    sqlite.append_event(event="note", agent="agent-a", task="demo/W-1", now=T0)
+                    sqlite.append_event(event="note", agent="agent-b", task="demo/W-2", now=T0)
+            checkpoint = sqlite.checkpoint()
+            last_raw, last = sqlite.read_events()[-1]
+        finally:
+            sqlite.close()
+        self.assertEqual(checkpoint, (last["seq"], hashlib.sha256(last_raw).hexdigest()))
+
+    def test_snapshot_reads_registry_and_events_together(self):
+        sqlite = self.sqlite()
+        try:
+            sqlite.registry = self.ws.load()
+            with sqlite.lock():
+                sqlite.commit(event="create", task="demo/W-9", agent="agent-a",
+                              status="ready", revision=0, now=T0)
+            registry, events = sqlite.snapshot()
+        finally:
+            sqlite.close()
+        self.assertEqual([event["event"] for _, event in events], ["create"])
+        self.assertEqual(len(registry["tasks"]), 4)
 
     def test_factory_returns_sqlite(self):
         self.assertIsInstance(make_store(self.ws.root, "sqlite", self.db), SqliteStore)

@@ -11,10 +11,10 @@ reconciliation**.
 | `work-home.yaml` | Marks this directory as the authoritative coordination home |
 | `store.py` | Storage: the SQLite backend, the interface, and the legacy file importer |
 | `~/.local/state/loom/work.db` | Live state: boards, tasks, edges, claims and the hash-chained events |
-| `loom` | The front door: `work`, `tick`, `workers`, `schedule`, `linear` and `logs`, with policy in `~/.config/loom/loom.json` |
-| `task` | The CLI agents use to create, claim, renew, release, take over, transition, message and reconcile work |
+| `loom` | The single CLI: every engine verb, plus `tick`, `workers`, `schedule`, `linear` and `logs`; policy in `~/.config/loom/loom.json` |
+| `engine.py` | The engine verbs and the policy pass, imported by `loom`; not a separate command |
 | `AGENT-GUIDE.md` | The briefing to point a product agent at: the loop, the enforced rules, discovery and escalation |
-| `validate_work.py` | Schema, drift, dependency, lease, claim and event-chain verification |
+| `validate_work.py` | Schema, drift, dependency, lease, epoch, review, event-chain and checkpoint verification |
 | `schemas/task.schema.json` | The central task contract |
 | `decisions/` | Reconciliation decisions |
 | `a2a/` | A2A v1.0 façade: Agent Card, JSON-RPC, read and claim operations |
@@ -24,7 +24,7 @@ reconciliation**.
 
 ## CLI
 
-Every mutation goes through `./task`; MCP and A2A delegate to it, so the guarantees below are
+Every mutation goes through `./loom`; MCP and A2A delegate to it, so the guarantees below are
 identical on all three surfaces.
 
 | Command | Purpose |
@@ -59,16 +59,16 @@ identical on all three surfaces.
 An integration is only proven by the event that records it: the `transition` to
 `integrated` carries `integrated_source` and `integration_tip`, verified against the
 board's integration branch. Tasks migrated from the pre-SQLite registry have no such
-event, so `validate_work.py` warns and `task show` prints
+event, so `validate_work.py` warns and `loom show` prints
 `integrated: NO RECEIPT`.
 
 Pre-migration integrations whose commits no longer exist are accepted as proven by evidence
 only, per `decisions/integration-receipts-001.md`; the validator reports the count as one
-accepted-gap line. `task annotate` repairs a task when a provable commit exists, without
+accepted-gap line. `loom annotate` repairs a task when a provable commit exists, without
 rewriting history and without inventing a hash:
 
 ```bash
-./task annotate <id> --revision <n> --integrated-source <full-commit> \
+./loom annotate <id> --revision <n> --integrated-source <full-commit> \
   --base <base-commit> --reason "how the commit was established" --agent <you>
 ```
 
@@ -77,15 +77,17 @@ The commit must exist in the owner checkout and be in the history of the board's
 commit changed are unchanged at the integration tip. Annotating is refused when a
 receipt already exists, and the event is appended to the audit log like any other.
 
-## One front door
+## One command
 
-`./loom` wraps the entry points without hiding them. Policy lives in
+`./loom` is the single CLI. The engine verbs are top-level — `loom claim`, `loom transition`,
+`loom events` — and the unattended verbs sit alongside them. Policy lives in
 `~/.config/loom/loom.json`, not in a launchd plist.
 
 ```bash
-./loom work list --ready        # the task CLI, unchanged
+./loom list --ready             # engine verbs are top-level
+./loom claim alpha/W-1 --revision 0 --ttl 45m
 ./loom tick                     # preview; limits come from the config
-./loom tick --apply             # claim and launch
+./loom tick --apply             # claim, launch and review
 ./loom tick --apply --quiet     # the scheduled form: silent when it did nothing
 ./loom workers                  # running, with pid, branch and worktree
 ./loom workers stop <task>
@@ -95,7 +97,7 @@ receipt already exists, and the event is appended to the audit log like any othe
 ./loom logs <task>
 ```
 
-`./task` keeps working; `loom work` is the same binary with the same verbs.
+`loom` routes engine verbs to `engine.py` in-process; there is no second command name.
 
 The launchd job runs `loom tick --apply --quiet` every **120 seconds**. An idle pass is ~0.25s and
 prints nothing; a pass that claims, reviews, records or escalates prints its report. `schedule status`
@@ -122,12 +124,12 @@ Capacity, TTL, worker command, reviewer identity and the attempt bound are in
 
 State lives in SQLite at `~/.local/state/loom/work.db`. The database is outside every repository,
 so state is not a git artifact any more. The file backend is retired; `FileStore` survives only as
-the importer `task migrate` reads a pre-SQLite work home with.
+the importer `loom migrate` reads a pre-SQLite work home with.
 
 ```bash
-./task list --ready                                                    # default store
-./task migrate --from <old work home> --to ~/.local/state/loom/work.db # import a file home
-./task export --out registry.yaml                                      # snapshot for review
+./loom list --ready                                                    # default store
+./loom migrate --from <old work home> --to ~/.local/state/loom/work.db # import a file home
+./loom export --out registry.yaml                                      # snapshot for review
 ```
 
 The exported file is a snapshot for review, not the source of truth. `validate_work.py` reads the
@@ -155,7 +157,7 @@ export WORK_DB=~/.local/state/loom/work.db                   # the task database
 
 - **Central registry** — task identity, program, cross-repo dependencies, write-path conflicts,
   claims/leases and the revision counter. Authoritative once a task has been adopted
-  (`revision >= 1`, i.e. mutated through `./task`).
+  (`revision >= 1`, i.e. mutated through `./loom`).
 - **Repo boards** — packet body, detailed scope, evidence files, reviews and execution checkpoints.
 - **Imported tasks** (`revision == 0`, `status_source: board`) — the repo board is authoritative;
   use `reconcile` to adopt a status change.
@@ -171,9 +173,9 @@ scope, evidence or write paths.
 ```bash
 export WORK_AGENT=opencode/alpha-agent-3      # identity recorded in every event
 
-./task list --ready                          # claimable: ready + deps met + no path conflict
-./task show alpha/W-1
-./task claim alpha/W-1 --revision 0 --ttl 45m
+./loom list --ready                          # claimable: ready + deps met + no path conflict
+./loom show alpha/W-1
+./loom claim alpha/W-1 --revision 0 --ttl 45m
 ```
 
 `claim` is a compare-and-swap: the `--revision` you pass must equal the registry revision. A stale
@@ -188,9 +190,9 @@ Present that epoch on every mutation you make as the holder. A takeover incremen
 whose lease was taken over is refused even if it re-reads the revision:
 
 ```bash
-./task renew    alpha/W-1 --revision 1 --epoch 1 --ttl 45m
-./task release  alpha/W-1 --revision 2 --epoch 1 --reason "handing back for review"
-./task takeover alpha/W-1 --revision 3 --reason "lease expired; agent went silent"
+./loom renew    alpha/W-1 --revision 1 --epoch 1 --ttl 45m
+./loom release  alpha/W-1 --revision 2 --epoch 1 --reason "handing back for review"
+./loom takeover alpha/W-1 --revision 3 --reason "lease expired; agent went silent"
 ```
 
 Authority is a *live* lease, not a recorded claim: once the lease expires, the holder can no longer
@@ -204,12 +206,12 @@ notice and stop before the task is re-granted. It records the previous agent, it
 ## Move work through the state machine
 
 ```bash
-./task transition alpha/W-1 --revision 1 --to red
-./task transition alpha/W-1 --revision 2 --to green
-./task transition alpha/W-1 --revision 3 --to reviewed \
+./loom transition alpha/W-1 --revision 1 --to red
+./loom transition alpha/W-1 --revision 2 --to green
+./loom transition alpha/W-1 --revision 3 --to reviewed \
   --reviewer reviewer-7 --decision approve
-./task transition alpha/W-1 --revision 4 --to integrated --evidence evidence/W-1.md
-./task transition alpha/W-1 --revision 5 --to accepted   --evidence evidence/W-1.md
+./loom transition alpha/W-1 --revision 4 --to integrated --evidence evidence/W-1.md
+./loom transition alpha/W-1 --revision 5 --to accepted   --evidence evidence/W-1.md
 ```
 
 Rules enforced by the CLI:
@@ -227,7 +229,7 @@ Rules enforced by the CLI:
 An implementer submits by asking an independent reviewer:
 
 ```bash
-./task ask alpha/W-1 --to opencode/reviewer-agent --question "Review the submitted revision" \
+./loom ask alpha/W-1 --to opencode/reviewer-agent --question "Review the submitted revision" \
   --review-source <40-char commit> --review-evidence evidence/W-1.md
 ```
 
@@ -255,16 +257,16 @@ The reviewer identity, attempt bound and coordinator are policy in `~/.config/lo
 New work starts here, not in a repository.
 
 ```bash
-./task create --id alpha/W-15 --board alpha.program --title "…" --goal "…" \
+./loom create --id alpha/W-15 --board alpha.program --title "…" --goal "…" \
   --status ready --depends-on beta/W-1 --write-path src/main/java/...
 ```
 
 Then add the detailed work-item section to the owning document (program) or materialise the packet:
 
 ```bash
-./task board sync  --board gamma.board
-./task board sync  --board gamma.board --check   # CI: non-zero if stale
-./task board import --board alpha.w07 --program alpha  # adopt existing packets
+./loom board sync  --board gamma.board
+./loom board sync  --board gamma.board --check   # CI: non-zero if stale
+./loom board import --board alpha.w07 --program alpha  # adopt existing packets
 ```
 
 ## A2A façade
@@ -277,7 +279,7 @@ curl -s http://127.0.0.1:8787/.well-known/agent-card.json
 ```
 
 `ListTasks`, `GetTask`, `SendMessage` (claim/renew/release/takeover/transition) and `CancelTask` are
-supported; mutations are delegated to `./task`, so CAS, leases and audit are identical. The card
+supported; mutations are delegated to `./loom`, so CAS, leases and audit are identical. The card
 declares no streaming/push/extended-card support and implements no authentication; it binds
 loopback by default. See [`a2a/README.md`](a2a/README.md).
 
@@ -291,7 +293,7 @@ python3 mcp/server.py --print-config opencode     # or claude / codex
 
 Tools: `work_status`, `work_list`, `work_get`, `work_claim`, `work_renew`, `work_release`,
 `work_transition`. `work_status` is described as the pre-planning entry point; mutations delegate
-to `./task`, so the guarantees are identical. The server infers `repo` from the workspace path and
+to `./loom`, so the guarantees are identical. The server infers `repo` from the workspace path and
 `agent` as `<repo>-agent`, so one global registration works in every repository. See
 [`mcp/README.md`](mcp/README.md).
 
@@ -305,8 +307,8 @@ task, gate and contract reference exists.
 ## Reconcile
 
 ```bash
-./task reconcile --board gamma.board                         # report drift, exit 1
-./task reconcile --board gamma.board --apply --reason "board authoritative"
+./loom reconcile --board gamma.board                         # report drift, exit 1
+./loom reconcile --board gamma.board --apply --reason "board authoritative"
 ```
 
 `--apply` adopts the board status for imported/board-sourced tasks and writes a `reconcile` event.
@@ -315,8 +317,8 @@ Never silently overwrite another agent; record a reason.
 ## Audit and verify
 
 ```bash
-./task events --verify                 # hash chain + terminal state vs registry
-./task events --task alpha/W-1
+./loom events --verify                 # hash chain + terminal state vs registry
+./loom events --task alpha/W-1
 python3 validate_work.py               # full cross-repo check
 python3 -m unittest discover -s tests -v   # full suite: CLI, validator, A2A, MCP, surface and plans
 ```
@@ -333,10 +335,10 @@ Claims say who is working; messages say what is blocking. A question is an event
 message, so it survives session ends and is attributable.
 
 ```bash
-./task ask gamma/R-1 --to opencode/reviewer --question "Who owns the privacy review?" \
+./loom ask gamma/R-1 --to opencode/reviewer --question "Who owns the privacy review?" \
   --needed-by 2026-11-07 --agent opencode/gamma-agent
-./task inbox --agent opencode/reviewer          # open questions only; --all includes answered
-./task answer gamma/R-1 --question 454 --decision "I do, starting Monday" \
+./loom inbox --agent opencode/reviewer          # open questions only; --all includes answered
+./loom answer gamma/R-1 --question 454 --decision "I do, starting Monday" \
   --agent opencode/reviewer
 ```
 
@@ -355,14 +357,14 @@ Work is found by question, not by remembering a namespace. Every view is compute
 and edges at call time; nothing is cached.
 
 ```bash
-./task search avatar                      # id, title, goal, program, board, write paths
-./task search "association" --limit 5
-./task dependents beta/W-1                # who is blocked on it, directly and transitively
-./task graph --open --format html         # the whole picture, written to task-graph.html
-./task graph --task beta/W-1              # one chain: its dependencies and dependents
-./task list --ready                       # ranked by how much downstream work each releases
-./task list --awaiting human              # decisions only the owner can make
-./task show gamma/R-1               # includes a `blocks:` line
+./loom search avatar                      # id, title, goal, program, board, write paths
+./loom search "association" --limit 5
+./loom dependents beta/W-1                # who is blocked on it, directly and transitively
+./loom graph --open --format html         # the whole picture, written to task-graph.html
+./loom graph --task beta/W-1              # one chain: its dependencies and dependents
+./loom list --ready                       # ranked by how much downstream work each releases
+./loom list --awaiting human              # decisions only the owner can make
+./loom show gamma/R-1               # includes a `blocks:` line
 ```
 
 - `--ready` sorts by transitive downstream weight and prints `+N downstream`, so a task that

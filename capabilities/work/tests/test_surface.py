@@ -87,7 +87,7 @@ class SurfaceContractTest(unittest.TestCase):
         self.assertEqual(documented, set(a2a.ACTION_TO_TOOL))
 
     def test_work_readme_documents_every_cli_command(self):
-        parser = load("surface_task", WORK / "task")
+        parser = load("surface_task", WORK / "engine.py")
         commands = set(parser.build_parser()._subparsers._group_actions[0].choices)
         documented = table_rows(WORK / "README.md")
         self.assertEqual(commands - documented, set(),

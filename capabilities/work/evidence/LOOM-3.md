@@ -33,4 +33,4 @@ first-time adopter would hit them exactly as the example did.
 ## Limits
 
 - The walkthrough seeds boards through the store, because board registration has no CLI command.
-  That is a real gap for adopters; it should become `task board add`.
+  That is a real gap for adopters; it should become `loom board add`.

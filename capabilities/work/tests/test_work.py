@@ -25,7 +25,7 @@ import yaml
 WORK = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WORK))
 from store import SqliteStore  # noqa: E402
-TASK = WORK / "task"
+TASK = WORK / "loom"
 VALIDATOR = WORK / "validate_work.py"
 T0 = "2030-01-01T10:00:00Z"
 
@@ -143,7 +143,8 @@ class Workspace:
     def save(self):
         store = self.store()
         try:
-            store.save()
+            with store.lock():
+                store.save()
         finally:
             store.close()
 
@@ -1412,9 +1413,11 @@ class WorkCLITest(unittest.TestCase):
         request = self.request_review(source, reviewer="opencode/reviewer-agent")
         store = self.ws.store()
         try:
-            store.append_event(event="launch", task="demo/W-1", agent="opencode/reviewer-agent",
-                               role="reviewer", state="pending", pid=999999, revision=2,
-                               question=int(request), source=source, now=T0)
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/reviewer-agent", role="reviewer",
+                                   state="pending", pid=999999, revision=2,
+                                   question=int(request), source=source, now=T0)
         finally:
             store.close()
         self.approve_review(request, reviewer="opencode/reviewer-agent")
@@ -1430,11 +1433,12 @@ class WorkCLITest(unittest.TestCase):
         request = self.request_review(source, reviewer="opencode/reviewer-agent")
         store = self.ws.store()
         try:
-            for _ in range(2):
-                store.append_event(event="launch", task="demo/W-1",
-                                   agent="opencode/reviewer-agent", role="reviewer",
-                                   state="failed", pid=999999, revision=2,
-                                   question=int(request), source=source, now=T0)
+            with store.lock():
+                for _ in range(2):
+                    store.append_event(event="launch", task="demo/W-1",
+                                       agent="opencode/reviewer-agent", role="reviewer",
+                                       state="failed", pid=999999, revision=2,
+                                       question=int(request), source=source, now=T0)
         finally:
             store.close()
         result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "2",
@@ -1607,8 +1611,10 @@ class WorkCLITest(unittest.TestCase):
         try:
             # The scheduler's reconciliation trails the state event and carries the revision the
             # process started from, not the task's current revision.
-            store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
-                               state="done", pid=1, revision=1, now=T0)
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/loom-worker", state="done", pid=1,
+                                   revision=1, now=T0)
         finally:
             store.close()
         result = validate(self.ws.root)

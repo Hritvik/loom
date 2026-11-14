@@ -42,18 +42,18 @@ store.save(); store.close()
 
 ```bash
 cd ~/repositories/loom/capabilities/work
-./task create --agent you/alpha-agent --id alpha/W-1 --board alpha.program \
+./loom create --agent you/alpha-agent --id alpha/W-1 --board alpha.program \
   --title "First task" --status ready --write-path src/first
-./task list --ready
+./loom list --ready
 ```
 
 ## 4. Work the loop
 
 ```bash
-./task claim alpha/W-1 --revision 0 --ttl 45m --agent you/alpha-agent
+./loom claim alpha/W-1 --revision 0 --ttl 45m --agent you/alpha-agent
 # -> claimed alpha/W-1 at revision 1 ... epoch 1
-./task transition alpha/W-1 --revision 1 --epoch 1 --to red   --agent you/alpha-agent
-./task transition alpha/W-1 --revision 2 --epoch 1 --to green --agent you/alpha-agent
+./loom transition alpha/W-1 --revision 1 --epoch 1 --to red   --agent you/alpha-agent
+./loom transition alpha/W-1 --revision 2 --epoch 1 --to green --agent you/alpha-agent
 ```
 
 The claim prints its fencing epoch. Present it on `renew`, `release` and `transition` while you hold
@@ -62,14 +62,14 @@ the claim; a takeover increments it and fences the old attempt.
 Review is a two-step handshake, and the reviewer must never be a claimant:
 
 ```bash
-./task ask alpha/W-1 --to you/reviewer --agent you/alpha-agent \
+./loom ask alpha/W-1 --to you/reviewer --agent you/alpha-agent \
   --question "Review the submitted revision" --review-source <40-char commit> \
   --review-evidence evidence/W-1.md
-./task answer alpha/W-1 --question <ask seq> --decision approve \
+./loom answer alpha/W-1 --question <ask seq> --decision approve \
   --note "Reproduced the checks" --agent you/reviewer
-./task transition alpha/W-1 --revision 3 --to reviewed --reviewer you/reviewer \
+./loom transition alpha/W-1 --revision 3 --to reviewed --reviewer you/reviewer \
   --decision approve --review-answer <answer seq> --agent you/integrator
-./task transition alpha/W-1 --revision 4 --to integrated \
+./loom transition alpha/W-1 --revision 4 --to integrated \
   --evidence evidence/W-1.md --integrated-source <the approved commit> --agent you/alpha-agent
 ```
 

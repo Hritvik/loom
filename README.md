@@ -10,8 +10,8 @@ without colliding, without a human dispatching tasks, and without trusting each 
 
 | Surface | Purpose |
 |---|---|
-| `capabilities/work/loom` | the front door: `work`, `tick`, `workers`, `schedule`, `linear`, `logs` |
-| `capabilities/work/task` | the CLI: claim, renew, release, takeover, transition, ask, inbox, search, dependents, graph, tick, decisions, migrate, export |
+| `capabilities/work/loom` | the single CLI: every engine verb, plus `tick`, `workers`, `schedule`, `linear`, `logs` |
+| `capabilities/work/engine.py` | the engine verbs and the policy pass, imported by `loom` |
 | `capabilities/work/mcp/` | MCP server, so the registry appears in an agent's tool list |
 | `capabilities/work/a2a/` | A2A v1.0 façade for agents that speak it |
 | `capabilities/work/validate_work.py` | schema, dependency, lease, epoch, review, event-chain and contract verification |
@@ -33,9 +33,9 @@ elsewhere with `--db` or `WORK_DB`.
 
 ```bash
 cd capabilities/work
-./task list --ready          # claimable work, ranked by what it unblocks
-./task decisions             # what needs the owner, and nothing else
-./task graph --open          # the dependency picture
+./loom list --ready          # claimable work, ranked by what it unblocks
+./loom decisions             # what needs the owner, and nothing else
+./loom graph --open          # the dependency picture
 python3 validate_work.py     # is the registry healthy?
 ```
 
@@ -56,6 +56,10 @@ Claims carry a **fencing epoch**: every claim and takeover increments it and the
 it on each mutation, so a worker whose lease was taken over is refused even if it re-reads the
 revision. Takeover also waits out a **lock-delay** (two minutes), because a git branch cannot
 validate a token. Authority is a live lease, not a recorded claim.
+
+State and its audit event are written in one transaction, and the chain head is mirrored to
+`work.db.head`. `loom events --verify` checks both; `docs/adr/0002-store-is-a-document-log.md`
+states the threat model.
 
 ## Boundaries
 

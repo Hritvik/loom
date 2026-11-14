@@ -12,7 +12,7 @@ starts planning or editing a repository:
   work_release     return to the pool
   work_transition  red/green/reviewed/integrated/accepted and terminal states
 
-Mutations delegate to `work/task`, so the CLI, A2A and MCP surfaces share one implementation of
+Mutations delegate to `work/loom`, so the CLI, A2A and MCP surfaces share one implementation of
 CAS, leases, dependency gates, write-path conflicts and the hash-chained audit log.
 
 Transport: newline-delimited JSON-RPC 2.0 over stdin/stdout. Logs go to stderr only.
@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store import make_store  # noqa: E402 — sibling package, resolved from capabilities/work
 
 WORK = Path(__file__).resolve().parents[1]
-TASK_BIN = WORK / "task"
+LOOM_BIN = WORK / "loom"
 SERVER_NAME = "work-coordination"
 SERVER_VERSION = "1.0.0"
 
@@ -64,12 +64,22 @@ class Registry:
     def __init__(self, root: Path, backend: str = "sqlite", db: str | None = None):
         self.root = Path(root).expanduser()
         self.store = make_store(self.root, backend, db or os.environ.get("WORK_DB"))
+        self._snapshot = None
+
+    def refresh(self) -> None:
+        """Drop the cached view; called at the start of each request and after a mutation."""
+        self._snapshot = None
+
+    def _state(self):
+        if self._snapshot is None:
+            self._snapshot = self.store.snapshot()
+        return self._snapshot
 
     def has_registry(self) -> bool:
         return self.store.has_registry()
 
     def document(self) -> dict:
-        return self.store.load()
+        return self._state()[0]
 
     def tasks(self) -> list[dict]:
         return self.document().get("tasks", [])
@@ -87,7 +97,7 @@ class Registry:
         return self.document().get("edges", [])
 
     def events(self) -> list[dict]:
-        return [record for _, record in self.store.read_events()]
+        return [record for _, record in self._state()[1]]
 
     def events_for(self, task_id: str, limit: int = 5) -> list[dict]:
         return [event for event in self.events() if event.get("task") == task_id][-limit:]
@@ -287,7 +297,7 @@ def board_drift(registry: Registry, tasks: list[dict], boards: dict[str, dict]) 
 
 def run_cli(root: Path, *args: str) -> str:
     result = subprocess.run(
-        [sys.executable, str(TASK_BIN), "--root", str(root), *args],
+        [sys.executable, str(LOOM_BIN), "--root", str(root), *args],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -428,6 +438,7 @@ def tool_claim(registry: Registry, arguments: dict, default_agent: str | None) -
     if arguments.get("ttl"):
         args += ["--ttl", str(arguments["ttl"])]
     run_cli(registry.root, *args)
+    registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
 
@@ -444,6 +455,7 @@ def tool_renew(registry: Registry, arguments: dict, default_agent: str | None) -
     if arguments.get("ttl"):
         args += ["--ttl", str(arguments["ttl"])]
     run_cli(registry.root, *args)
+    registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
 
@@ -462,6 +474,7 @@ def tool_release(registry: Registry, arguments: dict, default_agent: str | None)
     if arguments.get("epoch") is not None:
         args += ["--epoch", str(arguments["epoch"])]
     run_cli(registry.root, *args)
+    registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
 
@@ -486,6 +499,7 @@ def tool_transition(registry: Registry, arguments: dict, default_agent: str | No
         if arguments.get(key):
             args += [flag, str(arguments[key])]
     run_cli(registry.root, *args)
+    registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
 
@@ -806,6 +820,7 @@ def tool_takeover(registry: Registry, arguments: dict, default_agent: str | None
     if arguments.get("lockDelay"):
         args += ["--lock-delay", str(arguments["lockDelay"])]
     run_cli(registry.root, *args)
+    registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
 
@@ -818,6 +833,7 @@ def tool_inbox(registry: Registry, arguments: dict, default_agent: str | None) -
     if arguments.get("all"):
         args.append("--all")
     output = run_cli(registry.root, *args)
+    registry.refresh()
     questions = json.loads(output) if output.startswith("[") else []
     return {"agent": agent, "count": len(questions), "questions": questions}
 
@@ -838,6 +854,7 @@ def tool_ask(registry: Registry, arguments: dict, default_agent: str | None) -> 
         if arguments.get(key):
             args += [flag, str(arguments[key])]
     output = run_cli(registry.root, *args)
+    registry.refresh()
     return {"task": str(task_id), "to": str(target), "result": output}
 
 
@@ -853,6 +870,7 @@ def tool_answer(registry: Registry, arguments: dict, default_agent: str | None) 
     if arguments.get("note"):
         args += ["--note", str(arguments["note"])]
     output = run_cli(registry.root, *args)
+    registry.refresh()
     return {"task": str(task_id), "question": question, "result": output}
 
 
@@ -866,6 +884,7 @@ def tool_search(registry: Registry, arguments: dict, default_agent: str | None) 
     if arguments.get("limit"):
         args += ["--limit", str(arguments["limit"])]
     output = run_cli(registry.root, *args)
+    registry.refresh()
     tasks = json.loads(output) if output.startswith("[") else []
     all_tasks = registry.tasks()
     index = dependents_map(all_tasks, registry.edges())
@@ -953,6 +972,7 @@ def handle_message(message: dict, registry: Registry, default_agent: str | None,
         if not isinstance(arguments, dict):
             return rpc_error(request_id, -32602, "arguments must be an object")
         try:
+            registry.refresh()
             result = TOOL_HANDLERS[name](registry, arguments, default_agent, default_repo)
             return {"jsonrpc": "2.0", "id": request_id, "result": tool_result(result)}
         except ToolError as exc:

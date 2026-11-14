@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from store import make_store  # noqa: E402 — sibling package, resolved from capabilities/work
 
 WORK = Path(__file__).resolve().parents[1]
-TASK_BIN = WORK / "task"
+LOOM_BIN = WORK / "loom"
 A2A_VERSION = "1.0"
 
 TASK_NOT_FOUND = -32001
@@ -116,7 +116,7 @@ def parse_timestamp(value: str) -> dt.datetime:
 
 
 class WorkHome:
-    def __init__(self, root: Path, task_bin: Path = TASK_BIN, db: str | None = None):
+    def __init__(self, root: Path, task_bin: Path = LOOM_BIN, db: str | None = None):
         self.root = Path(root).expanduser()
         self.db = db or os.environ.get("WORK_DB")
         self.task_bin = Path(task_bin)
@@ -131,6 +131,14 @@ class WorkHome:
         store = self.store()
         try:
             return store.load()
+        finally:
+            store.close()
+
+    def snapshot(self):
+        store = self.store()
+        try:
+            registry, records = store.snapshot()
+            return registry, [record for _, record in records]
         finally:
             store.close()
 
@@ -176,11 +184,13 @@ def paths_overlap(left: str, right: str) -> bool:
     return bool(a and b) and (a == b or a.startswith(b + "/") or b.startswith(a + "/"))
 
 
-def claimability(home: WorkHome, task: dict) -> tuple[bool, list[str]]:
+def claimability(home: WorkHome, task: dict,
+                 registry: dict | None = None) -> tuple[bool, list[str]]:
     """Mirror the CLI's claim gate so A2A clients can filter honestly."""
-    tasks = home.tasks()
+    registry = registry if registry is not None else home.registry()
+    tasks = registry.get("tasks", [])
     by_id = {item["id"]: item for item in tasks}
-    dependencies = [edge["to"] for edge in home.registry().get("edges", [])
+    dependencies = [edge["to"] for edge in registry.get("edges", [])
                     if edge.get("kind", "depends-on") == "depends-on" and edge["from"] == task["id"]]
     dependencies += [dep for dep in task.get("depends_on", []) or [] if dep not in dependencies]
     unmet = [dep for dep in dependencies
@@ -199,8 +209,9 @@ def claimability(home: WorkHome, task: dict) -> tuple[bool, list[str]]:
 
 
 def task_to_a2a(home: WorkHome, task: dict, history_length: int = 0,
-                include_artifacts: bool = False) -> dict:
-    usable, blocked_by = claimability(home, task)
+                include_artifacts: bool = False, registry: dict | None = None,
+                events: list[dict] | None = None) -> dict:
+    usable, blocked_by = claimability(home, task, registry)
     status = {
         "state": STATE_MAP.get(task.get("status"), "TASK_STATE_UNSPECIFIED"),
         "timestamp": timestamp(task.get("updated_at") or task.get("created_at")),
@@ -233,8 +244,9 @@ def task_to_a2a(home: WorkHome, task: dict, history_length: int = 0,
             "parts": [{"text": task["evidence"]}],
         }]
     if history_length > 0:
-        events = home.events_for(task["id"])[-history_length:]
-        document["history"] = [event_to_message(task["id"], event) for event in events]
+        history = (events if events is not None else home.events_for(task["id"]))
+        document["history"] = [event_to_message(task["id"], event)
+                               for event in history if event.get("task") == task["id"]][-history_length:]
     return document
 
 
@@ -377,7 +389,8 @@ class Dispatcher:
             except (TypeError, ValueError):
                 raise RpcError(INVALID_PARAMS, "invalid statusTimestampAfter")
 
-        tasks = self.home.tasks()
+        registry, events = self.home.snapshot()
+        tasks = registry.get("tasks", [])
         if context_id:
             tasks = [task for task in tasks if task.get("program") == context_id]
         if statuses:
@@ -411,8 +424,8 @@ class Dispatcher:
         include_artifacts = bool(params.get("includeArtifacts", False))
         next_token = encode_page(offset + page_size) if offset + page_size < len(tasks) else ""
         return {
-            "tasks": [task_to_a2a(self.home, task, history_length, include_artifacts)
-                      for task in page],
+            "tasks": [task_to_a2a(self.home, task, history_length, include_artifacts,
+                                  registry, events) for task in page],
             "nextPageToken": next_token,
         }
 
@@ -423,8 +436,13 @@ class Dispatcher:
         history_length = params.get("historyLength", 0)
         if not isinstance(history_length, int) or isinstance(history_length, bool) or history_length < 0:
             raise RpcError(INVALID_PARAMS, "historyLength must be a non-negative integer")
-        task = self.home.find(str(task_id))
-        return task_to_a2a(self.home, task, history_length, include_artifacts=True)
+        registry, events = self.home.snapshot()
+        task = next((item for item in registry.get("tasks", [])
+                     if item.get("id") == str(task_id)), None)
+        if task is None:
+            raise RpcError(TASK_NOT_FOUND, f"task {task_id} does not exist")
+        return task_to_a2a(self.home, task, history_length, include_artifacts=True,
+                           registry=registry, events=events)
 
     # -- writes ----------------------------------------------------------
 
@@ -726,7 +744,7 @@ class WorkCoordinationServer(ThreadingHTTPServer):
 
 
 def make_server(root: Path, host: str = "127.0.0.1", port: int = 8787,
-                task_bin: Path = TASK_BIN, verbose: bool = False) -> WorkCoordinationServer:
+                task_bin: Path = LOOM_BIN, verbose: bool = False) -> WorkCoordinationServer:
     return WorkCoordinationServer((host, port), Path(root), Path(task_bin), verbose)
 
 
@@ -736,7 +754,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1",
                         help="bind address (loopback only by default)")
     parser.add_argument("--port", type=int, default=8787)
-    parser.add_argument("--task", default=str(TASK_BIN), help="path to the task CLI")
+    parser.add_argument("--task", default=str(LOOM_BIN), help="path to the loom CLI")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
     server = make_server(Path(args.root), args.host, args.port, Path(args.task), args.verbose)

@@ -14,6 +14,7 @@ semantics. `tests/test_store.py` runs the same operations against both.
 from __future__ import annotations
 
 import abc
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -29,23 +30,13 @@ ZERO_HASH = "0" * 64
 REGISTRY_KIND = "work-coordination-registry"
 REGISTRY_HEADER = (
     "# Work coordination registry — authored centrally.\n"
-    "# Mutate with `./task`; verify with `validate_work.py`. Do not hand-edit claims.\n"
+    "# Mutate with `./loom`; verify with `validate_work.py`. Do not hand-edit claims.\n"
 )
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS boards (id TEXT PRIMARY KEY, kind TEXT, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS tasks (
-    id TEXT PRIMARY KEY,
-    board TEXT,
-    program TEXT,
-    status TEXT,
-    revision INTEGER,
-    blocked_needs TEXT,
-    claim_agent TEXT,
-    claim_lease_expires TEXT,
-    body TEXT NOT NULL
-);
+CREATE TABLE IF NOT EXISTS boards (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS edges (
     from_task TEXT NOT NULL,
     to_task TEXT NOT NULL,
@@ -60,8 +51,8 @@ CREATE TABLE IF NOT EXISTS events (
     prev TEXT NOT NULL,
     hash TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS tasks_program ON tasks(program);
+CREATE INDEX IF NOT EXISTS tasks_status ON tasks(json_extract(body, '$.status'));
+CREATE INDEX IF NOT EXISTS tasks_program ON tasks(json_extract(body, '$.program'));
 CREATE INDEX IF NOT EXISTS events_task ON events(task);
 """
 
@@ -108,9 +99,44 @@ def event_bytes(event: dict) -> bytes:
 
 
 class Store(abc.ABC):
-    """Whole-registry storage. Commands load, mutate, save; events append separately."""
+    """Whole-registry storage. Commands load, mutate, commit; events append separately.
+
+    A mutation is only legal while the store lock is held. `commit` writes the registry and the
+    event in one transaction where the backend supports it, so a crash cannot leave state without
+    its audit record. `snapshot` reads both in one consistent view.
+    """
 
     root: Path
+    _lock_held = False
+
+    def _require_lock(self) -> None:
+        if not self._lock_held:
+            raise WorkError("mutation requires the store lock; use `with store.lock():`")
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """One atomic unit of registry state; subclasses override with a real transaction."""
+        self._require_lock()
+        yield self
+        self.save()
+
+    def commit(self, **fields) -> dict:
+        """Write the registry and append one event. Overridden atomically by SQLite."""
+        self._require_lock()
+        self.save()
+        return self.append_event(**fields)
+
+    def snapshot(self) -> tuple[dict, list[tuple[bytes, dict]]]:
+        """A consistent (registry, events) pair. Overridden by SQLite."""
+        return self.load(), self.read_events()
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        """The external chain head, where the backend keeps one."""
+        return None
+
+    def reanchor(self) -> None:
+        """Re-write the external chain head after a verified audit."""
+        self._require_lock()
 
     @abc.abstractmethod
     def load(self) -> dict: ...
@@ -159,6 +185,23 @@ class _FileLock:
         return False
 
 
+class _TrackedLock:
+    """The file lock, plus the store's knowledge that a mutation is legal."""
+
+    def __init__(self, store: Store, lock):
+        self.store = store
+        self.lock = lock
+
+    def __enter__(self):
+        self.lock.__enter__()
+        self.store._lock_held = True
+        return self
+
+    def __exit__(self, *exc):
+        self.store._lock_held = False
+        return self.lock.__exit__(*exc)
+
+
 class FileStore(Store):
     """`registry.yaml` plus `events.ndjson` in a work home."""
 
@@ -168,6 +211,7 @@ class FileStore(Store):
         self.events_path = self.root / "events.ndjson"
         self.lock_path = self.root / ".work.lock"
         self.registry: dict = {}
+        self._lock_held = False
 
     def describe(self) -> str:
         return f"files:{self.root}"
@@ -188,6 +232,7 @@ class FileStore(Store):
         return data
 
     def save(self) -> None:
+        self._require_lock()
         self.registry["updated"] = iso(parse_now(None))[:10]
         body = yaml.safe_dump(
             self.registry,
@@ -210,7 +255,7 @@ class FileStore(Store):
             raise
 
     def lock(self):
-        return _FileLock(self.lock_path)
+        return _TrackedLock(self, _FileLock(self.lock_path))
 
     def has_registry(self) -> bool:
         return self.registry_path.is_file()
@@ -228,6 +273,7 @@ class FileStore(Store):
         return records
 
     def append_event(self, **fields) -> dict:
+        self._require_lock()
         records = self.read_events()
         seq = len(records) + 1
         prev = hashlib.sha256(records[-1][0]).hexdigest() if records else ZERO_HASH
@@ -238,7 +284,13 @@ class FileStore(Store):
 
 
 class SqliteStore(Store):
-    """One SQLite file: structured columns for what gets queried, JSON for the rest."""
+    """One SQLite file. Tasks and boards are documents; edges and meta are relational.
+
+    A task body is the authoritative record. The only structured copies are expression indexes
+    derived from it, so the columns cannot disagree with the document. Whole-registry saves rewrite
+    every document, which is the price of the coarse CLI contract; intent-level operations can
+    replace that later without changing the file format.
+    """
 
     def __init__(self, root: Path, db_path: Path | None = None):
         self.root = Path(root)
@@ -251,6 +303,10 @@ class SqliteStore(Store):
         self.connection.executescript(SCHEMA)
         self._upgrade()
         self.registry: dict = {}
+        self._lock_held = False
+        self._tx_depth = 0
+        self._read_depth = 0
+        self._last_event: dict | None = None
 
     def _upgrade(self) -> None:
         """Bring an existing database up to the current schema without losing events."""
@@ -261,6 +317,30 @@ class SqliteStore(Store):
                 "UPDATE events SET task = json_extract(body, '$.task') WHERE task IS NULL")
             self.connection.execute("DROP INDEX IF EXISTS events_task")
             self.connection.execute("CREATE INDEX IF NOT EXISTS events_task ON events(task)")
+        if {row["name"] for row in self.connection.execute("PRAGMA table_info(boards)")} - {"id", "body"}:
+            self._rebuild_document_table("boards", "id, body")
+        if {row["name"] for row in self.connection.execute("PRAGMA table_info(tasks)")} - {"id", "body"}:
+            self._rebuild_document_table("tasks", "id, body")
+            self.connection.execute("DROP INDEX IF EXISTS tasks_status")
+            self.connection.execute("DROP INDEX IF EXISTS tasks_program")
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS tasks_status ON tasks(json_extract(body, '$.status'))")
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS tasks_program ON tasks(json_extract(body, '$.program'))")
+
+    def _rebuild_document_table(self, table: str, columns: str) -> None:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                f"CREATE TABLE {table}_document (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            self.connection.execute(
+                f"INSERT INTO {table}_document ({columns}) SELECT {columns} FROM {table}")
+            self.connection.execute(f"DROP TABLE {table}")
+            self.connection.execute(f"ALTER TABLE {table}_document RENAME TO {table}")
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
 
     def describe(self) -> str:
         return f"sqlite:{self.db_path}"
@@ -277,96 +357,184 @@ class SqliteStore(Store):
         """Serialise whole commands across processes.
 
         SQLite makes each write durable, but the CLI reads a revision, decides, and writes it back;
-        that read-modify-write needs one writer at a time or two claims both "succeed". The lock
-        disappears when commands become intent-level operations inside one transaction.
+        that read-modify-write needs one writer at a time or two claims both "succeed". Every write
+        method refuses to run unless this lock is held.
         """
-        return _FileLock(Path(str(self.db_path) + ".lock"))
+        return _TrackedLock(self, _FileLock(Path(str(self.db_path) + ".lock")))
 
-    def _transaction(self):
-        connection = self.connection
+    @contextlib.contextmanager
+    def _read_transaction(self):
+        """A consistent multi-query read; nested reads join the outer transaction."""
+        if self._tx_depth or self._read_depth:
+            self._read_depth += 1
+            try:
+                yield
+            finally:
+                self._read_depth -= 1
+            return
+        self.connection.execute("BEGIN DEFERRED")
+        self._read_depth = 1
+        try:
+            yield
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        finally:
+            self._read_depth = 0
 
-        class _Transaction:
-            def __enter__(self):
-                connection.execute("BEGIN IMMEDIATE")
-                return connection
-
-            def __exit__(self, *exc):
-                connection.execute("COMMIT" if exc[0] is None else "ROLLBACK")
-                return False
-
-        return _Transaction()
+    @contextlib.contextmanager
+    def transaction(self):
+        """One atomic unit: registry state and any events appended inside it."""
+        self._require_lock()
+        if self._tx_depth:
+            self._tx_depth += 1
+            try:
+                yield self
+            finally:
+                self._tx_depth -= 1
+            return
+        self.connection.execute("BEGIN IMMEDIATE")
+        self._tx_depth = 1
+        before = self._last_event
+        try:
+            yield self
+            self._write_registry()
+            self.connection.execute("COMMIT")
+            if self._last_event is not before and self._last_event is not None:
+                self._write_checkpoint(self._last_event)
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        finally:
+            self._tx_depth = 0
 
     def load(self) -> dict:
-        meta = {row["key"]: row["value"] for row in self.connection.execute("SELECT key, value FROM meta")}
-        if meta.get("kind") != REGISTRY_KIND:
-            raise WorkError(f"missing registry at {self.db_path}")
-        data = {
-            "kind": REGISTRY_KIND,
-            "version": int(meta.get("version", 1)),
-            "updated": meta.get("updated", ""),
-            "boards": [json.loads(row["body"]) for row in
-                       self.connection.execute("SELECT body FROM boards ORDER BY rowid")],
-            "tasks": [json.loads(row["body"]) for row in
-                      self.connection.execute("SELECT body FROM tasks ORDER BY rowid")],
-            "edges": [dict(row) for row in
-                      self.connection.execute("SELECT from_task AS \"from\", to_task AS \"to\", kind FROM edges")],
-            "claims": [json.loads(row["body"]) for row in
-                       self.connection.execute("SELECT body FROM claims ORDER BY rowid")],
-        }
-        data["edges"] = [{"from": edge["from"], "to": edge["to"], "kind": edge["kind"]}
-                         for edge in data["edges"]]
+        with self._read_transaction():
+            meta = {row["key"]: row["value"]
+                    for row in self.connection.execute("SELECT key, value FROM meta")}
+            if meta.get("kind") != REGISTRY_KIND:
+                raise WorkError(f"missing registry at {self.db_path}")
+            data = {
+                "kind": REGISTRY_KIND,
+                "version": int(meta.get("version", 1)),
+                "updated": meta.get("updated", ""),
+                "boards": [json.loads(row["body"]) for row in
+                           self.connection.execute("SELECT body FROM boards ORDER BY rowid")],
+                "tasks": [json.loads(row["body"]) for row in
+                          self.connection.execute("SELECT body FROM tasks ORDER BY rowid")],
+                "edges": [dict(row) for row in
+                          self.connection.execute("SELECT from_task AS \"from\", to_task AS \"to\", kind FROM edges")],
+                "claims": [json.loads(row["body"]) for row in
+                           self.connection.execute("SELECT body FROM claims ORDER BY rowid")],
+            }
+            data["edges"] = [{"from": edge["from"], "to": edge["to"], "kind": edge["kind"]}
+                             for edge in data["edges"]]
         self.registry = data
         return data
 
-    def save(self) -> None:
+    def _write_registry(self) -> None:
         self.registry["updated"] = iso(parse_now(None))[:10]
         registry = self.registry
-        with self._transaction():
-            self.connection.execute("DELETE FROM boards")
-            self.connection.execute("DELETE FROM tasks")
-            self.connection.execute("DELETE FROM edges")
-            self.connection.execute("DELETE FROM claims")
-            for board in registry.get("boards", []):
-                self.connection.execute(
-                    "INSERT INTO boards (id, kind, body) VALUES (?, ?, ?)",
-                    (board["id"], board.get("kind"), _dump(board)))
-            for task in registry.get("tasks", []):
-                claim = task.get("claim") or {}
-                self.connection.execute(
-                    "INSERT INTO tasks (id, board, program, status, revision, blocked_needs,"
-                    " claim_agent, claim_lease_expires, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (task["id"], task.get("board"), task.get("program"), task.get("status"),
-                     int(task.get("revision", 0)), task.get("blocked_needs"),
-                     claim.get("agent"), claim.get("lease_expires"),
-                     _dump(task)))
-            for edge in registry.get("edges", []):
-                self.connection.execute(
-                    "INSERT OR IGNORE INTO edges (from_task, to_task, kind) VALUES (?, ?, ?)",
-                    (edge["from"], edge["to"], edge.get("kind", "depends-on")))
-            for claim in registry.get("claims", []):
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO claims (artifact, body) VALUES (?, ?)",
-                    (claim["artifact"], _dump(claim)))
-            for key, value in (("kind", REGISTRY_KIND), ("version", str(registry.get("version", 1))),
-                               ("updated", str(registry.get("updated", "")))):
-                self.connection.execute(
-                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (key, value))
+        self.connection.execute("DELETE FROM boards")
+        self.connection.execute("DELETE FROM tasks")
+        self.connection.execute("DELETE FROM edges")
+        self.connection.execute("DELETE FROM claims")
+        for board in registry.get("boards", []):
+            self.connection.execute(
+                "INSERT INTO boards (id, body) VALUES (?, ?)", (board["id"], _dump(board)))
+        for task in registry.get("tasks", []):
+            self.connection.execute(
+                "INSERT INTO tasks (id, body) VALUES (?, ?)", (task["id"], _dump(task)))
+        for edge in registry.get("edges", []):
+            self.connection.execute(
+                "INSERT OR IGNORE INTO edges (from_task, to_task, kind) VALUES (?, ?, ?)",
+                (edge["from"], edge["to"], edge.get("kind", "depends-on")))
+        for claim in registry.get("claims", []):
+            self.connection.execute(
+                "INSERT OR REPLACE INTO claims (artifact, body) VALUES (?, ?)",
+                (claim["artifact"], _dump(claim)))
+        for key, value in (("kind", REGISTRY_KIND), ("version", str(registry.get("version", 1))),
+                           ("updated", str(registry.get("updated", "")))):
+            self.connection.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value))
+
+    def save(self) -> None:
+        self._require_lock()
+        with self.transaction():
+            pass
+
+    def commit(self, **fields) -> dict:
+        """Write the registry and append the event in one SQLite transaction."""
+        self._require_lock()
+        with self.transaction():
+            event = self._append_event(**fields)
+        return event
 
     def read_events(self) -> list[tuple[bytes, dict]]:
         rows = self.connection.execute("SELECT body FROM events ORDER BY seq")
         return [(row["body"].encode("utf-8"), json.loads(row["body"])) for row in rows]
 
-    def append_event(self, **fields) -> dict:
-        records = self.read_events()
-        seq = len(records) + 1
-        prev = hashlib.sha256(records[-1][0]).hexdigest() if records else ZERO_HASH
+    def _append_event(self, **fields) -> dict:
+        last = self.connection.execute(
+            "SELECT seq, hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
+        seq = (last["seq"] + 1) if last else 1
+        prev = last["hash"] if last else ZERO_HASH
         event = {"seq": seq, "ts": iso(parse_now(fields.pop("now", None))), **fields, "prev": prev}
         raw = event_bytes(event)
         self.connection.execute(
             "INSERT INTO events (seq, task, body, prev, hash) VALUES (?, ?, ?, ?, ?)",
             (seq, event.get("task"), raw.decode("utf-8"), prev, hashlib.sha256(raw).hexdigest()))
+        self._last_event = event
         return event
+
+    def append_event(self, **fields) -> dict:
+        self._require_lock()
+        if self._tx_depth:
+            return self._append_event(**fields)
+        self.connection.execute("BEGIN IMMEDIATE")
+        self._tx_depth = 1
+        try:
+            event = self._append_event(**fields)
+            self.connection.execute("COMMIT")
+        except BaseException:
+            self.connection.execute("ROLLBACK")
+            raise
+        finally:
+            self._tx_depth = 0
+        self._write_checkpoint(event)
+        return event
+
+    def snapshot(self) -> tuple[dict, list[tuple[bytes, dict]]]:
+        with self._read_transaction():
+            registry = self.load()
+            events = self.read_events()
+        return registry, events
+
+    def _write_checkpoint(self, event: dict) -> None:
+        """Write the chain head outside the database, so a rewrite of the DB is visible."""
+        head = Path(str(self.db_path) + ".head")
+        payload = f"{event['seq']} {hashlib.sha256(event_bytes(event)).hexdigest()}\n"
+        tmp = Path(str(head) + ".tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, head)
+
+    def reanchor(self) -> None:
+        self._require_lock()
+        records = self.read_events()
+        if records:
+            self._write_checkpoint(records[-1][1])
+
+    def checkpoint(self) -> tuple[int, str] | None:
+        head = Path(str(self.db_path) + ".head")
+        if not head.is_file():
+            return None
+        try:
+            seq, digest = head.read_text().split()
+            return int(seq), digest
+        except (OSError, ValueError):
+            return None
 
 
 def make_store(root: Path, backend: str = "files", db_path: Path | None = None) -> Store:

@@ -13,7 +13,7 @@ integration branch. Tasks that were already `integrated` or `accepted` when the
 registry moved into SQLite have no such event, because the file registry had no
 place to put one.
 
-`./task annotate` repairs a task when a provable commit exists. 24 tasks were
+`./loom annotate` repairs a task when a provable commit exists. 24 tasks were
 annotated this way: 17 from the commit named in their own integrated-transition
 reason, six from the commit that introduced their declared write paths, and one
 whose commit its evidence records.
@@ -49,5 +49,5 @@ recur for new work.
   repository history.
 - If one of these tasks is later re-opened and redone, it earns a normal receipt
   and drops out of the count.
-- `./task annotate` remains available for any pre-migration task whose commit is
+- `./loom annotate` remains available for any pre-migration task whose commit is
   later found and verified.

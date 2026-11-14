@@ -187,14 +187,26 @@ def verify_event_chain(records: list[tuple[bytes, dict]]) -> list[str]:
         if record.get("prev") != expected:
             errors.append(f"event line {index}: prev hash mismatch (log edited or truncated)")
         try:
-            moment = parse_time(record.get("ts"))
-            if last_ts and moment < last_ts:
-                errors.append(f"event line {index}: timestamp moved backwards")
-            last_ts = moment
+            parse_time(record.get("ts"))
         except (TypeError, ValueError):
             errors.append(f"event line {index}: invalid timestamp {record.get('ts')!r}")
         previous_raw = raw
     return errors
+
+
+def event_chain_warnings(records: list[tuple[bytes, dict]]) -> list[str]:
+    """Clock skew is worth reporting, but it is not evidence against the hash chain."""
+    warnings = []
+    last_ts = None
+    for index, (_, record) in enumerate(records, start=1):
+        try:
+            moment = parse_time(record.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        if last_ts and moment < last_ts:
+            warnings.append(f"event line {index}: timestamp moved backwards")
+        last_ts = moment
+    return warnings
 
 
 # --------------------------------------------------------------------------
@@ -435,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
                       if task.get("board") == board_id}
         for suffix in sorted(set(entry["_packets"]) - registered):
             warnings.append(
-                f"{board_id}: packet {suffix} is not registered centrally; run `task board import`")
+                f"{board_id}: packet {suffix} is not registered centrally; run `loom board import`")
 
     # ---- dependency edges -------------------------------------------------
     edges = registry.get("edges", [])
@@ -641,6 +653,16 @@ def main(argv: list[str] | None = None) -> int:
                 except json.JSONDecodeError as exc:
                     errors.append(f"event log: invalid JSON ({exc})")
         errors.extend(verify_event_chain(records))
+        warnings.extend(event_chain_warnings(records))
+        checkpoint = store.checkpoint() if hasattr(store, "checkpoint") else None
+        if records and checkpoint is not None:
+            import hashlib
+            last_raw, last_record = records[-1]
+            head = hashlib.sha256(last_raw).hexdigest()
+            if checkpoint != (last_record.get("seq"), head):
+                errors.append(
+                    "event log head does not match the external checkpoint "
+                    "(rewrite, or a commit that did not reach the checkpoint)")
         last_by_task: dict[str, dict] = {}
         for _, record in records:
             # A launch records the revision the process started from and carries no task status;
@@ -691,7 +713,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(unproven)} pre-migration integrations are proven by evidence only"
                 f" (accepted by decisions/integration-receipts-001.md): {preview}")
     else:
-        warnings.append("events.ndjson missing; run `./task genesis --agent <id>`")
+        warnings.append("events.ndjson missing; run `./loom genesis --agent <id>`")
 
     programs = sum(1 for entry in boards.values() if entry["kind"] == "program")
     steward_counts = cross_check_capabilities(root, args.capabilities, errors, warnings)

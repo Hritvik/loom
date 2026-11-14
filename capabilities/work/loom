@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""One front door for the loom coordination engine.
+"""One command for the loom coordination engine.
 
-The engine already works through several entry points — the `task` CLI, the Linear sync script, and
-launchd. This wraps them behind one vocabulary without hiding any of them: `loom schedule status`
-prints the real label, plist and log, so a job that stops firing is visible rather than mysterious.
+The engine verbs are the CLI: `loom claim`, `loom transition`, `loom events`, and the rest. This
+file routes those to `engine.py` in-process, and adds the unattended verbs that the engine does not
+need to know about: `tick`, `workers`, `schedule`, `linear` and `logs`.
 
-    loom work list --ready          the task CLI, unchanged
-    loom tick [--apply]             policy pass, limits from loom.json
-    loom workers [stop <task>]      what is running, in which worktree
-    loom schedule status|start|stop the launchd job
-    loom linear sync [--all]        the Linear projection
-    loom logs <task>                the worker's log
+    loom claim <id> --revision N --epoch E --agent <you>
+    loom tick [--apply] [--quiet]        limits come from ~/.config/loom/loom.json
+    loom workers [stop <task>]
+    loom schedule status|start|stop
+    loom linear sync [--all] [--apply]
+    loom logs <task>
 """
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ import sys
 from pathlib import Path
 
 WORK = Path(__file__).resolve().parent
-TASK = WORK / "task"
+sys.path.insert(0, str(WORK))
+
+import engine  # noqa: E402 — sibling module, resolved from this file's directory
+
 LINEAR = WORK / "linear_sync.py"
 CONFIG_PATH = Path(os.environ.get("LOOM_CONFIG") or Path.home() / ".config/loom/loom.json")
 
@@ -40,6 +43,9 @@ DEFAULTS = {
     "linear": {"config": str(Path.home() / ".config/loom/linear-portfolio.json")},
     "schedule": {"tick_label": "com.hritvik.loom-tick", "linear_label": "com.hritvik.loom-linear"},
 }
+
+GLOBAL_FLAGS = {"--root", "--agent", "--now", "--store", "--db"}
+FRONT_DOOR = {"tick", "workers", "schedule", "linear", "logs"}
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -64,19 +70,22 @@ def state_home() -> Path:
     return home
 
 
-def delegate(command: list[str], env_extra: dict | None = None) -> int:
-    env = dict(os.environ)
-    env.update(env_extra or {})
-    return subprocess.run(command, env=env).returncode
-
-
-# --------------------------------------------------------------------------
-# work
-# --------------------------------------------------------------------------
-
-
-def cmd_work(args: list[str], config: dict) -> int:
-    return delegate([sys.executable, str(TASK), "--db", config["db"], *args])
+def split_globals(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Separate the engine's global flags from the command and its own flags."""
+    globals_, rest, index = [], [], 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument in GLOBAL_FLAGS:
+            globals_.append(argument)
+            if index + 1 < len(argv):
+                globals_.append(argv[index + 1])
+                index += 1
+        elif any(argument.startswith(flag + "=") for flag in GLOBAL_FLAGS):
+            globals_.append(argument)
+        else:
+            rest.append(argument)
+        index += 1
+    return globals_, rest
 
 
 # --------------------------------------------------------------------------
@@ -84,28 +93,62 @@ def cmd_work(args: list[str], config: dict) -> int:
 # --------------------------------------------------------------------------
 
 
-def cmd_tick(args: argparse.Namespace, config: dict) -> int:
+def tick_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="loom tick", description="One policy pass.")
+    parser.add_argument("--apply", action="store_true", help="claim, launch and review")
+    parser.add_argument("--quiet", action="store_true", help="print nothing when the pass did nothing")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--implementer", "--max-implementer", dest="implementer", type=int)
+    parser.add_argument("--reviewer", "--max-reviewer", dest="reviewer", type=int)
+    parser.add_argument("--integrator", "--max-integrator", dest="integrator", type=int)
+    parser.add_argument("--ttl")
+    parser.add_argument("--worker-command")
+    parser.add_argument("--reviewer-identity")
+    parser.add_argument("--max-review-attempts", type=int)
+    parser.add_argument("--coordinator")
+    parser.add_argument("--java-home")
+    return parser
+
+
+def build_tick_args(argv: list[str], globals_: list[str], config: dict) -> list[str]:
+    """The engine command for one pass, with policy defaults from loom.json."""
+    args = tick_parser().parse_args(argv)
     worker = config["worker"]
     limits = worker.get("limits", {})
-    command = [sys.executable, str(TASK), "--db", config["db"], "tick"]
+    command = list(globals_)
+    if not any(item == "--db" or item.startswith("--db=") for item in command):
+        command += ["--db", os.environ.get("WORK_DB") or config["db"]]
+    command.append("tick")
     if args.apply:
         command.append("--apply")
     if args.quiet:
         command.append("--quiet")
-    command += ["--ttl", str(worker.get("ttl", "90m"))]
-    command += ["--worker-command", worker.get("command", DEFAULTS["worker"]["command"])]
+    if args.json:
+        command.append("--json")
+    command += ["--ttl", args.ttl or str(worker.get("ttl", "90m"))]
+    command += ["--worker-command",
+                args.worker_command or worker.get("command", DEFAULTS["worker"]["command"])]
     command += ["--reviewer-identity",
-                worker.get("reviewer_identity", DEFAULTS["worker"]["reviewer_identity"])]
+                args.reviewer_identity or worker.get("reviewer_identity",
+                                                     DEFAULTS["worker"]["reviewer_identity"])]
     command += ["--max-review-attempts",
-                str(worker.get("review_attempts", DEFAULTS["worker"]["review_attempts"]))]
-    command += ["--coordinator", worker.get("coordinator", DEFAULTS["worker"]["coordinator"])]
+                str(args.max_review_attempts if args.max_review_attempts is not None
+                    else worker.get("review_attempts", DEFAULTS["worker"]["review_attempts"]))]
+    command += ["--coordinator",
+                args.coordinator or worker.get("coordinator", DEFAULTS["worker"]["coordinator"])]
     for role in ("implementer", "reviewer", "integrator"):
-        value = getattr(args, role, None)
+        value = getattr(args, role)
         if value is None:
             value = limits.get(role)
         if value is not None:
             command += [f"--max-{role}", str(value)]
-    return delegate(command + (args.extra or []))
+    if args.java_home:
+        command += ["--java-home", args.java_home]
+    return command
+
+
+def cmd_tick(argv: list[str], globals_: list[str], config: dict) -> int:
+    return engine.main(build_tick_args(argv, globals_, config))
 
 
 # --------------------------------------------------------------------------
@@ -114,10 +157,9 @@ def cmd_tick(args: argparse.Namespace, config: dict) -> int:
 
 
 def pending_launches(config: dict) -> list[dict]:
-    sys.path.insert(0, str(WORK))
     from store import make_store
 
-    store = make_store(WORK, "sqlite", config["db"])
+    store = make_store(WORK, "sqlite", os.environ.get("WORK_DB") or config["db"])
     try:
         records = [record for _, record in store.read_events()]
     finally:
@@ -223,7 +265,9 @@ def cmd_linear(args: argparse.Namespace, config: dict) -> int:
     if not key_file.is_file():
         print(f"missing Linear API key at {key_file}", file=sys.stderr)
         return 2
-    return delegate(command, {"LINEAR_API_KEY": key_file.read_text().strip()})
+    env = dict(os.environ)
+    env["LINEAR_API_KEY"] = key_file.read_text().strip()
+    return subprocess.run(command, env=env).returncode
 
 
 # --------------------------------------------------------------------------
@@ -242,57 +286,72 @@ def cmd_logs(args: argparse.Namespace, config: dict) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="loom", description="One front door for the loom engine.")
+# --------------------------------------------------------------------------
+# dispatch
+# --------------------------------------------------------------------------
+
+
+def front_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="loom", add_help=False)
     sub = parser.add_subparsers(dest="command", required=True)
-
-    work = sub.add_parser("work", help="the task CLI, unchanged")
-    work.add_argument("args", nargs=argparse.REMAINDER)
-
-    tick = sub.add_parser("tick", help="policy pass; limits come from loom.json")
-    tick.add_argument("--apply", action="store_true")
-    tick.add_argument("--quiet", action="store_true",
-                      help="print nothing when the pass did nothing")
-    tick.add_argument("--implementer", type=int)
-    tick.add_argument("--reviewer", type=int)
-    tick.add_argument("--integrator", type=int)
-    tick.add_argument("extra", nargs=argparse.REMAINDER)
 
     workers = sub.add_parser("workers", help="what is running")
     workers.add_argument("action", nargs="?", choices=["list", "stop"], default="list")
     workers.add_argument("task", nargs="?")
+    workers.set_defaults(func=cmd_workers)
 
     schedule = sub.add_parser("schedule", help="the launchd job")
     schedule.add_argument("action", choices=["status", "start", "stop"], default="status", nargs="?")
+    schedule.set_defaults(func=cmd_schedule)
 
     linear = sub.add_parser("linear", help="the Linear projection")
     linear.add_argument("--all", action="store_true")
     linear.add_argument("--focus")
     linear.add_argument("--apply", action="store_true")
+    linear.set_defaults(func=cmd_linear)
 
     logs = sub.add_parser("logs", help="a worker's log")
     logs.add_argument("task")
     logs.add_argument("--lines", type=int, default=40)
+    logs.set_defaults(func=cmd_logs)
     return parser
 
 
+def usage() -> str:
+    engine_commands = " ".join(sorted(engine.ENGINE_COMMANDS))
+    return (
+        "usage: loom <command> [options]\n\n"
+        "engine:\n"
+        f"  {engine_commands}\n\n"
+        "unattended:\n"
+        "  tick      one policy pass (--apply, --quiet); limits come from loom.json\n"
+        "  workers   running workers; `workers stop <task>`\n"
+        "  schedule  status | start | stop\n"
+        "  linear    sync [--all] [--apply]\n"
+        "  logs      <task> [--lines N]\n\n"
+        "Every engine verb accepts --root, --db, --agent and --now before the verb.\n"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    config = load_config()
-    if args.command == "work":
-        return cmd_work(args.args, config)
-    if args.command == "tick":
-        return cmd_tick(args, config)
-    if args.command == "workers":
-        if args.action == "stop" and not args.task:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    globals_, rest = split_globals(argv)
+    command = rest[0] if rest else None
+    if command in engine.ENGINE_COMMANDS:
+        return engine.main(argv)
+    if command == "tick":
+        return cmd_tick(rest[1:], globals_, load_config())
+    if command in FRONT_DOOR:
+        args = front_parser().parse_args(rest)
+        if args.command == "workers" and args.action == "stop" and not args.task:
             print("workers stop needs a task id", file=sys.stderr)
             return 2
-        return cmd_workers(args, config)
-    if args.command == "schedule":
-        return cmd_schedule(args, config)
-    if args.command == "linear":
-        return cmd_linear(args, config)
-    return cmd_logs(args, config)
+        return args.func(args, load_config())
+    if not argv or argv in (["--help"], ["-h"]):
+        print(usage(), end="")
+        return 0 if argv else 2
+    print(usage(), file=sys.stderr, end="")
+    return 2
 
 
 if __name__ == "__main__":

@@ -237,11 +237,10 @@ def load_config(path):
 def snapshot(focus):
     from linear_projection import project_cards
 
-    cli = runpy.run_path(str(WORK_HOME / "task"))
+    cli = runpy.run_path(str(WORK_HOME / "engine.py"))
     store = cli["make_store"](WORK_HOME, "sqlite", os.environ.get("WORK_DB"))
     with store.lock():
-        registry = store.load()
-        records = store.read_events()
+        registry, records = store.snapshot()
         if cli["verify_event_chain"](records) or cli["verify_registry_events"](registry, records):
             raise SyncError("work registry audit validation failed; mirror left unchanged")
     return project_cards(registry, [event for _, event in records], dt.datetime.now(dt.timezone.utc), focus)

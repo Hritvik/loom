@@ -14,8 +14,8 @@ surfaces, the validator and the tests — not the interaction contracts, which l
 
 - **State is not in this repository.** It lives at `~/.local/state/loom/work.db`. Do not commit a
   database, and do not recreate `registry.yaml`.
-- **Every mutation goes through `./task`.** It owns revisions, leases, gates and the event chain.
-- **`FileStore` is an importer.** It exists so `task migrate` can read a pre-SQLite work home; it is
+- **Every mutation goes through `./loom`.** It owns revisions, leases, gates and the event chain.
+- **`FileStore` is an importer.** It exists so `loom migrate` can read a pre-SQLite work home; it is
   not a runtime backend.
 - **The hash chain is load-bearing.** `events.prev` and `events.hash` are what make the log
   tamper-evident; never write events outside the store.
@@ -29,7 +29,7 @@ surfaces, the validator and the tests — not the interaction contracts, which l
 ```bash
 git config core.hooksPath .githooks     # once per clone
 cd capabilities/work
-./task list --ready
+./loom list --ready
 python3 validate_work.py
 python3 -m unittest discover -s tests
 ```

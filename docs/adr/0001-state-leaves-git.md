@@ -41,8 +41,8 @@ Split into three parts:
 
 1. `Store` interface with two backends: `files` (today) and `sqlite`. The existing suite becomes the
    conformance test for both.
-2. `task migrate` imports `registry.yaml` + `events.ndjson`, verifying the chain.
-3. `task export --format yaml` restores reviewability — the thing lost by leaving Git.
+2. `loom migrate` imports `registry.yaml` + `events.ndjson`, verifying the chain.
+3. `loom export --format yaml` restores reviewability — the thing lost by leaving Git.
 4. Switch the default, keep `files` for one release.
 5. Rename the repository and publish the engine.
 

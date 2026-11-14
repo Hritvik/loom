@@ -6,7 +6,7 @@ revisions. Boards remain the authority for local packet execution state. Every
 mutation is compare-and-swap on `revision`, takes a lease, and appends an
 entry to the hash-chained `events.ndjson` audit log.
 
-Run `./task --help` or see PROTOCOL.md.
+Run `./loom --help` or see PROTOCOL.md.
 """
 from __future__ import annotations
 
@@ -366,8 +366,7 @@ def cmd_edge(args, store: Store) -> int:
             raise WorkError(f"edge already exists: {args.source} -> {args.target} ({kind})")
         edges.append({"from": args.source, "to": args.target, "kind": kind})
         assert_no_cycle(registry)
-        store.save()
-        store.append_event(event="edge", agent=agent, action="add", source=args.source,
+        store.commit(event="edge", agent=agent, action="add", source=args.source,
                            target=args.target, kind=kind, now=args.now)
         print(f"added edge {args.source} -> {args.target} ({kind})")
         return 0
@@ -375,8 +374,7 @@ def cmd_edge(args, store: Store) -> int:
     if not existing:
         raise WorkError(f"edge not found: {args.source} -> {args.target} ({kind})")
     edges.remove(existing)
-    store.save()
-    store.append_event(event="edge", agent=agent, action="remove", source=args.source,
+    store.commit(event="edge", agent=agent, action="remove", source=args.source,
                        target=args.target, kind=kind, now=args.now)
     print(f"removed edge {args.source} -> {args.target} ({kind})")
     return 0
@@ -420,8 +418,7 @@ def cmd_create(args, store: Store) -> int:
         task["acceptance"] = list(args.acceptance)
     registry["tasks"].append(task)
     assert_no_cycle(registry)
-    store.save()
-    store.append_event(event="create", task=task["id"], agent=agent, status=status,
+    store.commit(event="create", task=task["id"], agent=agent, status=status,
                        revision=0, now=args.now)
     print(f"created {task['id']} on {task['board']} as {status} (revision 0)")
     return 0
@@ -815,7 +812,7 @@ def cmd_show(args, store: Store) -> int:
             print(f"  integrated: {receipt.get('integrated_source')[:12]}"
                   f" (event {receipt.get('seq')})")
         elif task.get("status") in {"integrated", "accepted"}:
-            print("  integrated: NO RECEIPT — run `./task annotate` with a provable commit")
+            print("  integrated: NO RECEIPT — run `./loom annotate` with a provable commit")
     return 0
 
 
@@ -854,8 +851,7 @@ def cmd_claim(args, store: Store) -> int:
         "heartbeat": iso(now),
     }
     bump(task, "claimed", now)
-    store.save()
-    store.append_event(event="claim", task=task["id"], agent=agent, status="claimed",
+    store.commit(event="claim", task=task["id"], agent=agent, status="claimed",
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
                        base_revision=args.revision, epoch=epoch, now=args.now)
     print(f"claimed {task['id']} at revision {task['revision']} until "
@@ -883,8 +879,7 @@ def cmd_renew(args, store: Store) -> int:
     task["claim"]["lease_expires"] = iso(now + ttl)
     task["claim"]["heartbeat"] = iso(now)
     bump(task, task["status"], now)
-    store.save()
-    store.append_event(event="renew", task=task["id"], agent=agent, status=task["status"],
+    store.commit(event="renew", task=task["id"], agent=agent, status=task["status"],
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
                        epoch=claim_epoch(task), now=args.now)
     print(f"renewed {task['id']} at revision {task['revision']} until {task['claim']['lease_expires']}")
@@ -903,8 +898,7 @@ def cmd_release(args, store: Store) -> int:
     previous = task.get("claim") or {}
     task["claim"] = None
     bump(task, "ready", now)
-    store.save()
-    store.append_event(event="release", task=task["id"], agent=agent, status="ready",
+    store.commit(event="release", task=task["id"], agent=agent, status="ready",
                        revision=task["revision"], previous_agent=previous.get("agent"),
                        previous_epoch=previous.get("epoch"),
                        reason=args.reason, now=args.now)
@@ -949,8 +943,7 @@ def cmd_takeover(args, store: Store) -> int:
         "heartbeat": iso(now),
     }
     bump(task, "claimed", now)
-    store.save()
-    store.append_event(event="takeover", task=task["id"], agent=agent, status="claimed",
+    store.commit(event="takeover", task=task["id"], agent=agent, status="claimed",
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
                        previous_agent=previous_agent, previous_epoch=previous_epoch,
                        epoch=epoch, lock_delay=args.lock_delay, reason=args.reason, now=args.now)
@@ -1166,8 +1159,7 @@ def cmd_transition(args, store: Store) -> int:
     elif current == "blocked":
         task.pop("blocked_needs", None)
     bump(task, target, now)
-    store.save()
-    store.append_event(event="transition", task=task["id"], agent=agent, status=target,
+    store.commit(event="transition", task=task["id"], agent=agent, status=target,
                        previous_status=current, revision=task["revision"],
                        epoch=acting_epoch, evidence=args.evidence, reviewer=args.reviewer,
                        decision=args.decision, reason=args.reason, now=args.now,
@@ -1224,8 +1216,7 @@ def cmd_annotate(args, store: Store) -> int:
         ).returncode:
             raise WorkError(f"paths changed since --base differ in {ref}")
     bump(task, task["status"], parse_now(args.now))
-    store.save()
-    store.append_event(event="annotate", task=task["id"], agent=agent, status=task["status"],
+    store.commit(event="annotate", task=task["id"], agent=agent, status=task["status"],
                        revision=task["revision"], integrated_source=args.integrated_source,
                        integration_tip=integration_tip, base=args.base or None,
                        path_check="verified" if args.base else "skipped",
@@ -1235,17 +1226,45 @@ def cmd_annotate(args, store: Store) -> int:
 
 
 def cmd_events(args, store: Store) -> int:
-    records = store.read_events()
+    errors, notes = [], []
+    if args.verify:
+        if store.has_registry():
+            registry, records_all = store.snapshot()
+            chain_errors = verify_event_chain(records_all)
+            chain_errors.extend(verify_registry_events(registry, records_all))
+        else:
+            records_all = store.read_events()
+            chain_errors = verify_event_chain(records_all)
+        checkpoint_errors = []
+        checkpoint = store.checkpoint() if hasattr(store, "checkpoint") else None
+        if records_all:
+            last_raw, last_record = records_all[-1]
+            head = hashlib.sha256(last_raw).hexdigest()
+            if checkpoint is None:
+                notes.append("no external audit checkpoint yet; it is written on the next mutation")
+            elif checkpoint != (last_record.get("seq"), head):
+                checkpoint_errors.append(
+                    f"event log head {last_record.get('seq')}:{head[:12]} does not match the "
+                    f"external checkpoint {checkpoint[0]}:{checkpoint[1][:12]} "
+                    "(rewrite, or a commit that did not reach the checkpoint)")
+        for warning in event_chain_warnings(records_all):
+            notes.append(warning)
+        if args.reanchor:
+            if chain_errors:
+                errors = chain_errors + ["refusing to re-anchor while the chain does not verify"]
+            else:
+                store.reanchor()
+                notes.append("re-anchored the external checkpoint at "
+                             f"{records_all[-1][1]['seq'] if records_all else 0}")
+        else:
+            errors = chain_errors + checkpoint_errors
+    else:
+        records_all = store.read_events()
+    records = records_all
     if args.task:
         records = [(raw, rec) for raw, rec in records if rec.get("task") == args.task]
     if args.limit:
         records = records[-args.limit:]
-    errors = []
-    if args.verify:
-        records_all = store.read_events()
-        errors = verify_event_chain(records_all)
-        if store.has_registry():
-            errors.extend(verify_registry_events(store.load(), records_all))
     for raw, record in records:
         if args.json:
             print(raw.decode("utf-8"))
@@ -1263,6 +1282,8 @@ def cmd_events(args, store: Store) -> int:
     if args.verify:
         for error in errors:
             print(f"ERROR {error}")
+        for note in notes:
+            print(f"NOTE {note}")
         print("event chain OK" if not errors else f"event chain FAIL ({len(errors)} errors)")
         return 0 if not errors else 1
     return 0
@@ -1415,7 +1436,7 @@ def cmd_decisions(args, store: Store) -> int:
         needed = f"  needed by {item['neededBy']}" if item["neededBy"] else ""
         print(f"{number}. question on {item['task']} from {item['from']}{needed}")
         print(f"   {item['question']}")
-        print(f"   answer: ./task answer {item['task']} --question {item['seq']} --decision ...")
+        print(f"   answer: ./loom answer {item['task']} --question {item['seq']} --decision ...")
     return 0
 
 
@@ -1431,21 +1452,21 @@ Your branch: {branch}
 Write paths you may touch: {paths}
 
 Do this:
-1. `cd {work}` and read the task: `./task show {task}`.
+1. `cd {work}` and read the task: `./loom show {task}`.
 2. Work in {repo} on branch {branch}. Stay inside the write paths above; editing outside them
    breaks the claim. Commit your work to that branch; do not push and do not merge.
 3. Report progress through the registry, not chat. Every mutation needs your identity, the
    current revision and your epoch:
-   `./task transition {task} --revision N{epoch_flag} --to red --agent {agent}`
+   `./loom transition {task} --revision N{epoch_flag} --to red --agent {agent}`
    then `--to green` when tests pass. Re-read the revision before each call.
 4. Keep the lease alive. The lease is short and is not renewed for you; once it expires your
    epoch is fenced and you cannot write. Before it runs out:
-   `./task renew {task} --revision N{epoch_flag} --ttl 30m --agent {agent}`
+   `./loom renew {task} --revision N{epoch_flag} --ttl 30m --agent {agent}`
 5. Write evidence to {evidence} in the repository, then ask for review:
-   `./task ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
+   `./loom ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
     --review-evidence {evidence} --agent {agent}`
 6. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
-   `./task transition {task} --revision N{epoch_flag} --to blocked --needs human --reason "..." --agent {agent}`
+   `./loom transition {task} --revision N{epoch_flag} --to blocked --needs human --reason "..." --agent {agent}`
    and stop.
 7. Do not touch Linear. The projection is read-only.
 """
@@ -1469,12 +1490,12 @@ Owner repository: {owner_repo}
 You did not write this work and you must not change it.
 
 Do this:
-1. Read the task: `cd {work} && ./task show {task}`.
+1. Read the task: `cd {work} && ./loom show {task}`.
 2. Read the evidence at {evidence} in {owner_repo} or in your checkout.
 3. Verify rather than trust: inspect `git -C {owner_repo} diff {base}..{source}`, check the
    claims against the code, and run the tests you can. Do not accept a summary as proof.
 4. Record exactly one verdict, with a nonblank note saying what you checked and what you found:
-   `./task answer {task} --question {question} --decision approve --note "..." --agent {agent}`
+   `./loom answer {task} --question {question} --decision approve --note "..." --agent {agent}`
    or `--decision "changes requested"` with specific, actionable findings.
 5. Do not transition the task, claim it, edit files, commit, push or touch Linear. The coordinator
    records `reviewed` from an approval; a changes-requested answer leaves the task green for rework.
@@ -1509,42 +1530,41 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
     records = [record for _, record in store.read_events()]
     answers = {(record.get("task"), record.get("in_reply_to")): record.get("seq")
                for record in records if record.get("event") == "answer"}
-    for task in registry["tasks"]:
-        state = launch_state(store, task["id"])
-        latest = state["latest"]
-        if latest.get("state") != "pending" or pid_alive(latest.get("pid")):
-            continue
-        if latest.get("role") == "reviewer":
-            # A reviewer succeeds by recording a verdict, not by moving the task: a
-            # changes-requested answer leaves it green. A crash is retried, not escalated,
-            # because the review request is still open and the attempt counter bounds it.
-            answered = answers.get((task["id"], latest.get("question")), -1) > int(latest.get("seq") or 0)
-            store.append_event(event="launch", task=task["id"],
-                               agent=latest.get("agent") or REVIEWER_IDENTITY,
-                               state="done" if answered else "failed", pid=latest.get("pid"),
-                               role="reviewer", revision=latest.get("revision"),
-                               question=latest.get("question"), now=iso(now))
-            continue
-        advanced = (task.get("revision", 0) > int(latest.get("revision") or -1)
-                    or task.get("status") in {"green", "reviewed", "integrated", "accepted", "done"})
-        store.append_event(event="launch", task=task["id"], agent=WORKER_IDENTITY,
-                           state="done" if advanced else "failed", pid=latest.get("pid"),
-                           role=latest.get("role"), revision=latest.get("revision"), now=iso(now))
-        if advanced:
-            continue
-        if state["failed"] + 1 >= 2:
-            problems.append(f"{task['id']}: two worker launches failed; needs a human")
-            if task.get("status") in {"claimed", "red", "green"}:
+    with store.transaction():
+        for task in registry["tasks"]:
+            state = launch_state(store, task["id"])
+            latest = state["latest"]
+            if latest.get("state") != "pending" or pid_alive(latest.get("pid")):
+                continue
+            if latest.get("role") == "reviewer":
+                # A reviewer succeeds by recording a verdict, not by moving the task: a
+                # changes-requested answer leaves it green. A crash is retried, not escalated,
+                # because the review request is still open and the attempt counter bounds it.
+                answered = answers.get((task["id"], latest.get("question")), -1) > int(latest.get("seq") or 0)
+                store.append_event(event="launch", task=task["id"],
+                                   agent=latest.get("agent") or REVIEWER_IDENTITY,
+                                   state="done" if answered else "failed", pid=latest.get("pid"),
+                                   role="reviewer", revision=latest.get("revision"),
+                                   question=latest.get("question"), now=iso(now))
+                continue
+            advanced = (task.get("revision", 0) > int(latest.get("revision") or -1)
+                        or task.get("status") in {"green", "reviewed", "integrated", "accepted", "done"})
+            store.append_event(event="launch", task=task["id"], agent=WORKER_IDENTITY,
+                               state="done" if advanced else "failed", pid=latest.get("pid"),
+                               role=latest.get("role"), revision=latest.get("revision"), now=iso(now))
+            if advanced:
+                continue
+            if state["failed"] + 1 >= 2:
+                problems.append(f"{task['id']}: two worker launches failed; needs a human")
+                if task.get("status") in {"claimed", "red", "green"}:
+                    task["claim"] = None
+                    task["status"] = "blocked"
+                    task["blocked_needs"] = "human"
+                    task["updated_at"] = iso(now)
+            elif task.get("status") in {"claimed", "red"}:
                 task["claim"] = None
-                task["status"] = "blocked"
-                task["blocked_needs"] = "human"
+                task["status"] = "ready"
                 task["updated_at"] = iso(now)
-        elif task.get("status") in {"claimed", "red"}:
-            task["claim"] = None
-            task["status"] = "ready"
-            task["updated_at"] = iso(now)
-    if problems:
-        store.save()
     return problems
 
 
@@ -1989,19 +2009,22 @@ def cmd_migrate(args, store: Store) -> int:
     target_path = Path(args.to).expanduser()
     target = SqliteStore(source_root, target_path)
     try:
-        existing = target.connection.execute("SELECT count(*) FROM events").fetchone()[0]
-        if existing and not args.force:
-            raise WorkError(f"{target_path} already holds {existing} events; pass --force to replace")
-        if args.force:
-            with target._transaction():
-                target.connection.execute("DELETE FROM events")
-        target.registry = registry
-        target.save()
-        for raw, record in records:
-            target.connection.execute(
-                "INSERT INTO events (seq, task, body, prev, hash) VALUES (?, ?, ?, ?, ?)",
-                (record["seq"], record.get("task"), raw.decode("utf-8"), record["prev"],
-                 hashlib.sha256(raw).hexdigest()))
+        with target.lock():
+            existing = target.connection.execute("SELECT count(*) FROM events").fetchone()[0]
+            if existing and not args.force:
+                raise WorkError(
+                    f"{target_path} already holds {existing} events; pass --force to replace")
+            target.registry = registry
+            with target.transaction():
+                if args.force:
+                    target.connection.execute("DELETE FROM events")
+                for raw, record in records:
+                    target.connection.execute(
+                        "INSERT INTO events (seq, task, body, prev, hash) VALUES (?, ?, ?, ?, ?)",
+                        (record["seq"], record.get("task"), raw.decode("utf-8"), record["prev"],
+                         hashlib.sha256(raw).hexdigest()))
+            if records:
+                target._write_checkpoint(records[-1][1])
     finally:
         target.close()
 
@@ -2018,7 +2041,7 @@ def cmd_migrate(args, store: Store) -> int:
         raise WorkError("migrated event chain does not verify")
     print(f"migrated {len(copied['tasks'])} tasks, {len(copied['edges'])} edges, "
           f"{len(copied_events)} events to {target_path}")
-    print("verify with: ./task --store sqlite --db " + str(target_path) + " list --ready")
+    print("verify with: ./loom --store sqlite --db " + str(target_path) + " list --ready")
     return 0
 
 
@@ -2164,8 +2187,7 @@ def add_board(args, store: Store, registry: dict) -> int:
     if args.integration_ref:
         entry["integration_ref"] = args.integration_ref
     registry["boards"].append(entry)
-    store.save()
-    store.append_event(event="board", agent=agent, action="add", board=args.board,
+    store.commit(event="board", agent=agent, action="add", board=args.board,
                        kind=args.kind, path=entry["path"], now=args.now)
     print(f"added board {args.board} ({args.kind}) at {entry['repo']}/{entry['path']}")
     return 0
@@ -2181,8 +2203,7 @@ def remove_board(args, store: Store, registry: dict) -> int:
     if any(task.get("board") == args.board for task in registry["tasks"]):
         raise WorkError(f"board {args.board} still has tasks; move or delete them first")
     registry["boards"].remove(entry)
-    store.save()
-    store.append_event(event="board", agent=agent, action="remove", board=args.board, now=args.now)
+    store.commit(event="board", agent=agent, action="remove", board=args.board, now=args.now)
     print(f"removed board {args.board}")
     return 0
 
@@ -2218,8 +2239,7 @@ def backfill_titles(args, store: Store, board: dict, registry: dict) -> int:
         print(("would set " if args.check else "set ") + change)
     if args.check:
         return 1
-    store.save()
-    store.append_event(event="titles", board=board["id"], count=len(changes), now=args.now)
+    store.commit(event="titles", board=board["id"], count=len(changes), now=args.now)
     print(f"{board['id']}: set {len(changes)} titles")
     return 0
 
@@ -2277,8 +2297,7 @@ def import_board(args, store: Store, board: dict, registry: dict) -> int:
         print(f"{board['id']}: nothing to import")
         return 0
     assert_no_cycle(registry)
-    store.save()
-    store.append_event(event="import", agent=agent, board=board["id"],
+    store.commit(event="import", agent=agent, board=board["id"],
                        count=len(added), tasks=added, now=args.now)
     print(f"{board['id']}: imported {len(added)} packets as {program}/…")
     for task_id in added:
@@ -2344,16 +2363,16 @@ def cmd_reconcile(args, store: Store) -> int:
     for task, board_status in drift:
         if board_status in REVIEW_GATED:
             raise WorkError(f"{task['id']}: cannot reconcile into {board_status}; use the review pipeline")
-    for task, board_status in drift:
-        previous = task.get("status")
-        task["status"] = board_status
-        task["status_source"] = "board"
-        task["claim"] = None if board_status not in ACTIVE_STATES else task.get("claim")
-        bump(task, board_status, now)
-        store.append_event(event="reconcile", task=task["id"], agent=agent, status=board_status,
-                           previous_status=previous, revision=task["revision"],
-                           reason=args.reason, now=args.now)
-    store.save()
+    with store.transaction():
+        for task, board_status in drift:
+            previous = task.get("status")
+            task["status"] = board_status
+            task["status_source"] = "board"
+            task["claim"] = None if board_status not in ACTIVE_STATES else task.get("claim")
+            bump(task, board_status, now)
+            store.append_event(event="reconcile", task=task["id"], agent=agent,
+                               status=board_status, previous_status=previous,
+                               revision=task["revision"], reason=args.reason, now=args.now)
     print(f"{board['id']}: adopted {len(drift)} board statuses")
     return 0
 
@@ -2416,14 +2435,26 @@ def verify_event_chain(records: list[tuple[bytes, dict]]) -> list[str]:
             errors.append(f"line {index}: prev hash mismatch")
         ts = record.get("ts")
         try:
-            moment = parse_time(ts)
-            if last_ts and moment < last_ts:
-                errors.append(f"line {index}: timestamp moved backwards")
-            last_ts = moment
+            parse_time(ts)
         except (TypeError, ValueError):
             errors.append(f"line {index}: invalid timestamp {ts!r}")
         previous_raw = raw
     return errors
+
+
+def event_chain_warnings(records: list[tuple[bytes, dict]]) -> list[str]:
+    """Clock skew is worth reporting, but it is not evidence against the hash chain."""
+    warnings = []
+    last_ts = None
+    for index, (_, record) in enumerate(records, start=1):
+        try:
+            moment = parse_time(record.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        if last_ts and moment < last_ts:
+            warnings.append(f"line {index}: timestamp moved backwards")
+        last_ts = moment
+    return warnings
 
 
 def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) -> list[str]:
@@ -2431,7 +2462,7 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
     by_id = {task["id"]: task for task in registry.get("tasks", [])}
     last: dict[str, dict] = {}
     for _, record in records:
-        if record.get("task"):
+        if record.get("task") and record.get("event") != "launch":
             last[record["task"]] = record
     for task_id, record in last.items():
         task = by_id.get(task_id)
@@ -2463,9 +2494,16 @@ def require_agent(args) -> str:
 # --------------------------------------------------------------------------
 
 
+ENGINE_COMMANDS = {
+    "create", "list", "show", "claim", "renew", "release", "takeover", "transition",
+    "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
+    "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="task",
+        prog="loom",
         description="Central work-coordination CLI (claims, leases, transitions, board sync).",
     )
     parser.add_argument("--root", default=os.environ.get("WORK_HOME", str(HOME)),
@@ -2576,6 +2614,8 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--limit", type=int)
     events.add_argument("--json", action="store_true")
     events.add_argument("--verify", action="store_true")
+    events.add_argument("--reanchor", action="store_true",
+                        help="after a verified chain, rewrite the external checkpoint")
     events.set_defaults(func=cmd_events)
 
     genesis = sub.add_parser("genesis", help="write the single genesis event (bootstrap)", parents=[common])

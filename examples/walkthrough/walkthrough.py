@@ -19,7 +19,7 @@ from pathlib import Path
 
 LOOM = Path(__file__).resolve().parents[2]
 WORK = LOOM / "capabilities/work"
-TASK = WORK / "task"
+TASK = WORK / "loom"
 sys.path.insert(0, str(WORK))
 
 from store import make_store  # noqa: E402

@@ -12,8 +12,8 @@ surface over those two files. The state model is in [`PROTOCOL.md`](PROTOCOL.md)
 ```bash
 cd ~/repositories/loom/capabilities/work
 python3 validate_work.py            # is the registry healthy?
-./task list --ready                 # claimable work, ranked by what it unblocks
-./task inbox --agent <your-id>      # questions other agents asked you
+./loom list --ready                 # claimable work, ranked by what it unblocks
+./loom inbox --agent <your-id>      # questions other agents asked you
 ```
 
 Over MCP the same three calls are `work_status`, `work_list {"ready": true}` and `work_inbox`. The
@@ -21,12 +21,12 @@ repo is inferred from your working directory; the agent identity defaults to `<p
 
 ## When a release is waiting on multiple products
 
-Use `./task show <release-task>` to find unmet prerequisites. Follow each branch to
-the first claimable task, and use `./task dependents <task>` to see what it unlocks.
+Use `./loom show <release-task>` to find unmet prerequisites. Follow each branch to
+the first claimable task, and use `./loom dependents <task>` to see what it unlocks.
 Keep work with its current agent while the lease is live. When products need each
 other, agree a versioned interface and shared fixtures, then track the joint proof
 as a separate task that depends on both implementations. Keep owner decisions on
-their own gates so local work can continue. Use `./task list --ready` to check
+their own gates so local work can continue. Use `./loom list --ready` to check
 claimability. A task can display Ready while a prerequisite is still open.
 
 ## Where things live
@@ -35,7 +35,7 @@ claimability. A task can display Ready while a prerequisite is still open.
 |---|---|---|
 | Plans, specs, designs, maps, tickets | your content repository (`$WORK_CONTENT_HOME`) | author there, never in a product repo |
 | Interaction contracts | your contract registry (`$WORK_CONTRACTS`) | artifact + fixtures + a `registry.yaml` entry; consumers pin a hash |
-| Task state, claims, dependencies | `~/.local/state/loom/work.db` | mutate only through `./task` |
+| Task state, claims, dependencies | `~/.local/state/loom/work.db` | mutate only through `./loom` |
 | Code, tests, migrations, evidence | your product repository | the registry points at it, never stores it |
 | Durable memory | `.ecc/memory/team/` | `ecc memory save --scope team`; inherited by every harness |
 
@@ -95,14 +95,14 @@ in-flight work. It reads the central registry, so it only knows what was actuall
 ## The loop
 
 ```bash
-./task show <id>                                          # read deps, blocks, paths, revision
-./task claim <id> --revision N --ttl 45m --agent <you>    # prints the fencing epoch, e.g. epoch 3
-./task renew <id> --revision N --epoch E --ttl 45m --agent <you>   # heartbeat before expiry
-./task transition <id> --revision N --epoch E --to red    --agent <you>
-./task transition <id> --revision N --epoch E --to green --evidence evidence/<id>.md --agent <you>
-./task transition <id> --revision N --to integrated --integrated-source <full-commit> \
+./loom show <id>                                          # read deps, blocks, paths, revision
+./loom claim <id> --revision N --ttl 45m --agent <you>    # prints the fencing epoch, e.g. epoch 3
+./loom renew <id> --revision N --epoch E --ttl 45m --agent <you>   # heartbeat before expiry
+./loom transition <id> --revision N --epoch E --to red    --agent <you>
+./loom transition <id> --revision N --epoch E --to green --evidence evidence/<id>.md --agent <you>
+./loom transition <id> --revision N --to integrated --integrated-source <full-commit> \
   --evidence evidence/<id>.md --agent <you>
-./task transition <id> --revision N --to accepted --evidence evidence/<id>.md --agent <you>
+./loom transition <id> --revision N --to accepted --evidence evidence/<id>.md --agent <you>
 ```
 
 The epoch is issued when you claim and must be presented on every mutation you make as the
@@ -142,8 +142,8 @@ is integrated, accepted, or done.
 4. **Product owner integrates.** Record the exact approved commit and evidence. The
    transition writes `integrated_source` and `integration_tip` into the event log, which
    is the only proof of integration. Tasks carried over from the pre-SQLite registry have
-   no such event: `task show` prints `integrated: NO RECEIPT` and the validator warns.
-   Repair one with `./task annotate <id> --revision N --integrated-source <full-commit>
+   no such event: `loom show` prints `integrated: NO RECEIPT` and the validator warns.
+   Repair one with `./loom annotate <id> --revision N --integrated-source <full-commit>
    --reason ... --agent <you>`; it refuses a commit that is not in the integration
    branch's history, refuses when a receipt already exists, and never invents a hash.
    Pre-migration integrations with no surviving commit are accepted as evidence-only by
@@ -153,17 +153,17 @@ is integrated, accepted, or done.
    squash, cherry-pick or conflicting changes. Production acceptance remains a separate gate.
 
 ```bash
-./task list --state green
-./task ask <id> --to <reviewer> --review-source <full-commit> --review-base <base-commit> \
+./loom list --state green
+./loom ask <id> --to <reviewer> --review-source <full-commit> --review-base <base-commit> \
   --review-evidence <evidence-path> --question 'Review request and checks'
-./task inbox --agent <reviewer>
-./task answer <id> --agent <reviewer> --question <request-event> --decision approve \
+./loom inbox --agent <reviewer>
+./loom answer <id> --agent <reviewer> --question <request-event> --decision approve \
   --note 'Reviewed revision, verification and findings'
-./task transition <id> --revision <green-revision> --to reviewed --reviewer <reviewer> \
+./loom transition <id> --revision <green-revision> --to reviewed --reviewer <reviewer> \
   --decision approve --review-answer <answer-event> --evidence <evidence-path>
-./task transition <id> --revision <reviewed-revision> --to integrated \
+./loom transition <id> --revision <reviewed-revision> --to integrated \
   --integrated-source <full-commit> --evidence <evidence-path>
-./task list --state reviewed
+./loom list --state reviewed
 ```
 
 The board enforces claim-history independence and checks the structured inbox approval.
@@ -244,9 +244,9 @@ the review surface. Use the team's authorization rules before posting them exter
 ## Finding work you cannot name
 
 ```bash
-./task search avatar                # id, title, goal, program, board, write paths
-./task dependents <program>/<ID>    # who is blocked on it, directly and transitively
-./task list --ready                 # "+4 downstream" = finishing it releases four tasks
+./loom search avatar                # id, title, goal, program, board, write paths
+./loom dependents <program>/<ID>    # who is blocked on it, directly and transitively
+./loom list --ready                 # "+4 downstream" = finishing it releases four tasks
 ```
 
 Pick the top of `--ready` unless you have a reason not to: it is ordered by downstream work, which
@@ -255,10 +255,10 @@ is the only priority signal this system has.
 ## When you are blocked
 
 ```bash
-./task ask <task> --to <agent> --question "..." --needed-by 2026-11-07 --agent <you>
-./task inbox --agent <you>
-./task answer <task> --question <seq> --decision "..." --agent <you>
-./task transition <task> --revision N --to blocked --needs human --reason "..." --agent <you>
+./loom ask <task> --to <agent> --question "..." --needed-by 2026-11-07 --agent <you>
+./loom inbox --agent <you>
+./loom answer <task> --question <seq> --decision "..." --agent <you>
+./loom transition <task> --revision N --to blocked --needs human --reason "..." --agent <you>
 ```
 
 - Ask the agent who owns the answer, not the owner of the portfolio. Questions are events: they
@@ -266,7 +266,7 @@ is the only priority signal this system has.
 - `--needs human` means only the owner can resolve it. Use it for contracts, prices, product and
   identity decisions. Never make one yourself, and never accept a contract on the owner's behalf.
 - `--needs agent` (the default) means another agent can unblock you.
-- `./task list --awaiting human` is the owner's queue. Do not add to it casually.
+- `./loom list --awaiting human` is the owner's queue. Do not add to it casually.
 
 ## If a tool is missing
 
@@ -282,4 +282,4 @@ The MCP server exposes 13 tools. If your tool list shows fewer — no `work_sear
 - Review your own work, including after releasing the lease.
 - Treat `--agent` as authentication. It is an assertion, recorded for attribution, not proof.
 - Put personal, health, employer or credential material in a public repository.
-- Create work outside the registry. New tasks start with `./task create`, on a registered board.
+- Create work outside the registry. New tasks start with `./loom create`, on a registered board.

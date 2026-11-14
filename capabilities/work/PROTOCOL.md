@@ -24,9 +24,9 @@ ACP merged into A2A in 2025. MCP and A2A are complementary, not competing.
         └── git commits / PRs          # durable audit + code
 ```
 
-- **All plans and work items are authored centrally** through `work/task`. Repos no longer invent
+- **All plans and work items are authored centrally** through `work/loom`. Repos no longer invent
   task IDs.
-- **Packets are materialised locally** from a central task (`task board sync`). Packet bodies,
+- **Packets are materialised locally** from a central task (`loom board sync`). Packet bodies,
   evidence and checkpoints stay in the owning repository.
 - **Git is the transport.** Claims and transitions are registry mutations plus event-log entries;
   commits and PRs are the review surface. No service to operate.
@@ -76,10 +76,10 @@ claim:
 ```
 
 ```bash
-task claim    <id> --revision N --ttl 30m
-task renew    <id> --revision N --epoch E --ttl 30m
-task release  <id> --revision N --epoch E --reason TEXT
-task takeover <id> --revision N --reason TEXT   # after expiry + lock-delay
+loom claim    <id> --revision N --ttl 30m
+loom renew    <id> --revision N --epoch E --ttl 30m
+loom release  <id> --revision N --epoch E --reason TEXT
+loom takeover <id> --revision N --reason TEXT   # after expiry + lock-delay
 ```
 
 Rules enforced by the CLI:
@@ -107,9 +107,9 @@ Rules enforced by the CLI:
 An implementer submits green work by asking a reviewer; the ask is an audit event, not a mutation:
 
 ```bash
-task ask    <id> --to opencode/reviewer-agent --question TEXT \
+loom ask    <id> --to opencode/reviewer-agent --question TEXT \
   --review-source <40-char commit> [--review-base <commit>] --review-evidence <path>
-task answer <id> --question <ask-seq> --decision "approve|changes requested" --note TEXT \
+loom answer <id> --question <ask-seq> --decision "approve|changes requested" --note TEXT \
   --agent opencode/reviewer-agent
 ```
 
@@ -134,16 +134,23 @@ Every mutation appends one hash-chained row to the `events` table:
 ```
 
 `seq` is contiguous, `prev` chains each record to its predecessor, and the terminal event for every
-task must match the registry's revision, status and claim owner. `task events --verify` checks the
+task must match the registry's revision, status and claim owner. `loom events --verify` checks the
 chain; `validate_work.py` additionally cross-checks it against registry state, so a hand edit or an
 interrupted write is detected rather than trusted.
+
+A mutation writes the registry and its event in **one transaction**; a crash cannot leave one
+without the other. The chain head is also written to `work.db.head`, outside the database.
+`events --verify` compares the two: a mismatch means the database was rewritten or a commit reached
+the database but not the checkpoint. This is tamper-evident against edits that do not also rewrite
+the head; it is not a defence against a writer with access to both files. After a verified chain,
+`events --verify --reanchor` rewrites the head. See `docs/adr/0002-store-is-a-document-log.md`.
 
 ## A2A façade
 
 `work/a2a/server.py` exposes the registry over A2A v1.0 without a second source of truth:
 
 ```text
-client agent ──JSON-RPC──> a2a/server.py ──CLI──> work/task ──> registry + events
+client agent ──JSON-RPC──> a2a/server.py ──CLI──> work/loom ──> registry + events
 ```
 
 - Discovery at `/.well-known/agent-card.json`; JSON-RPC at `/`; protocol `1.0`.
@@ -162,7 +169,7 @@ client agent ──JSON-RPC──> a2a/server.py ──CLI──> work/task ─�
 `work/mcp/server.py` exposes the same registry to agents that discover capabilities through MCP:
 
 ```text
-agent tool list ──tools/call──> mcp/server.py ──CLI──> work/task ──> registry + events
+agent tool list ──tools/call──> mcp/server.py ──CLI──> work/loom ──> registry + events
 ```
 
 - `work_status` is the discovery entry point: ready work, active claims, expired leases and
@@ -200,14 +207,14 @@ owns the verdict. See the [review pipeline](AGENT-GUIDE.md#independent-review-pi
 3. Reconcile evidence: integrated packets must carry an evidence path; reviews name a reviewer.
    The CLI refuses a reviewer that is the acting agent, the current claim holder, or any agent that
    previously claimed the task.
-4. Resolve status drift with `task reconcile --board …` (report) or `--apply --reason …` (adopt).
+4. Resolve status drift with `loom reconcile --board …` (report) or `--apply --reason …` (adopt).
 5. Record the outcome as a decision or a registry revision; never silently overwrite another agent.
 
 ## Adoption phases
 
 1. **Done** — central registry, namespaced IDs, validator, reconciliation decisions, reference-adapter
    scope, import of all existing boards (69 tasks).
-2. **Done** — task schema, `work/task` CLI with CAS/lease/heartbeat/takeover, append-only event log,
+2. **Done** — task schema, `work/loom` CLI with CAS/lease/heartbeat/takeover, append-only event log,
    board sync/import, reconcile, and a 12-test suite.
 3. **Done** — A2A v1.0 façade: Agent Card, `ListTasks`, `GetTask`, `SendMessage` actions and
    `CancelTask`, delegating mutations to the CLI.
