@@ -427,3 +427,4 @@ The launchd job runs `loom linear sync --all --apply --if-changed` every **300 s
 `~/.local/state/loom/linear.head` records the `(seq, hash)` last projected; an unchanged head exits
 without an API call. A rewritten database with the same event count still has a different hash, so
 it triggers a sync, and the chain/checkpoint verification then refuses to project it.
+`loom schedule start|stop` controls both jobs; `loom schedule status` shows both.
