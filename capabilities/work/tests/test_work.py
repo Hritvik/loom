@@ -184,12 +184,32 @@ class WorkCLITest(unittest.TestCase):
         self.ws.close()
 
     def invoke(self, *args, expect=0):
-        result = run("--root", str(self.ws.root), *args)
+        result = run("--root", str(self.ws.root), *self._with_epoch(args))
         self.assertEqual(
             result.returncode, expect,
             f"exit {result.returncode} (expected {expect})\nstdout:{result.stdout}\nstderr:{result.stderr}",
         )
         return result
+
+    def _with_epoch(self, args):
+        """A well-behaved client presents the epoch it was issued at claim time.
+
+        The tests below exercise that contract; `test_epoch_is_required_of_the_holder` and
+        `test_a_stale_epoch_is_fenced_after_takeover` deliberately bypass this helper.
+        """
+        if not args or args[0] not in {"transition", "renew", "release"} or "--epoch" in args:
+            return args
+        task_id = next((arg for arg in args[1:] if not arg.startswith("--")), None)
+        agent = args[args.index("--agent") + 1] if "--agent" in args else None
+        if not task_id or not agent:
+            return args
+        try:
+            claim = self.ws.task_record(task_id).get("claim") or {}
+        except (StopIteration, KeyError):
+            return args
+        if claim.get("agent") == agent and claim.get("epoch") is not None:
+            return (*args, "--epoch", str(claim["epoch"]))
+        return args
 
     # -- create -----------------------------------------------------------
 
@@ -260,18 +280,91 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("still live", early.stderr)
 
         no_reason = self.invoke("takeover", "demo/W-1", "--revision", "1",
-                                "--agent", "agent-b", "--now", "2030-01-01T10:31:00Z", expect=2)
+                                "--agent", "agent-b", "--now", "2030-01-01T10:33:00Z", expect=2)
         self.assertIn("required", no_reason.stderr)
 
+        # Lock-delay: the lease expired at 10:30, but the default two-minute grace window
+        # refuses a re-grant until 10:32 so a stale holder may notice and stop.
+        grace = self.invoke("takeover", "demo/W-1", "--revision", "1", "--reason", "stale",
+                            "--agent", "agent-b", "--now", "2030-01-01T10:31:00Z", expect=2)
+        self.assertIn("lock-delay", grace.stderr)
+        self.assertIn("10:32", grace.stderr)
+
         self.invoke("takeover", "demo/W-1", "--revision", "1", "--reason", "agent-a went silent",
-                    "--agent", "agent-b", "--now", "2030-01-01T10:31:00Z")
+                    "--agent", "agent-b", "--now", "2030-01-01T10:33:00Z")
         record = self.ws.task_record("demo/W-1")
         self.assertEqual(record["claim"]["agent"], "agent-b")
         self.assertEqual(record["revision"], 2)
+        self.assertEqual(record["claim"]["epoch"], 2)
         last = self.ws.events()[-1]
         self.assertEqual(last["event"], "takeover")
         self.assertEqual(last["previous_agent"], "agent-a")
+        self.assertEqual(last["previous_epoch"], 1)
         self.assertEqual(last["reason"], "agent-a went silent")
+
+    # -- fencing ----------------------------------------------------------
+
+    def test_claim_issues_a_fencing_epoch(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        record = self.ws.task_record("demo/W-1")
+        self.assertEqual(record["claim"]["epoch"], 1)
+        self.assertEqual(record["epoch"], 1)
+        self.assertIn("epoch 1", self.invoke("show", "demo/W-1").stdout)
+
+    def test_epoch_is_required_of_the_holder(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        # Bypass the well-behaved-client helper: this is the stale worker's call.
+        omitted = run("--root", str(self.ws.root), "transition", "demo/W-1", "--revision", "1",
+                      "--to", "red", "--agent", "agent-a")
+        self.assertEqual(omitted.returncode, 2)
+        self.assertIn("fenced", omitted.stderr)
+        self.assertIn("--epoch 1", omitted.stderr)
+
+        accepted = run("--root", str(self.ws.root), "transition", "demo/W-1", "--revision", "1",
+                       "--epoch", "1", "--to", "red", "--agent", "agent-a")
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+    def test_a_stale_epoch_is_fenced_after_takeover(self):
+        # Workers share one identity, so a takeover cannot be detected by agent name alone.
+        worker = "opencode/loom-worker"
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", worker, "--now", T0)
+        self.invoke("takeover", "demo/W-1", "--revision", "1", "--reason", "worker went silent",
+                    "--agent", worker, "--now", "2030-01-01T10:33:00Z")
+        record = self.ws.task_record("demo/W-1")
+        self.assertEqual(record["claim"]["epoch"], 2)
+        self.assertEqual(record["claim"]["agent"], worker)
+
+        stale = run("--root", str(self.ws.root), "transition", "demo/W-1", "--revision", "2",
+                    "--epoch", "1", "--to", "red", "--agent", worker)
+        self.assertEqual(stale.returncode, 2)
+        self.assertIn("stale epoch", stale.stderr)
+        self.assertIn("fenced off", stale.stderr)
+
+        stale_renew = run("--root", str(self.ws.root), "renew", "demo/W-1", "--revision", "2",
+                          "--epoch", "1", "--agent", worker, "--now", "2030-01-01T10:34:00Z")
+        self.assertEqual(stale_renew.returncode, 2)
+        self.assertIn("stale epoch", stale_renew.stderr)
+
+        fresh = run("--root", str(self.ws.root), "transition", "demo/W-1", "--revision", "2",
+                    "--epoch", "2", "--to", "red", "--agent", worker)
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+
+    def test_an_expired_lease_cannot_assert_work_state(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "1m",
+                    "--agent", "agent-a", "--now", T0)
+        red = run("--root", str(self.ws.root), "transition", "demo/W-1", "--revision", "1",
+                  "--epoch", "1", "--to", "red", "--agent", "agent-a",
+                  "--now", "2030-01-01T10:02:00Z")
+        self.assertEqual(red.returncode, 2)
+        self.assertIn("expired", red.stderr)
+        self.assertIn("fenced", red.stderr)
+
+        # Stopping is always allowed: a worker that outlived its lease can still get out of the way.
+        blocked = run("--root", str(self.ws.root), "transition", "demo/W-1", "--revision", "1",
+                      "--epoch", "1", "--to", "blocked", "--needs", "human",
+                      "--reason", "lease ran out", "--agent", "agent-a",
+                      "--now", "2030-01-01T10:02:00Z")
+        self.assertEqual(blocked.returncode, 0, blocked.stderr)
 
     def test_write_path_conflict_blocks_second_claim(self):
         # Remove the dependency so only the path overlap can block the claim.
@@ -1346,6 +1439,21 @@ class WorkCLITest(unittest.TestCase):
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn("missing required property 'revision'", invalid.stdout)
 
+
+    def test_the_validator_does_not_read_task_state_from_a_launch_event(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
+                    "--agent", "agent-a", "--now", T0)
+        store = self.ws.store()
+        try:
+            # The scheduler's reconciliation trails the state event and carries the revision the
+            # process started from, not the task's current revision.
+            store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                               state="done", pid=1, revision=1, now=T0)
+        finally:
+            store.close()
+        result = validate(self.ws.root)
+        self.assertNotIn("event log revision", result.stdout)
 
     def test_capability_registry_is_cross_checked(self):
         caps = self.ws.root / "caps"

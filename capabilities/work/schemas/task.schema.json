@@ -37,6 +37,11 @@
     },
     "status_source": {"enum": ["registry", "board", "manual"]},
     "revision": {"type": "integer", "minimum": 0},
+    "epoch": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Fencing epoch, incremented on every claim and takeover. A holder must present the epoch it was issued or its writes are rejected."
+    },
     "created_at": {"type": "string", "format": "date-time"},
     "updated_at": {"type": "string", "format": "date-time"},
     "depends_on": {
@@ -59,6 +64,7 @@
       "required": ["agent", "base_revision", "lease_expires"],
       "properties": {
         "agent": {"type": "string", "minLength": 1, "maxLength": 100},
+        "epoch": {"type": "integer", "minimum": 1},
         "base_revision": {"type": "integer", "minimum": 0},
         "lease_expires": {"type": "string", "format": "date-time"},
         "heartbeat": {"type": "string", "format": "date-time"}

@@ -154,16 +154,29 @@ export WORK_AGENT=opencode/alpha-agent-3      # identity recorded in every event
 ```
 
 `claim` is a compare-and-swap: the `--revision` you pass must equal the registry revision. A stale
-revision fails, a live lease held by another agent fails, and overlapping `write_paths` fail.
+revision fails, a live lease held by another agent fails, and overlapping `write_paths` fail. The
+claim also returns a **fencing epoch**, a counter incremented on every claim and takeover:
+
+```
+claimed alpha/W-1 at revision 1 until 2030-01-01T10:30:00Z epoch 1
+```
+
+Present that epoch on every mutation you make as the holder. A takeover increments it, so a worker
+whose lease was taken over is refused even if it re-reads the revision:
 
 ```bash
-./task renew   alpha/W-1 --revision 1 --ttl 45m
-./task release alpha/W-1 --revision 2 --reason "handing back for review"
+./task renew    alpha/W-1 --revision 1 --epoch 1 --ttl 45m
+./task release  alpha/W-1 --revision 2 --epoch 1 --reason "handing back for review"
 ./task takeover alpha/W-1 --revision 3 --reason "lease expired; agent went silent"
 ```
 
-Heartbeat with `renew` before the lease expires. `takeover` only works after expiry and always
-records the previous agent and a reason. Mutating another agent's live claim is impossible.
+Authority is a *live* lease, not a recorded claim: once the lease expires, the holder can no longer
+move the task to `red` or `green` (stopping with `blocked` or `release` is always allowed). Heartbeat
+with `renew` before expiry.
+
+`takeover` works only after expiry **plus a lock-delay** — two minutes by default. The registry can
+reject a stale epoch, but a git branch cannot, so the grace window gives a stale worker time to
+notice and stop before the task is re-granted. It records the previous agent, its epoch and a reason.
 
 ## Move work through the state machine
 

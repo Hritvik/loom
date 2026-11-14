@@ -497,6 +497,15 @@ def main(argv: list[str] | None = None) -> int:
                 warnings.append(f"{task_id}: lease expired at {claim['lease_expires']} (takeover available)")
             if int(claim.get("base_revision", -1)) >= int(task.get("revision", 0)):
                 errors.append(f"{task_id}: claim base_revision must be below revision")
+            epoch = claim.get("epoch")
+            if epoch is None:
+                warnings.append(
+                    f"{task_id}: claim has no fencing epoch (legacy; a takeover will fence it)")
+            elif not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+                errors.append(f"{task_id}: claim epoch must be a positive integer")
+            elif int(task.get("epoch", 0)) != epoch:
+                errors.append(
+                    f"{task_id}: claim epoch {epoch} does not match task epoch {task.get('epoch')}")
             heartbeat = claim.get("heartbeat")
             if heartbeat:
                 try:
@@ -634,7 +643,9 @@ def main(argv: list[str] | None = None) -> int:
         errors.extend(verify_event_chain(records))
         last_by_task: dict[str, dict] = {}
         for _, record in records:
-            if record.get("task"):
+            # A launch records the revision the process started from and carries no task status;
+            # it is process audit, not a state transition, so it cannot be the last word on state.
+            if record.get("task") and record.get("event") != "launch":
                 last_by_task[record["task"]] = record
         for task_id, record in last_by_task.items():
             if task_id not in by_id:

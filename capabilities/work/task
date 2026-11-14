@@ -27,6 +27,10 @@ import yaml
 
 HOME = Path(__file__).resolve().parent
 DEFAULT_TTL = "30m"
+# Chubby's lock-delay: after a lease expires, refuse to re-grant the task for a short grace
+# window. The epoch fences the registry, but a stale worker can still write to its git branch,
+# and a branch cannot check a token. The delay gives that worker time to notice and stop.
+DEFAULT_LOCK_DELAY = "2m"
 
 STATE_ORDER = [
     "draft",
@@ -245,10 +249,51 @@ def claim_owner(task: dict) -> str | None:
     return (task.get("claim") or {}).get("agent")
 
 
+def claim_epoch(task: dict) -> int | None:
+    return (task.get("claim") or {}).get("epoch")
+
+
 def require_owner(task: dict, agent: str) -> None:
     owner = claim_owner(task)
     if owner != agent:
         raise WorkError(f"{task['id']} is claimed by {owner!r}, not {agent!r}")
+
+
+def require_epoch(task: dict, epoch: int | None, agent: str) -> None:
+    """Fence the acting owner against a claim that was taken over underneath it.
+
+    The revision CAS protects the *claim*: it catches a writer that has not seen the latest
+    mutation. It does not catch a still-running worker acting from the epoch it was launched with.
+    The epoch is issued at claim time and a takeover increments it, so that worker's writes are
+    refused. A worker that re-reads the registry can adopt the new epoch; the stronger fix is a
+    per-attempt identity, which is not yet in place. Claims created before fencing existed carry
+    no epoch and are grandfathered until they are released.
+    """
+    if claim_owner(task) != agent:
+        return  # a non-owner may only act on `reviewed`, and holds no epoch
+    current = claim_epoch(task)
+    if current is None:
+        return
+    if epoch is None:
+        raise WorkError(
+            f"{task['id']} is fenced: pass --epoch {current} (the epoch issued when you claimed)"
+        )
+    if int(epoch) != int(current):
+        raise WorkError(
+            f"stale epoch on {task['id']}: you presented {epoch}, the live claim holds {current}. "
+            "Another agent took over; your attempt is fenced off. Stop and re-read the task."
+        )
+
+
+def require_live_lease(task: dict, now: dt.datetime, operation: str) -> None:
+    """Authority to change work state is a *live* lease, not merely a recorded claim."""
+    expiry = lease_expiry(task)
+    if expiry is None or expiry <= now:
+        until = iso(expiry) if expiry else "unknown"
+        raise WorkError(
+            f"lease on {task['id']} expired at {until}; {operation} is fenced. "
+            "Renew before the lease expires, or let another agent take over."
+        )
 
 
 def bump(task: dict, status: str, now: dt.datetime) -> None:
@@ -278,8 +323,9 @@ def summarize(task: dict, registry: dict) -> str:
         f"  paths:    {', '.join(task.get('write_paths', [])) or '-'}",
     ]
     if claim:
+        epoch = f" epoch {claim['epoch']}" if claim.get("epoch") is not None else ""
         lines.append(
-            f"  claim:    {claim.get('agent')} until {claim.get('lease_expires')} "
+            f"  claim:    {claim.get('agent')} until {claim.get('lease_expires')}{epoch} "
             f"(base revision {claim.get('base_revision')})"
         )
     if task.get("evidence"):
@@ -798,8 +844,11 @@ def cmd_claim(args, store: Store) -> int:
     conflicts = write_path_conflicts(registry, task, now)
     if conflicts:
         raise WorkError("write-path conflict: " + "; ".join(conflicts))
+    epoch = int(task.get("epoch", 0)) + 1
+    task["epoch"] = epoch
     task["claim"] = {
         "agent": agent,
+        "epoch": epoch,
         "base_revision": args.revision,
         "lease_expires": iso(now + ttl),
         "heartbeat": iso(now),
@@ -808,8 +857,9 @@ def cmd_claim(args, store: Store) -> int:
     store.save()
     store.append_event(event="claim", task=task["id"], agent=agent, status="claimed",
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
-                       base_revision=args.revision, now=args.now)
-    print(f"claimed {task['id']} at revision {task['revision']} until {task['claim']['lease_expires']}")
+                       base_revision=args.revision, epoch=epoch, now=args.now)
+    print(f"claimed {task['id']} at revision {task['revision']} until "
+          f"{task['claim']['lease_expires']} epoch {epoch}")
     return 0
 
 
@@ -822,6 +872,7 @@ def cmd_renew(args, store: Store) -> int:
     require_revision(task, args.revision)
     require_state(task, ACTIVE_STATES, "renew")
     require_owner(task, agent)
+    require_epoch(task, args.epoch, agent)
     expiry = lease_expiry(task)
     if expiry is None:
         raise WorkError(f"{task['id']} has no lease to renew")
@@ -835,7 +886,7 @@ def cmd_renew(args, store: Store) -> int:
     store.save()
     store.append_event(event="renew", task=task["id"], agent=agent, status=task["status"],
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
-                       now=args.now)
+                       epoch=claim_epoch(task), now=args.now)
     print(f"renewed {task['id']} at revision {task['revision']} until {task['claim']['lease_expires']}")
     return 0
 
@@ -848,12 +899,14 @@ def cmd_release(args, store: Store) -> int:
     require_revision(task, args.revision)
     require_state(task, ACTIVE_STATES | {"in-progress"}, "release")
     require_owner(task, agent)
+    require_epoch(task, args.epoch, agent)
     previous = task.get("claim") or {}
     task["claim"] = None
     bump(task, "ready", now)
     store.save()
     store.append_event(event="release", task=task["id"], agent=agent, status="ready",
                        revision=task["revision"], previous_agent=previous.get("agent"),
+                       previous_epoch=previous.get("epoch"),
                        reason=args.reason, now=args.now)
     print(f"released {task['id']} back to ready at revision {task['revision']}")
     return 0
@@ -863,6 +916,7 @@ def cmd_takeover(args, store: Store) -> int:
     agent = require_agent(args)
     now = parse_now(args.now)
     ttl = parse_duration(args.ttl)
+    delay = parse_duration(args.lock_delay)
     registry = store.load()
     task = find_task(registry, args.task)
     require_revision(task, args.revision)
@@ -875,9 +929,21 @@ def cmd_takeover(args, store: Store) -> int:
         raise WorkError(
             f"lease on {task['id']} is still live until {iso(expiry)}; takeover requires expiry"
         )
+    # Chubby lock-delay: the registry can reject a stale epoch, but the worker's git branch
+    # cannot. Give the old holder a grace window to notice and stop before re-granting.
+    if expiry and expiry + delay > now:
+        raise WorkError(
+            f"lease on {task['id']} expired at {iso(expiry)}, but the lock-delay window runs "
+            f"until {iso(expiry + delay)}: the previous holder may still be writing. "
+            "Retry after that, or pass a shorter --lock-delay if you know it is gone."
+        )
     previous_agent = existing.get("agent")
+    previous_epoch = existing.get("epoch")
+    epoch = int(task.get("epoch", 0)) + 1
+    task["epoch"] = epoch
     task["claim"] = {
         "agent": agent,
+        "epoch": epoch,
         "base_revision": args.revision,
         "lease_expires": iso(now + ttl),
         "heartbeat": iso(now),
@@ -886,10 +952,11 @@ def cmd_takeover(args, store: Store) -> int:
     store.save()
     store.append_event(event="takeover", task=task["id"], agent=agent, status="claimed",
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
-                       previous_agent=previous_agent, reason=args.reason, now=args.now)
+                       previous_agent=previous_agent, previous_epoch=previous_epoch,
+                       epoch=epoch, lock_delay=args.lock_delay, reason=args.reason, now=args.now)
     print(
         f"took over {task['id']} from {previous_agent} at revision {task['revision']} "
-        f"until {task['claim']['lease_expires']}"
+        f"until {task['claim']['lease_expires']} epoch {epoch}"
     )
     return 0
 
@@ -1028,6 +1095,7 @@ def cmd_transition(args, store: Store) -> int:
     task = find_task(registry, args.task)
     require_revision(task, args.revision)
     current = task.get("status")
+    acting_epoch = claim_epoch(task)
     target = args.to
     if target == "claimed":
         raise WorkError("use `claim` to take a lease; `transition` cannot create claims")
@@ -1048,6 +1116,14 @@ def cmd_transition(args, store: Store) -> int:
 
     if target in {"green", "blocked", "red"} and current in ACTIVE_STATES:
         require_owner(task, agent)
+
+    # The holder must present the epoch it was issued, and its lease must still be live, before
+    # it can assert work state. A takeover increments the epoch, so the old holder is fenced even
+    # if it re-reads the revision; an expired lease is no authority at all.
+    if current in ACTIVE_STATES | {"in-progress"} and owner == agent:
+        require_epoch(task, args.epoch, agent)
+    if target in {"red", "green"} and owner == agent:
+        require_live_lease(task, now, f"moving {task['id']} to {target}")
 
     review = verified_review(args, store, task) if target == "reviewed" else None
     if target == "rejected" and not args.reason:
@@ -1093,7 +1169,7 @@ def cmd_transition(args, store: Store) -> int:
     store.save()
     store.append_event(event="transition", task=task["id"], agent=agent, status=target,
                        previous_status=current, revision=task["revision"],
-                       evidence=args.evidence, reviewer=args.reviewer,
+                       epoch=acting_epoch, evidence=args.evidence, reviewer=args.reviewer,
                        decision=args.decision, reason=args.reason, now=args.now,
                        **({"review_answer": review["answer"], "review_source": review["source"]} if review else {}),
                        **({"integrated_source": args.integrated_source, "integration_tip": integration_tip}
@@ -1348,6 +1424,7 @@ WORKER_BRIEF = """You are a worker for one task in the portfolio work registry.
 
 Task: {task}
 Revision when claimed: {revision}
+Your fencing epoch: {epoch}
 Your identity: {agent}
 Your checkout: {repo}   (an isolated git worktree)
 Your branch: {branch}
@@ -1357,17 +1434,20 @@ Do this:
 1. `cd {work}` and read the task: `./task show {task}`.
 2. Work in {repo} on branch {branch}. Stay inside the write paths above; editing outside them
    breaks the claim. Commit your work to that branch; do not push and do not merge.
-3. Report progress through the registry, not chat. Every mutation needs your identity and the
-   current revision:
-   `./task transition {task} --revision N --to red --agent {agent}`
+3. Report progress through the registry, not chat. Every mutation needs your identity, the
+   current revision and your epoch:
+   `./task transition {task} --revision N{epoch_flag} --to red --agent {agent}`
    then `--to green` when tests pass. Re-read the revision before each call.
-4. Write evidence to {evidence} in the repository, then ask for review:
+4. Keep the lease alive. The lease is short and is not renewed for you; once it expires your
+   epoch is fenced and you cannot write. Before it runs out:
+   `./task renew {task} --revision N{epoch_flag} --ttl 30m --agent {agent}`
+5. Write evidence to {evidence} in the repository, then ask for review:
    `./task ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
     --review-evidence {evidence} --agent {agent}`
-5. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
-   `./task transition {task} --revision N --to blocked --needs human --reason "..." --agent {agent}`
+6. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
+   `./task transition {task} --revision N{epoch_flag} --to blocked --needs human --reason "..." --agent {agent}`
    and stop.
-6. Do not touch Linear. The projection is read-only.
+7. Do not touch Linear. The projection is read-only.
 """
 
 
@@ -1468,8 +1548,11 @@ def spawn_worker(args, task: dict, role: str, work_home: Path) -> tuple[int | No
     repo = Path(str(task.get("owner_repo") or ".")).expanduser()
     tree, branch = worker_worktree(repo, task["id"])
     evidence = task.get("evidence") or f"evidence/{task['id'].split('/')[-1]}.md"
+    epoch = claim_epoch(task)
     brief = WORKER_BRIEF.format(
         task=task["id"], revision=task.get("revision", 0), agent=WORKER_IDENTITY,
+        epoch=epoch if epoch is not None else "none (legacy claim)",
+        epoch_flag=f" --epoch {epoch}" if epoch is not None else "",
         repo=tree, work=work_home, branch=branch or "(no branch: not a git repository)",
         paths=", ".join(task.get("write_paths") or []) or "(none declared)",
         evidence=evidence,
@@ -2193,12 +2276,16 @@ def build_parser() -> argparse.ArgumentParser:
     renew = sub.add_parser("renew", help="heartbeat and extend a live lease", parents=[common])
     renew.add_argument("task")
     renew.add_argument("--revision", type=int, required=True)
+    renew.add_argument("--epoch", type=int,
+                       help="fencing epoch issued at claim time")
     renew.add_argument("--ttl", default=DEFAULT_TTL)
     renew.set_defaults(func=cmd_renew)
 
     release = sub.add_parser("release", help="return a claimed task to ready", parents=[common])
     release.add_argument("task")
     release.add_argument("--revision", type=int, required=True)
+    release.add_argument("--epoch", type=int,
+                         help="fencing epoch issued at claim time")
     release.add_argument("--reason", required=True)
     release.set_defaults(func=cmd_release)
 
@@ -2207,11 +2294,15 @@ def build_parser() -> argparse.ArgumentParser:
     takeover.add_argument("--revision", type=int, required=True)
     takeover.add_argument("--reason", required=True)
     takeover.add_argument("--ttl", default=DEFAULT_TTL)
+    takeover.add_argument("--lock-delay", default=DEFAULT_LOCK_DELAY,
+                          help="grace window after expiry before re-granting (default 2m)")
     takeover.set_defaults(func=cmd_takeover)
 
     transition = sub.add_parser("transition", help="move a task through the state machine", parents=[common])
     transition.add_argument("task")
     transition.add_argument("--revision", type=int, required=True)
+    transition.add_argument("--epoch", type=int,
+                            help="fencing epoch issued at claim time (required of the holder)")
     transition.add_argument("--to", required=True, choices=STATE_ORDER)
     transition.add_argument("--evidence")
     transition.add_argument("--reviewer")

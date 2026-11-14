@@ -51,16 +51,16 @@ The message carries one `data` part. Identity is `message.metadata.agent`, falli
 | `action` | Required fields | CLI equivalent |
 |---|---|---|
 | `claim` | `revision` | `task claim … --revision … --ttl …` |
-| `renew` | `revision` | `task renew … --revision … --ttl …` |
-| `release` | `revision`, `reason` | `task release …` |
-| `takeover` | `revision`, `reason` | `task takeover … --ttl …` |
-| `transition` | `revision`, `to`; plus `evidence`, `reviewer`, `decision`, `reason` as required | `task transition …` |
+| `renew` | `revision`, `epoch` | `task renew … --revision … --epoch … --ttl …` |
+| `release` | `revision`, `epoch`, `reason` | `task release … --epoch …` |
+| `takeover` | `revision`, `reason`; optional `lockDelay` | `task takeover … --lock-delay …` |
+| `transition` | `revision`, `epoch`, `to`; plus `evidence`, `reviewer`, `decision`, `reason` as required | `task transition … --epoch …` |
 | `ask` | `to`, `question`; optional `neededBy` | `task ask …` |
 | `answer` | `question` (seq), `decision`; optional `note` | `task answer …` |
 
-Because the server delegates to the CLI, every guarantee is identical: CAS on `revision`, lease
-expiry, dependency gates, write-path conflicts, review independence, evidence requirements and the
-hash-chained event log.
+Because the server delegates to the CLI, every guarantee is identical: CAS on `revision`, the
+fencing epoch, lease expiry, the takeover lock-delay, dependency gates, write-path conflicts, review
+independence, evidence requirements and the hash-chained event log.
 
 ## Example
 

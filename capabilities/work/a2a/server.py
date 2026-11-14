@@ -458,9 +458,13 @@ class Dispatcher:
             raise RpcError(INVALID_PARAMS, "action requires an integer revision (compare-and-swap)")
 
         args = [operation, task["id"], "--revision", str(revision), "--agent", agent]
+        if operation in {"renew", "release", "transition"} and action.get("epoch") is not None:
+            args += ["--epoch", str(action["epoch"])]
         if operation in {"claim", "renew", "takeover"}:
             if action.get("ttl"):
                 args += ["--ttl", str(action["ttl"])]
+        if operation == "takeover" and action.get("lockDelay"):
+            args += ["--lock-delay", str(action["lockDelay"])]
         if operation == "release":
             if not action.get("reason"):
                 raise RpcError(INVALID_PARAMS, "release requires a reason")
@@ -555,8 +559,11 @@ class Dispatcher:
         if not agent:
             raise RpcError(INVALID_PARAMS, "metadata.agent is required to cancel a task")
         reason = params.get("reason") or "canceled via A2A"
-        self.home.run_cli("transition", task["id"], "--revision", str(task.get("revision", 0)),
-                          "--to", "released", "--reason", reason, "--agent", agent)
+        args = ["transition", task["id"], "--revision", str(task.get("revision", 0)),
+                "--to", "released", "--reason", reason, "--agent", agent]
+        if metadata.get("epoch") is not None:
+            args += ["--epoch", str(metadata["epoch"])]
+        self.home.run_cli(*args)
         updated = self.home.find(task["id"])
         return task_to_a2a(self.home, updated, 0, include_artifacts=True)
 

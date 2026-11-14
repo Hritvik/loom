@@ -30,9 +30,9 @@ python3 mcp/server.py \
 | `work_list` | read | Filter by repo, program, board, status, `ready` |
 | `work_get` | read | One task with dependencies, claimability, recent events |
 | `work_claim` | write | CAS on revision + lease |
-| `work_renew` | write | Heartbeat and extend the lease |
-| `work_release` | write | Return to the pool with a reason |
-| `work_takeover` | write | Take over an expired lease with a recorded reason |
+| `work_renew` | write | Heartbeat and extend the lease (presents the epoch) |
+| `work_release` | write | Return to the pool with a reason (presents the epoch) |
+| `work_takeover` | write | Take over an expired lease after the lock-delay, with a reason |
 | `work_transition` | write | red/green/reviewed/integrated/accepted, blocked/rejected |
 | `work_inbox` | read | Unanswered questions addressed to the agent |
 | `work_search` | read | Find tasks by text instead of namespace |
@@ -61,8 +61,10 @@ Then reads and claims:
 {"name": "work_claim", "arguments": {"task": "beta/W-3", "revision": 0, "ttl": "45m"}}
 ```
 
-The claim result includes the new revision, lease expiry and agent. A stale revision, live lease,
-unmet dependency or overlapping write path returns `isError: true` with an actionable message.
+The claim result includes the new revision, lease expiry, agent and **fencing epoch**. Pass that
+epoch to `work_renew`, `work_release` and `work_transition` for the life of the claim; a takeover
+increments it and a stale value is refused. A stale revision, live lease, unmet dependency or
+overlapping write path returns `isError: true` with an actionable message.
 
 ## Repo and identity defaults
 

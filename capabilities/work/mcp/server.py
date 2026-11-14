@@ -439,6 +439,8 @@ def tool_renew(registry: Registry, arguments: dict, default_agent: str | None) -
         raise ToolError("task and integer revision are required")
     agent = mutation_agent(arguments, default_agent)
     args = ["renew", str(task_id), "--revision", str(revision), "--agent", agent]
+    if arguments.get("epoch") is not None:
+        args += ["--epoch", str(arguments["epoch"])]
     if arguments.get("ttl"):
         args += ["--ttl", str(arguments["ttl"])]
     run_cli(registry.root, *args)
@@ -455,8 +457,11 @@ def tool_release(registry: Registry, arguments: dict, default_agent: str | None)
     if not reason:
         raise ToolError("reason is required")
     agent = mutation_agent(arguments, default_agent)
-    run_cli(registry.root, "release", str(task_id), "--revision", str(revision),
-            "--reason", str(reason), "--agent", agent)
+    args = ["release", str(task_id), "--revision", str(revision),
+            "--reason", str(reason), "--agent", agent]
+    if arguments.get("epoch") is not None:
+        args += ["--epoch", str(arguments["epoch"])]
+    run_cli(registry.root, *args)
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
 
@@ -472,6 +477,8 @@ def tool_transition(registry: Registry, arguments: dict, default_agent: str | No
     agent = mutation_agent(arguments, default_agent)
     args = ["transition", str(task_id), "--revision", str(revision), "--to", str(target),
             "--agent", agent]
+    if arguments.get("epoch") is not None:
+        args += ["--epoch", str(arguments["epoch"])]
     for key, flag in (("evidence", "--evidence"), ("reviewer", "--reviewer"),
                       ("decision", "--decision"), ("severity", "--severity"),
                       ("reason", "--reason"), ("reviewAnswer", "--review-answer"),
@@ -553,7 +560,8 @@ TOOL_DEFS = [
         "description": (
             "Claim a ready task with compare-and-swap on revision and a time-boxed lease. Fails if "
             "the revision is stale, another agent holds a live lease, dependencies are unmet, or "
-            "write paths overlap another active claim. Renew before the lease expires."),
+            "write paths overlap another active claim. The result carries a fencing epoch; pass it "
+            "to work_renew, work_release and work_transition. Renew before the lease expires."),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -580,6 +588,8 @@ TOOL_DEFS = [
             "properties": {
                 "task": {"type": "string"},
                 "revision": {"type": "integer", "minimum": 0},
+                "epoch": {"type": "integer", "minimum": 1,
+                          "description": "Fencing epoch issued when you claimed"},
                 "ttl": {"type": "string"},
                 "agent": {"type": "string"},
             },
@@ -599,6 +609,8 @@ TOOL_DEFS = [
             "properties": {
                 "task": {"type": "string"},
                 "revision": {"type": "integer", "minimum": 0},
+                "epoch": {"type": "integer", "minimum": 1,
+                          "description": "Fencing epoch issued when you claimed"},
                 "reason": {"type": "string", "minLength": 1},
                 "agent": {"type": "string"},
             },
@@ -620,6 +632,8 @@ TOOL_DEFS = [
             "properties": {
                 "task": {"type": "string"},
                 "revision": {"type": "integer", "minimum": 0},
+                "epoch": {"type": "integer", "minimum": 1,
+                          "description": "Fencing epoch issued when you claimed; required of the holder"},
                 "to": {"type": "string", "enum": STATUSES},
                 "evidence": {"type": "string"},
                 "reviewer": {"type": "string"},
@@ -639,7 +653,8 @@ TOOL_DEFS = [
         "title": "Take over an expired lease",
         "description": (
             "Take over a task whose lease has expired, with a recorded reason. Refused while the "
-            "lease is live; the previous agent is recorded in the audit log."),
+            "lease is live and during the lock-delay grace window after expiry. The previous agent "
+            "and epoch are recorded, and the new claim gets a higher epoch."),
         "inputSchema": {
             "type": "object",
             "additionalProperties": False,
@@ -649,6 +664,8 @@ TOOL_DEFS = [
                 "revision": {"type": "integer", "minimum": 0},
                 "reason": {"type": "string"},
                 "ttl": {"type": "string"},
+                "lockDelay": {"type": "string",
+                              "description": "Grace window after expiry before re-granting (default 2m)"},
                 "agent": {"type": "string"},
             },
         },
@@ -786,6 +803,8 @@ def tool_takeover(registry: Registry, arguments: dict, default_agent: str | None
             "--agent", agent]
     if arguments.get("ttl"):
         args += ["--ttl", str(arguments["ttl"])]
+    if arguments.get("lockDelay"):
+        args += ["--lock-delay", str(arguments["lockDelay"])]
     run_cli(registry.root, *args)
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())

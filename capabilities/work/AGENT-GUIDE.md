@@ -96,14 +96,19 @@ in-flight work. It reads the central registry, so it only knows what was actuall
 
 ```bash
 ./task show <id>                                          # read deps, blocks, paths, revision
-./task claim <id> --revision N --ttl 45m --agent <you>
-./task renew <id> --revision N --ttl 45m --agent <you>    # heartbeat before expiry
-./task transition <id> --revision N --to red    --agent <you>
-./task transition <id> --revision N --to green --evidence evidence/<id>.md --agent <you>
+./task claim <id> --revision N --ttl 45m --agent <you>    # prints the fencing epoch, e.g. epoch 3
+./task renew <id> --revision N --epoch E --ttl 45m --agent <you>   # heartbeat before expiry
+./task transition <id> --revision N --epoch E --to red    --agent <you>
+./task transition <id> --revision N --epoch E --to green --evidence evidence/<id>.md --agent <you>
 ./task transition <id> --revision N --to integrated --integrated-source <full-commit> \
   --evidence evidence/<id>.md --agent <you>
 ./task transition <id> --revision N --to accepted --evidence evidence/<id>.md --agent <you>
 ```
+
+The epoch is issued when you claim and must be presented on every mutation you make as the
+holder. If the lease is taken over, the epoch increments and your writes are refused: stop, do not
+retry with the new epoch. A lease that has expired is no authority either — renew before it runs
+out, and if it has already run out, use `blocked` or `release` rather than asserting `red`/`green`.
 
 Code, tests, packet bodies and evidence stay in **your** product repository. The registry holds
 identity, state, revision, claims and dependencies — nothing else.

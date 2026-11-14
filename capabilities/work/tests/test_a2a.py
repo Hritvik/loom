@@ -139,8 +139,11 @@ class A2AFacadeTest(unittest.TestCase):
         task_id = "demo/W-1"
         owner = "a2a/implementer"
         reviewer = "a2a/reviewer"
-        self.send_action(task_id, "claim", owner, revision=0)["result"]
-        self.send_action(task_id, "transition", owner, revision=1, to="green")["result"]
+        claimed = self.send_action(task_id, "claim", owner, revision=0)["result"]
+        epoch = claimed["metadata"]["claim"]["epoch"]
+        self.assertEqual(epoch, 1)
+        self.send_action(task_id, "transition", owner, revision=1, to="green",
+                         epoch=epoch)["result"]
         self.send_action(task_id, "ask", owner, to=reviewer, question="Review source and evidence",
                          reviewSource=source, reviewBase=base,
                          reviewEvidence="evidence/W-1.md")["result"]
@@ -160,7 +163,7 @@ class A2AFacadeTest(unittest.TestCase):
         self.assertEqual(answer["decision"], "approve")
 
         reviewed = self.send_action(task_id, "transition", owner, revision=2, to="reviewed",
-                                    reviewer=reviewer, reviewAnswer=answer["seq"],
+                                    epoch=epoch, reviewer=reviewer, reviewAnswer=answer["seq"],
                                     evidence="evidence/W-1.md")["result"]
         self.assertEqual(reviewed["metadata"]["internalStatus"], "reviewed")
         integrated = self.send_action(task_id, "transition", owner, revision=3, to="integrated",
@@ -272,9 +275,10 @@ class A2AFacadeTest(unittest.TestCase):
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
     def test_cancel_task_returns_terminal_canceled_state(self):
-        self.send_action("demo/W-1", "claim", "a2a/agent-1", revision=0)
+        claimed = self.send_action("demo/W-1", "claim", "a2a/agent-1", revision=0)["result"]
+        epoch = claimed["metadata"]["claim"]["epoch"]
         canceled = self.rpc("CancelTask", {
-            "id": "demo/W-1", "metadata": {"agent": "a2a/agent-1"},
+            "id": "demo/W-1", "metadata": {"agent": "a2a/agent-1", "epoch": epoch},
         })["result"]
         self.assertEqual(canceled["status"]["state"], "TASK_STATE_CANCELED")
         self.assertEqual(canceled["metadata"]["internalStatus"], "released")

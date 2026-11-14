@@ -211,18 +211,23 @@ class MCPTest(unittest.TestCase):
         self.assertEqual(claimed["status"], "claimed")
         self.assertEqual(claimed["revision"], 1)
         self.assertEqual(claimed["claim"]["agent"], "mcp/agent")
+        epoch = claimed["claim"]["epoch"]
+        self.assertEqual(epoch, 1)
 
         conflict = self.tool("work_claim",
                              {"task": "demo/W-1", "revision": 1, "agent": "mcp/other"})
         self.assertTrue(conflict["isError"])
         self.assertIn("leased by mcp/agent", conflict["content"][0]["text"])
 
-        renewed = self.structured("work_renew", {"task": "demo/W-1", "revision": 1, "ttl": "1h"})
+        renewed = self.structured("work_renew",
+                                  {"task": "demo/W-1", "revision": 1, "ttl": "1h",
+                                   "epoch": epoch})
         self.assertEqual(renewed["revision"], 2)
         self.assertIsNotNone(renewed["claim"]["lease_expires"])
 
         released = self.structured("work_release",
-                                   {"task": "demo/W-1", "revision": 2, "reason": "handing back"})
+                                   {"task": "demo/W-1", "revision": 2, "reason": "handing back",
+                                    "epoch": epoch})
         self.assertEqual(released["status"], "ready")
         self.assertEqual(released["revision"], 3)
         self.assertIsNone(released["claim"])
@@ -247,9 +252,12 @@ class MCPTest(unittest.TestCase):
         return base, source
 
     def test_full_lifecycle_through_tools(self):
-        self.structured("work_claim", {"task": "demo/W-1", "revision": 0})
-        self.structured("work_transition", {"task": "demo/W-1", "revision": 1, "to": "red"})
-        self.structured("work_transition", {"task": "demo/W-1", "revision": 2, "to": "green"})
+        claimed = self.structured("work_claim", {"task": "demo/W-1", "revision": 0})
+        epoch = claimed["claim"]["epoch"]
+        self.structured("work_transition",
+                        {"task": "demo/W-1", "revision": 1, "to": "red", "epoch": epoch})
+        self.structured("work_transition",
+                        {"task": "demo/W-1", "revision": 2, "to": "green", "epoch": epoch})
         base, source = self.review_source()
         self.structured("work_ask", {
             "task": "demo/W-1", "to": "mcp/reviewer", "question": "Review source and evidence",
@@ -270,7 +278,7 @@ class MCPTest(unittest.TestCase):
         self.assertEqual(answer["reviewEvidence"], "evidence/W-1.md")
         self.assertEqual(answer["decision"], "approve")
         reviewed = self.structured("work_transition", {
-            "task": "demo/W-1", "revision": 3, "to": "reviewed",
+            "task": "demo/W-1", "revision": 3, "to": "reviewed", "epoch": epoch,
             "reviewer": "mcp/reviewer", "decision": "approve",
             "reviewAnswer": answer["seq"], "evidence": "evidence/W-1.md",
         })

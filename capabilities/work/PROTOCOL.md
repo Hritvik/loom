@@ -69,6 +69,7 @@ A claim is a compare-and-swap on the task revision plus a time-boxed lease:
 ```yaml
 claim:
   agent: opencode/alpha-agent-3
+  epoch: 7
   base_revision: 42
   lease_expires: 2026-10-31T12:30:00Z
   heartbeat: 2026-10-31T12:00:00Z
@@ -76,9 +77,9 @@ claim:
 
 ```bash
 task claim    <id> --revision N --ttl 30m
-task renew    <id> --revision N --ttl 30m
-task release  <id> --revision N --reason TEXT
-task takeover <id> --revision N --reason TEXT   # only after expiry
+task renew    <id> --revision N --epoch E --ttl 30m
+task release  <id> --revision N --epoch E --reason TEXT
+task takeover <id> --revision N --reason TEXT   # after expiry + lock-delay
 ```
 
 Rules enforced by the CLI:
@@ -86,7 +87,17 @@ Rules enforced by the CLI:
 - `--revision` must equal the registry revision, otherwise the operation fails (stale writer).
 - Only `ready` tasks with satisfied dependencies can be claimed.
 - A live lease blocks other agents; renewal by a non-owner is refused.
-- `takeover` requires an expired lease and a recorded reason; the previous agent is in the event log.
+- **Fencing epoch.** Every claim and takeover increments `task.epoch` and copies it into the
+  claim. The holder must present `--epoch` on `renew`, `release` and `transition`; a mismatch is
+  refused. The revision CAS catches a writer that has not seen the latest mutation; the epoch
+  catches a still-running worker even if it re-reads the revision. This matters because every
+  worker shares the identity `opencode/loom-worker`, so a takeover cannot be detected by agent
+  name alone.
+- **Authority is a live lease.** Once `lease_expires` passes, the holder cannot move the task to
+  `red` or `green`; `renew` is refused too. Stopping (`blocked`, `release`) is still allowed.
+- **Lock-delay.** `takeover` refuses to re-grant until `lease_expires + lock-delay` (default 2m),
+  because a git branch cannot validate an epoch. The grace window lets a stale holder stop.
+- `takeover` records the previous agent, its epoch, the lock-delay and a reason in the event log.
 - Overlapping `write_paths` with another active claim are refused.
 - Default lease is 30 minutes; heartbeat with `renew` before expiry.
 - One file lock serialises mutations, so concurrent processes cannot interleave writes.
@@ -96,7 +107,7 @@ Rules enforced by the CLI:
 Every mutation appends one hash-chained row to the `events` table:
 
 ```json
-{"seq":2,"ts":"2026-10-31T10:00:00Z","event":"claim","task":"alpha/W-1","agent":"opencode/alpha-agent-3","status":"claimed","revision":1,"lease_expires":"2026-10-31T10:30:00Z","prev":"<sha256 of previous line>"}
+{"seq":2,"ts":"2026-10-31T10:00:00Z","event":"claim","task":"alpha/W-1","agent":"opencode/alpha-agent-3","status":"claimed","revision":1,"epoch":1,"lease_expires":"2026-10-31T10:30:00Z","prev":"<sha256 of previous line>"}
 ```
 
 `seq` is contiguous, `prev` chains each record to its predecessor, and the terminal event for every
