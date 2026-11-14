@@ -10,10 +10,11 @@ without colliding, without a human dispatching tasks, and without trusting each 
 
 | Surface | Purpose |
 |---|---|
+| `capabilities/work/loom` | the front door: `work`, `tick`, `workers`, `schedule`, `linear`, `logs` |
 | `capabilities/work/task` | the CLI: claim, renew, release, takeover, transition, ask, inbox, search, dependents, graph, tick, decisions, migrate, export |
 | `capabilities/work/mcp/` | MCP server, so the registry appears in an agent's tool list |
 | `capabilities/work/a2a/` | A2A v1.0 façade for agents that speak it |
-| `capabilities/work/validate_work.py` | schema, dependency, lease, claim, event-chain and contract verification |
+| `capabilities/work/validate_work.py` | schema, dependency, lease, epoch, review, event-chain and contract verification |
 | `docs/adr/` | decisions, including why state left git |
 
 ## Install
@@ -40,6 +41,21 @@ python3 validate_work.py     # is the registry healthy?
 
 Agents working in a product repository should read
 [`capabilities/work/AGENT-GUIDE.md`](capabilities/work/AGENT-GUIDE.md) first.
+
+## Running unattended
+
+`loom tick --apply` is one policy pass: reconcile launches whose process is gone, record reviews
+that were approved but never applied, then fill the implementer and reviewer slots from the ranked
+queue. An implementer runs in its own git worktree; a reviewer runs in a detached checkout at the
+exact commit under review. Every launch is an event carrying its pid, role and revision.
+
+The launchd job runs it every **120 seconds** with `--quiet`, so an idle pass prints nothing.
+`loom schedule status` prints the interval, label, plist and last log lines.
+
+Claims carry a **fencing epoch**: every claim and takeover increments it and the holder must present
+it on each mutation, so a worker whose lease was taken over is refused even if it re-reads the
+revision. Takeover also waits out a **lock-delay** (two minutes), because a git branch cannot
+validate a token. Authority is a live lease, not a recorded claim.
 
 ## Boundaries
 

@@ -34,6 +34,22 @@ _Avoid_: lock, assignment, reservation
 The expiry attached to a claim. An expired lease voids the claim; it does not mean the work is done.
 _Avoid_: timeout, TTL, deadline
 
+**Epoch**:
+A counter incremented on every claim and takeover and copied into the claim. The holder presents it
+on each mutation; a stale value is refused. It fences the *work* where the revision CAS fences the
+*claim*.
+_Avoid_: version, generation, nonce
+
+**Lock-delay**:
+The grace window after a lease expires before a takeover may re-grant the task (default two
+minutes). It protects resources that cannot validate an epoch, such as a git branch.
+_Avoid_: cooldown, backoff, timeout
+
+**Review**:
+An independent verdict on green work, recorded as an answer event. The reviewer must not be the
+acting agent or an earlier claimant; the coordinator records `reviewed` from an approval.
+_Avoid_: approval, sign-off, audit
+
 **Launch**:
 The recorded act binding a task, a role, an agent identity and a thread. A launch is an event; the
 thread it names may no longer exist.

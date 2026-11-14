@@ -29,7 +29,7 @@ python3 mcp/server.py \
 | `work_status` | read | Ready work, active claims, expired leases, board drift |
 | `work_list` | read | Filter by repo, program, board, status, `ready` |
 | `work_get` | read | One task with dependencies, claimability, recent events |
-| `work_claim` | write | CAS on revision + lease |
+| `work_claim` | write | CAS on revision + lease; returns the fencing epoch |
 | `work_renew` | write | Heartbeat and extend the lease (presents the epoch) |
 | `work_release` | write | Return to the pool with a reason (presents the epoch) |
 | `work_takeover` | write | Take over an expired lease after the lock-delay, with a reason |

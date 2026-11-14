@@ -11,6 +11,7 @@ reconciliation**.
 | `work-home.yaml` | Marks this directory as the authoritative coordination home |
 | `store.py` | Storage: the SQLite backend, the interface, and the legacy file importer |
 | `~/.local/state/loom/work.db` | Live state: boards, tasks, edges, claims and the hash-chained events |
+| `loom` | The front door: `work`, `tick`, `workers`, `schedule`, `linear` and `logs`, with policy in `~/.config/loom/loom.json` |
 | `task` | The CLI agents use to create, claim, renew, release, take over, transition, message and reconcile work |
 | `AGENT-GUIDE.md` | The briefing to point a product agent at: the loop, the enforced rules, discovery and escalation |
 | `validate_work.py` | Schema, drift, dependency, lease, claim and event-chain verification |
@@ -34,14 +35,14 @@ identical on all three surfaces.
 | `dependents` | Who is waiting on a task, directly and transitively |
 | `graph` | Render the dependency graph: `text`, `mermaid`, `dot` or standalone `html` |
 | `decisions` | What needs the owner: human-blocked tasks and questions addressed to them |
-| `tick` | Policy pass: what would be claimed and launched; `--apply` launches a worker in an isolated worktree |
+| `tick` | Policy pass: reconcile, record approvals, claim and launch implementers and reviewers; `--apply` acts, `--quiet` is silent when idle |
 | `migrate` | Copy a file work home into SQLite, verifying the event chain |
 | `export` | Render the store as YAML or JSON, replacing diffable state in git |
 | `show` | One task with dependencies, claim, evidence and review |
-| `claim` | Take a lease with compare-and-swap on revision |
-| `renew` | Heartbeat and extend a live lease |
-| `release` | Return a claimed task to the ready pool with a reason |
-| `takeover` | Take over an expired lease with a recorded reason |
+| `claim` | Take a lease with compare-and-swap on revision; prints the fencing epoch |
+| `renew` | Heartbeat and extend a live lease (presents the epoch) |
+| `release` | Return a claimed task to the ready pool with a reason (presents the epoch) |
+| `takeover` | Take over an expired lease after the lock-delay, with a recorded reason |
 | `transition` | Move through the state machine, enforcing evidence and review |
 | `annotate` | Record an integration receipt for a task integrated or accepted before receipts existed |
 | `ask` | Ask another agent a question about a task |
@@ -88,7 +89,7 @@ receipt already exists, and the event is appended to the audit log like any othe
 ./loom tick --apply --quiet     # the scheduled form: silent when it did nothing
 ./loom workers                  # running, with pid, branch and worktree
 ./loom workers stop <task>
-./loom schedule status          # label, plist, job state and the last log lines
+./loom schedule status          # label, plist, interval, job state and the last log lines
 ./loom schedule start|stop
 ./loom linear sync --all --apply
 ./loom logs <task>
@@ -99,6 +100,23 @@ receipt already exists, and the event is appended to the audit log like any othe
 The launchd job runs `loom tick --apply --quiet` every **120 seconds**. An idle pass is ~0.25s and
 prints nothing; a pass that claims, reviews, records or escalates prints its report. `schedule status`
 shows the interval alongside the label and plist, so the cadence is visible rather than implied.
+
+## Running unattended
+
+One `tick` pass does four things in order:
+
+1. **Reconcile** launches whose process is gone. A launch that advanced the task is `done`; one that
+   did not is `failed`, and two failures block the task for a human. A reviewer launch is `done` when
+   it recorded a verdict, because a changes-requested answer leaves the task green.
+2. **Record** `reviewed` for every green task whose latest review request carries an approval. The
+   coordinator acts; the reviewer of record is the agent that answered.
+3. **Launch implementers** for claimable tasks, ranked by transitive downstream weight, up to the
+   `implementer` limit. Each runs in `~/.local/state/loom/worktrees/<slug>` on `loom/<slug>`.
+4. **Launch reviewers** for open requests addressed to `opencode/reviewer-agent`, up to the
+   `reviewer` limit. Each runs in a detached checkout under `~/.local/state/loom/reviews/<slug>`.
+
+Capacity, TTL, worker command, reviewer identity and the attempt bound are in
+`~/.config/loom/loom.json`.
 
 ## Storage
 

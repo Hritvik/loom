@@ -51,9 +51,13 @@ cd ~/repositories/loom/capabilities/work
 
 ```bash
 ./task claim alpha/W-1 --revision 0 --ttl 45m --agent you/alpha-agent
-./task transition alpha/W-1 --revision 1 --to red   --agent you/alpha-agent
-./task transition alpha/W-1 --revision 2 --to green --agent you/alpha-agent
+# -> claimed alpha/W-1 at revision 1 ... epoch 1
+./task transition alpha/W-1 --revision 1 --epoch 1 --to red   --agent you/alpha-agent
+./task transition alpha/W-1 --revision 2 --epoch 1 --to green --agent you/alpha-agent
 ```
+
+The claim prints its fencing epoch. Present it on `renew`, `release` and `transition` while you hold
+the claim; a takeover increments it and fences the old attempt.
 
 Review is a two-step handshake, and the reviewer must never be a claimant:
 
@@ -71,6 +75,10 @@ Review is a two-step handshake, and the reviewer must never be a claimant:
 
 Two flags catch people out: `--review-answer` takes the **answer** event's sequence, not the
 question's, and `--integrated-source` must be the exact commit the reviewer approved.
+
+This handshake can run unattended. `loom tick --apply` launches an independent reviewer for each
+open request addressed to `opencode/reviewer-agent` and records `reviewed` from an approval. The
+reviewer decides; the coordinator records, so the acting agent is never the reviewer of record.
 
 ## 5. Connect an agent
 
