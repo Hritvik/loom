@@ -1177,6 +1177,23 @@ class WorkCLITest(unittest.TestCase):
         self.assertIsNone(launch["branch"])
         self.assertEqual(Path(launch["worktree"]), self.ws.repo)
 
+    def test_a_launch_that_produced_work_is_marked_done_not_failed(self):
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        launch = next(event for event in self.ws.events() if event.get("event") == "launch")
+        # the worker finished its job: it advanced the task before dying
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "green",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
+                    "--agent", "opencode/loom-worker", "--now", "2030-01-01T12:00:00Z")
+        final = [event for event in self.ws.events()
+                 if event.get("event") == "launch" and event.get("pid") == launch["pid"]][-1]
+        self.assertEqual(final["state"], "done")
+        self.assertNotEqual(self.ws.task_record("demo/W-1")["status"], "blocked")
+
     def test_tick_reports_expired_leases(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "1m",
                     "--agent", "agent-a", "--now", T0)

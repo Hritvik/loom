@@ -1399,9 +1399,13 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
         latest = state["latest"]
         if latest.get("state") != "pending" or pid_alive(latest.get("pid")):
             continue
+        advanced = (task.get("revision", 0) > int(latest.get("revision") or -1)
+                    or task.get("status") in {"green", "reviewed", "integrated", "accepted", "done"})
         store.append_event(event="launch", task=task["id"], agent=WORKER_IDENTITY,
-                           state="failed", pid=latest.get("pid"),
-                           role=latest.get("role"), now=iso(now))
+                           state="done" if advanced else "failed", pid=latest.get("pid"),
+                           role=latest.get("role"), revision=latest.get("revision"), now=iso(now))
+        if advanced:
+            continue
         if state["failed"] + 1 >= 2:
             problems.append(f"{task['id']}: two worker launches failed; needs a human")
             if task.get("status") in {"claimed", "red", "green"}:
@@ -1546,6 +1550,7 @@ def cmd_tick(args, store: Store) -> int:
             pid, tree, branch = spawn_worker(args, task, item["role"], work_home)
             store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
                                role=item["role"], state="pending", pid=pid,
+                               revision=task.get("revision", 0),
                                worktree=str(tree), branch=branch, now=args.now)
             launched.append({"task": item["task"], "role": item["role"], "pid": pid,
                              "worktree": str(tree), "branch": branch})
