@@ -879,7 +879,8 @@ def cmd_show(args, store: Store) -> int:
         print(summarize(task, registry))
         if attempts:
             current = attempts[-1]
-            print(f"  attempt:  {current['attempt']}  [{current.get('state')}]"
+            print(f"  attempt:  {current['attempt']}  [{current.get('state')}] "
+                  f"{current.get('role') or 'implementer'}"
                   + (f" pid {current['pid']}" if current.get("pid") else "")
                   + (f"  {current['worktree']}" if current.get("worktree") else ""))
         if receipt:
@@ -1733,14 +1734,18 @@ def previous_branch(views: dict[str, dict], task_id: str, role: str, attempt_id)
 
 
 def trailing_failures(views: dict[str, dict], task_id: str, role: str) -> int:
-    """Failures since the last successful or replaced attempt of this role."""
+    """Failures since the last successful or replaced attempt of this role.
+
+    A reaped attempt is transparent: it never carried the work, so it neither counts as a failure
+    nor breaks the run of failures before it.
+    """
     history = sorted((item for item in views.values()
                       if item.get("task") == task_id
                       and (item.get("role") or "implementer") == role),
                      key=lambda item: item.get("last_seq") or 0)
     count = 0
     for item in reversed(history):
-        if item.get("state") == "failed":
+        if item.get("state") == "failed" and not item.get("reaped"):
             count += 1
         elif item.get("state") in {"done", "superseded"}:
             break
@@ -2055,7 +2060,10 @@ def open_review_requests(store: Store, registry: dict, reviewer_identity: str,
                  if item.get("role") == "reviewer" and attempt_is_live(item)}
     failures: dict[tuple[str, int], int] = {}
     for item in views.values():
-        if item.get("role") == "reviewer" and item.get("state") == "failed":
+        # A reaped attempt never ran: a pass that died before attaching the reviewer's process
+        # must not exhaust the request's attempts and stall a review nobody performed.
+        if (item.get("role") == "reviewer" and item.get("state") == "failed"
+                and not item.get("reaped")):
             key = (item.get("task"), item.get("question"))
             failures[key] = failures.get(key, 0) + 1
     open_requests, stalled = [], []

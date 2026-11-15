@@ -86,11 +86,34 @@ Also taken: `next_attempt_id` is now called *inside* the claim's transaction, so
 matches the code (the store lock made the earlier placement safe, but the ordering was not
 self-evident).
 
+## Rework after review, round 2 (answer event 1668, changes requested)
+
+The same principle was applied in only one place, so two counters still treated a reaped ghost as
+a worker that ran:
+
+- `open_review_requests` counted reaped reviewer attempts against `--max-review-attempts`. Two
+  passes that died between writing the reviewer attempt and attaching its process would exhaust the
+  request and print `Review stalled (attempts exhausted; needs a human)` without a reviewer ever
+  running.
+- `trailing_failures` counted reaped ghosts, so one reaped claim plus one real spawn failure
+  reported "two worker launches failed" with only one failure.
+
+Both now skip reaped attempts; a reaped attempt is transparent to the run — it neither counts nor
+breaks it. Regression tests:
+
+- `test_a_reaped_reviewer_attempt_does_not_stall_the_request` — two starting reviewer attempts
+  reaped at +11m, then a pass with a free reviewer slot launches the review instead of stalling.
+- `test_a_reaped_attempt_does_not_count_as_a_worker_failure` — a reaped claim attempt plus one
+  real spawn failure does not escalate; the second pass stays quiet.
+
+Minor: `loom show` now names the current attempt's role in the text line, so a reviewer run on a
+green task is not mistaken for the implementer.
+
 ## Verification
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s tests      # 230 tests, OK
+python3 -m unittest discover -s tests      # 232 tests, OK
 python3 validate_work.py                   # PASS (against the live registry)
 ./loom attempts --live                     # folds this worker's legacy launch correctly
 ./loom show loom/LOOM-5                    # prints the current attempt

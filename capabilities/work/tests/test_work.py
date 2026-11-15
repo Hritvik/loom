@@ -1405,6 +1405,49 @@ class WorkCLITest(unittest.TestCase):
         shown = json.loads(self.invoke("show", "demo/W-1", "--json").stdout)
         self.assertEqual([item["attempt"] for item in shown["attempts"]],
                          ["demo/W-1#a1", "demo/W-1#a2"])
+        text = self.invoke("show", "demo/W-1").stdout
+        self.assertIn("demo/W-1#a2  [running] implementer", text)
+
+    def test_a_reaped_reviewer_attempt_does_not_stall_the_request(self):
+        self.mark_green()
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        store = self.ws.store()
+        try:
+            with store.lock():
+                # Two passes died between writing the reviewer attempt and attaching its process.
+                for number in (2, 3):
+                    store.append_event(event="attempt", attempt=f"demo/W-1#a{number}",
+                                       task="demo/W-1", agent="opencode/reviewer-agent",
+                                       role="reviewer", state="starting", revision=2,
+                                       question=int(request), source=source, now=T0)
+        finally:
+            store.close()
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "1",
+                             "--no-integrate", "--worker-command", "sh -c 'sleep 60'",
+                             "--reviewer-identity", "opencode/reviewer-agent",
+                             "--now", "2030-01-01T10:11:00Z")
+        self.assertNotIn("Review stalled", result.stdout)
+        self.assertIn("launched review of demo/W-1", result.stdout)
+        reaped = [item for item in self.attempts("demo/W-1") if item["reaped"]]
+        self.assertEqual(len(reaped), 2, reaped)
+
+    def test_a_reaped_attempt_does_not_count_as_a_worker_failure(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "8h",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        self.invoke("release", "demo/W-1", "--revision", "1", "--reason",
+                    "abandoned before spawn", "--agent", "opencode/loom-worker", "--now", T0)
+        # The ghost is reaped and a real spawn fails in the same pass.
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/nonexistent/agent",
+                    "--now", "2030-01-01T10:11:00Z")
+        attempts = self.attempts("demo/W-1")
+        self.assertEqual([item["attempt"] for item in attempts], ["demo/W-1#a1", "demo/W-1#a2"])
+        self.assertTrue(attempts[0]["reaped"], attempts[0])
+        self.assertFalse(attempts[1]["reaped"], attempts[1])
+        second = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--now", "2030-01-01T10:12:00Z").stdout
+        self.assertNotIn("two worker launches failed", second)
 
     def test_capacity_equals_the_observed_live_attempts(self):
         self.invoke("create", "--agent", "agent-a", "--now", T0,
