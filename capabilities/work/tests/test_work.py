@@ -1803,6 +1803,13 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("merge_needed", plan["counts"])
         self.assertIn("humanBlocked", plan)
 
+    def test_green_does_not_consume_an_implementer_slot(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
+                    "--agent", "agent-a", "--evidence", "evidence/W-1.md", "--now", T0)
+        preview = self.invoke("tick", "--max-implementer", "1", "--now", T0).stdout
+        self.assertIn("capacity: implementer 0/1", preview)
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",

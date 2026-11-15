@@ -2651,7 +2651,10 @@ def cmd_tick(args, store: Store) -> int:
             continue
         expiry = lease_expiry(task)
         if expiry and expiry > now:
-            active[task_role(task)] += 1
+            # A green task is waiting on review; its implementer is done. Counting it would
+            # shrink the implementer pool exactly while the review queue is draining.
+            if task.get("status") != "green":
+                active[task_role(task)] += 1
         else:
             expired.append({
                 "task": task["id"],
