@@ -778,6 +778,54 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(event["review_path_count"], 2)
         self.assertIn("approved content", self.invoke("show", "demo/W-1").stdout)
 
+    def test_a_root_commit_review_binds_the_paths_it_approved(self):
+        # The fixture's commit() always creates an "Initial fixture" commit, so the no-base
+        # branch (review_base returns None for a root commit) needs a repository built here.
+        self.mark_green()
+        repo = self.ws.repo
+        identity = (
+            "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null",
+        )
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        git("init", "-q", "-b", "main")
+        (repo / "src/one").mkdir(parents=True, exist_ok=True)
+        (repo / "src/one/a.txt").write_text("a")
+        (repo / "src/one/b.txt").write_text("b")
+        git("add", "--", ".")
+        git(*identity, "commit", "-qm", "Root commit")
+        source = git("rev-parse", "HEAD")
+        self.assertEqual(git("rev-list", "--max-parents=0", "HEAD"), source)
+
+        approval = self.approve_review(self.request_review(source))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+
+        review = self.ws.task_record("demo/W-1")["review"]
+        self.assertIsNone(review["base"])
+        self.assertEqual([pair["path"] for pair in review["paths"]],
+                         ["docs/board.json", "src/one/a.txt", "src/one/b.txt"])
+        self.assertNotEqual(
+            review["digest"],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        self.assertEqual(review["digest"], content_digest(review["paths"]))
+
+        self.commit("Unreviewed change", path="src/one/a.txt", content="TAMPERED after approval")
+        result = self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "integrated",
+                             "--evidence", "evidence/W-1.md", "--integrated-source", source,
+                             "--agent", "agent-a", "--now", T0, expect=2)
+        self.assertIn("src/one/a.txt", result.stderr)
+        self.assertNotIn("src/one/b.txt", result.stderr)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+
     def test_integration_names_the_exact_paths_that_moved(self):
         self.mark_green()
         base = self.commit("Base")

@@ -1156,7 +1156,8 @@ def approved_content(task: dict, source: str, base: str | None) -> dict:
         changed = git_review_check(task, "diff", "--name-only", "-z", "--no-renames", base, source)
     else:
         changed = git_review_check(
-            task, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--no-renames", source,
+            task, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z",
+            "--no-renames", source,
         )
     if changed.returncode:
         raise WorkError("could not determine the paths changed by the approved commit")

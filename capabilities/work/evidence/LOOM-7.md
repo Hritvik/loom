@@ -2,7 +2,16 @@
 
 Repository: `~/repositories/loom`
 Branch: `loom/loom-loom-7` (worktree `/Users/hritvikdinkar/.local/state/loom/worktrees/loom-loom-7`)
-Status: green, submitted for independent review
+Status: green, resubmitted for independent review after rework
+
+## Rework after review 1673
+
+The first submission's receipt was correct for a base..source review but the no-base branch was
+not: `approved_content` had lost `-z` from its `diff-tree` argv while the parser on the following
+lines splits on NUL. That branch is reached exactly when the approved commit is a repository's
+root commit, and it recorded `paths: []` with the empty digest, so the receipt claimed to be
+content bound while binding nothing. Fixed by passing `-z`, which also disables path quoting, and
+adding a regression test that reviews a root commit and then tampers with an approved path.
 
 ## Goal
 
@@ -38,9 +47,10 @@ instead of re-diffing a history that may have moved.
 - `README.md`, `PROTOCOL.md`, `AGENT-GUIDE.md`: the receipt contract, the exact-path failure, and
   the legacy/incomplete rule.
 - Tests: `tests/test_work.py` covers the recorded pairs and digest, the exact moved-path error,
-  a rename verifying by blob (deletion recorded as null), a legacy receipt refused and reported
-  incomplete by transition/tick/validator, and a hand-edited digest failing validation.
-  `tests/test_linear_projection.py` covers the legacy lane.
+  a rename verifying by blob (deletion recorded as null), a review of a root commit (the no-base
+  branch, built on a fresh repository because the fixture's `commit()` always adds an initial
+  commit), a legacy receipt refused and reported incomplete by transition/tick/validator, and a
+  hand-edited digest failing validation. `tests/test_linear_projection.py` covers the legacy lane.
 
 ## Decision points
 
@@ -67,6 +77,10 @@ instead of re-diffing a history that may have moved.
 
 ## Limits
 
+- The no-base diff path is reached only when the reviewed source is a repository's root commit,
+  because `review_base` returns `None` there. It diffs with `-z` to match its NUL-splitting parser,
+  so a root-commit receipt records the root commit's paths instead of an empty list with the empty
+  digest; `test_a_root_commit_review_binds_the_paths_it_approved` is the regression guard.
 - The 23 legacy reviewed receipts need a reopen and a fresh review; this change deliberately does
   not compute their digests. The same applies to the 24 pre-migration `annotate` receipts written
   without `--base`, which keep a null digest and are labelled incomplete in `loom show`.
