@@ -102,7 +102,7 @@ the point:
 ```text
 database   ok        2026-11-15T13:40:33Z  one consistent read of …/work.db: 220 tasks, 25 boards, head 1801
 process    ok        2026-11-15T13:40:33Z  2 live worker process(es) of 2 pending launch(es)
-scheduler  ok        2026-11-15T13:40:33Z  com.hritvik.loom-tick runs every 120s
+scheduler  ok        2026-11-15T13:40:33Z  com.<owner>.loom-tick runs every 120s
 release    ok        2026-11-15T13:40:33Z  release 070ab244f328 … intact and matches the engine sources this UI loaded
 git        degraded  2026-11-15T13:40:33Z  19 of 20 owner repositories sampled; 1 unreadable
 evidence   degraded  2026-11-15T13:40:34Z  40 evidence file(s) present; 80 missing
@@ -133,9 +133,9 @@ exit=2
   is shown as live; the next request corrects it.
 - **The event head and registry come from the same transaction, but the six provenance sources do
   not share one.** That is deliberate and visible on the page.
-- **`validate_work.py` currently reports 22 errors / 78 warnings on the shared registry**, all in
-  other programs' tasks (`myfitnessguide`, `iam`, `jarvis`, `chat`, `ums`). They pre-date this task
-  and none touches `capabilities/work/ui`; they are not introduced or hidden here.
+- **The shared registry is not this task's.** `validate_work.py` was reporting 22 errors when this
+  evidence was written, all in other programs' tasks; they came from process-audit records written
+  by unreleased code and were fixed separately. None touched `capabilities/work/ui`.
 - **Promotion is not done.** `loom deploy promote` and the owner acceptance gate are UI-7.
 
 ## Reproduce

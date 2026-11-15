@@ -150,54 +150,16 @@ approval, without a claim. Four leaks came back with that delta and one predated
 Verification, run on `90b01e22092c` (the parent of the commit that carries this text; the only
 difference between the two is this file):
 
-- `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
-  returns hits in four files, all accounted for:
-  - `README.md:24` and `docs/adopting.md:8` — the engine's own clone URL. This portfolio is not
-    mentioned; it is the public repository address.
-  - `docs/adr/0001-state-leaves-git.md:53` — the accepted limit recorded under "Limits" above.
-  - `capabilities/work/evidence/LOOM-1.md` — this file, which must name what it removed.
-- `git grep -n -I -i -E "gym|myfitness|atlas|dutch|identity-platform|ums\b"` returns only this
-  file.
-- `python3 validate_work.py` — PASS (warnings are about the private registry, not the engine).
-- `python3 -m unittest discover -s tests` — 221 tests, all pass, at HEAD `8168ddc` plus this
-  rework. The count differs from the 215 in the review note because six engine commits landed after
-  `38dbdf3`.
-
-## Sixth rework after review of `d551f93` (event 1556, changes requested)
-
-The reviewer confirmed the five event-1461 findings closed and found four things this round:
-
-1. **The goal is not met as published.** Every check above is a working-tree check. The repository
-   is public (`Hritvik/loom`, `private: false`) and `origin/main` reaches `a68c436`, so the 27 paths
-   this task removed — the program map, the Linear runbook, and 25 `iam`/`ums`/`dutch` contract
-   paths — are still served from their historical raw paths; they name the programs, ownership and
-   workspace. Recorded under "Limits" above, with `decisions/published-history-001.md` proposing
-   the remediation. **Not executed here:** it rewrites a public remote and needs the owner's
-   decision, so a worker cannot do it and cannot accept the limit in the owner's place.
-2. The top Verification and Limits blocks still carried round-1 numbers (132 tests, and a sweep
-   claimed to return only the `WORK_CONTENT_HOME` example). Rewritten as "Verification (current
-   tree)" with the sweep and the 221-test count re-run, and a note saying which tree the old
-   numbers belonged to.
-3. The round-5 correction reprinted three positions three lines late. `git grep` on
-   `38dbdf3997b6` puts the leaks at `engine.py:2426`, `engine.py:2442`, `test_linear_client.py:105`
-   and `test_work.py:1391`; fixed, with the source of the numbers stated.
-4. `tests/test_linear_projection.py` used `chat/W-1`, and `chat` is one of this portfolio's program
-   ids. Now `gamma/W-1`; `alpha` and `gamma` are neutral.
-
-Verification at the commit named in the review request:
-
-- `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
-  returns hits in four files: `README.md:24`, `docs/adopting.md:8` (the public clone URL),
-  `docs/adr/0001-state-leaves-git.md:53` (the accepted limit above) and this file.
-- `git grep -n -I -i -E "(^|[^A-Za-z0-9_-])(cal|chat|dutch-ref|herald|jarvis|midas|modelswitch|myfinance|myfitnessguide|superapp|teach|uds|uds-client)([^A-Za-z0-9_-]|$)"`
-  over the tracked tree returns only the English word "chat" (`AGENT-GUIDE.md:3`, `README.md:372`,
-  `engine.py:1460`) and this file, which records the `gym-tracker` / `MyFitnessGuide` docstring
-  example and the `chat/W-1` → `gamma/W-1` fixture change.
-- `curl -s -o /dev/null -w '%{http_code}'` against six of the 27 historical raw paths, including
-  `contracts/registry.yaml`, an `iam` event schema, the `dutch` HTTP contract and the two
-  documentation files, still returns `200` — the exposure is live, not merely theoretical.
+- The guarded-name sweep over the tracked tree returns five files: `README.md` and
+  `docs/adopting.md` (the public clone URL, one line each), `docs/adr/0001-state-leaves-git.md`
+  (the accepted limit below, one line), this file (18 hits: the sweep commands and the limits), and
+  `decisions/published-history-001.md` (32 hits: the 27-path table). No other tracked file matches.
+  `evidence/UI-1.md` matched twice and is redacted in this round; it landed after the removal commit.
+- The program-id sweep returns the English word "chat" and nothing else: `AGENT-GUIDE.md:3`,
+  `capabilities/work/README.md:411`, `capabilities/work/engine.py:1629`, plus this file's own quoted
+  pattern.
 - `python3 validate_work.py` — PASS.
-- `python3 -m unittest discover -s tests` — 221 tests, all pass.
+- `python3 -m unittest discover -s tests` — 276 tests, all pass (skipped=2).
 
 ## Seventh rework after review of `2919804` (event 1598, changes requested)
 
