@@ -24,15 +24,20 @@ Status: green, submitted for independent review (round 7)
 
 ## Verification (current tree)
 
-- A case-insensitive grep for the portfolio's program names, a personal handle and its private
-  repository slugs over the engine's markdown returns only the example value of
-  `WORK_CONTENT_HOME`.
-- `python3 -m unittest discover -s tests` — 132 tests, all pass.
+Measured at the tree this file ships with; the commit that carries it changes only this file.
+
+- The guarded-name sweep over the tracked tree returns five files and nothing else: `README.md:24`
+  and `docs/adopting.md:8` (the engine's own public clone URL), `docs/adr/0001-state-leaves-git.md:53`
+  (the accepted limit below), this file (11 hits: the sweep commands and the limits), and
+  `decisions/published-history-001.md` (32 hits: the 27-path table).
+- The program-id sweep returns the English word "chat" and nothing else: `AGENT-GUIDE.md:3`,
+  `capabilities/work/README.md:411`, `capabilities/work/engine.py:1629`.
+- `python3 -m unittest discover -s tests` — 276 tests, all pass (skipped=2).
 - `python3 validate_work.py` — PASS; contracts are skipped unless `--contracts` is given.
 
-Earlier drafts of this block said 132 tests and that the sweep returned only the `WORK_CONTENT_HOME`
-example. Both were true of the round-1 tree and neither was true afterwards; they are corrected
-here rather than annotated, because this block is the summary a reviewer reads first.
+The sections below record what each round changed. Their measurements describe the tree of that
+round; they are history, not a second opinion. This block is the authoritative one, and an earlier
+round's number disagreeing with it means the tree moved, not that a claim here is soft.
 
 ## Limits
 
@@ -152,7 +157,7 @@ file, so the measured values below are the ones for the current tree:
 
 - The guarded-name sweep over the tracked tree returns five files: `README.md` and
   `docs/adopting.md` (the public clone URL, one line each), `docs/adr/0001-state-leaves-git.md`
-  (the accepted limit below, one line), this file (18 hits: the sweep commands and the limits), and
+  (the accepted limit below, one line), this file (11 hits: the sweep commands and the limits), and
   `decisions/published-history-001.md` (32 hits: the 27-path table). No other tracked file matches.
   `evidence/UI-1.md` matched twice and is redacted in this round; it landed after the removal commit.
 - The program-id sweep returns the English word "chat" and nothing else: `AGENT-GUIDE.md:3`,
