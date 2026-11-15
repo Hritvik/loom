@@ -209,6 +209,15 @@ def claimability(home: WorkHome, task: dict,
     return usable, unmet + [f"path:{item}" for item in sorted(set(conflicts))]
 
 
+def _dependencies(task: dict, registry: dict | None) -> list[str]:
+    dependencies = list(task.get("depends_on") or [])
+    for edge in (registry or {}).get("edges", []):
+        if edge.get("kind", "depends-on") == "depends-on" and edge.get("from") == task["id"]:
+            if edge.get("to") and edge["to"] not in dependencies:
+                dependencies.append(edge["to"])
+    return dependencies
+
+
 def task_to_a2a(home: WorkHome, task: dict, history_length: int = 0,
                 include_artifacts: bool = False, registry: dict | None = None,
                 events: list[dict] | None = None) -> dict:
@@ -223,7 +232,7 @@ def task_to_a2a(home: WorkHome, task: dict, history_length: int = 0,
         "board": task.get("board"),
         "program": task.get("program"),
         "ownerRepo": task.get("owner_repo"),
-        "dependsOn": task.get("depends_on", []),
+        "dependsOn": _dependencies(task, registry),
         "writePaths": task.get("write_paths", []),
         "claim": task.get("claim"),
         "evidence": task.get("evidence"),

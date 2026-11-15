@@ -2112,8 +2112,11 @@ def roots_path() -> Path:
 
 
 def roots_signature(expired, review_blocked, integration_blocked, reviewed,
-                    rework_held, stalled_reviews, human_blocked, planned_roots) -> str:
+                    rework_held, stalled_reviews, human_blocked, planned_roots,
+                    stuck=()) -> str:
     payload = {
+        "stuck": sorted(f"{item['task']}:{item.get('role')}:{item.get('pid')}"
+                        for item in stuck),
         "expired": sorted(f"{item['task']}:{item.get('expired')}" for item in expired),
         "human_blocked": sorted(human_blocked),
         "planned_roots": sorted(planned_roots),
@@ -2215,6 +2218,19 @@ def cmd_tick(args, store: Store) -> int:
         if record.get("role") == "reviewer" and record.get("state") == "pending"
         and launch_is_live(record)
     ]
+    stuck_after = parse_duration(args.stuck_after)
+    stuck = []
+    for record in latest_launch.values():
+        if record.get("state") != "pending" or not launch_is_live(record):
+            continue
+        try:
+            started = parse_time(record.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        age = (now - started).total_seconds()
+        if age > stuck_after.total_seconds():
+            stuck.append({"task": record["task"], "role": record.get("role"),
+                          "pid": record.get("pid"), "age_minutes": int(age // 60)})
     review_requests, stalled_reviews = open_review_requests(
         store, registry, args.reviewer_identity, args.max_review_attempts)
     review_slots = max(0, limits["reviewer"] - len(live_reviewers))
@@ -2324,9 +2340,11 @@ def cmd_tick(args, store: Store) -> int:
                     or launched or launched_reviews or problems
                     or rework_queued or rework_held or review_reissued or integrated)
     signature = roots_signature(expired, review_blocked, integration_blocked, reviewed,
-                                rework_held, stalled_reviews, human_blocked, planned_roots)
+                                rework_held, stalled_reviews, human_blocked, planned_roots,
+                                stuck)
     has_roots = bool(expired or review_blocked or integration_blocked or reviewed
-                     or rework_held or stalled_reviews or human_blocked or planned_roots)
+                     or rework_held or stalled_reviews or human_blocked or planned_roots
+                     or stuck)
     if args.quiet:
         if not activity:
             if not has_roots:
@@ -2431,6 +2449,11 @@ def cmd_tick(args, store: Store) -> int:
     if planned_roots:
         print("\nPlanned prerequisites:")
         print("  " + ", ".join(planned_roots))
+    if stuck:
+        print(f"\nStuck launches (running longer than {args.stuck_after}):")
+        for item in stuck:
+            print(f"  {item['task']:<22} {item.get('role') or '?':<11} pid {item.get('pid')} "
+                  f"{item['age_minutes']}m")
     if expired:
         print("\nExpired leases to release or take over:")
         for item in expired:
@@ -2893,6 +2916,9 @@ def cmd_reconcile(args, store: Store) -> int:
     for task, board_status in drift:
         if board_status in REVIEW_GATED:
             raise WorkError(f"{task['id']}: cannot reconcile into {board_status}; use the review pipeline")
+        if board_status in ACTIVE_STATES and not task.get("claim"):
+            raise WorkError(
+                f"{task['id']}: cannot adopt active board status {board_status} without a claim")
     with store.transaction():
         for task, board_status in drift:
             previous = task.get("status")
@@ -3231,6 +3257,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="auto-integrations per pass (default 1)")
     tick.add_argument("--no-integrate", action="store_true",
                       help="do not auto-integrate reviewed tasks")
+    tick.add_argument("--stuck-after", default="3h",
+                      help="report live launches older than this (default 3h)")
     tick.add_argument("--coordinator", default=REVIEW_COORDINATOR,
                       help="acting agent that records `reviewed` from an approval")
     tick.add_argument("--json", action="store_true")

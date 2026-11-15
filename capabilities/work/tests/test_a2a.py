@@ -121,6 +121,13 @@ class A2AFacadeTest(unittest.TestCase):
 
         self.assertEqual(run("--root", str(self.ws.root), "events", "--verify").returncode, 0)
 
+    def test_get_task_includes_graph_edges_as_dependencies(self):
+        self.ws.registry["edges"].append(
+            {"from": "demo/W-1", "to": "demo/W-2", "kind": "depends-on"})
+        self.ws.save()
+        result = self.rpc("GetTask", {"id": "demo/W-1"})["result"]
+        self.assertIn("demo/W-2", result["metadata"]["dependsOn"])
+
     def test_independent_review_lifecycle_over_a2a(self):
         git = ["git", "-C", str(self.ws.repo)]
         evidence = self.ws.repo / "evidence" / "W-1.md"

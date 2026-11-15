@@ -1720,6 +1720,29 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("Blocked on an agent", result.stdout)
         self.assertIn("demo/W-9", result.stdout)
 
+    def test_tick_reports_a_stuck_live_launch(self):
+        from engine import process_start
+        from store import iso
+
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "opencode/loom-worker",
+                    "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/reviewer-agent", role="reviewer",
+                                   state="pending", pid=os.getpid(), revision=2, question=1,
+                                   started_at=iso(process_start(os.getpid())),
+                                   now="2020-01-01T00:00:00Z")
+        finally:
+            store.close()
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("Stuck launches", result.stdout)
+        self.assertIn("demo/W-1", result.stdout)
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",
