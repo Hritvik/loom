@@ -2177,6 +2177,26 @@ class WorkCLITest(unittest.TestCase):
         claims = [event for event in self.ws.events() if event.get("event") == "claim"]
         self.assertEqual(len(claims), 1, claims)
 
+    def test_a_superseded_attempt_does_not_close_its_replacement(self):
+        """A closed run's obituary must not outrank the run that replaced it."""
+        self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0)
+        first = self.ws.task_record("demo/W-1")
+        self.invoke("release", "demo/W-1", "--revision", str(first["revision"]),
+                    "--epoch", "1", "--reason", "handing back while the run is live",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        # The second pass claims again and opens a replacement while the first is still running.
+        self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0)
+        # The third supersedes the first. The fourth must leave the replacement alone.
+        for _ in range(2):
+            self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                        "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0)
+        superseded = [event for event in self.ws.events()
+                      if event.get("event") == "attempt" and event.get("task") == "demo/W-1"
+                      and event.get("state") == "superseded"]
+        self.assertEqual(len(superseded), 1, superseded)
+
     def test_validator_does_not_read_process_audit_as_state(self):
         store = self.ws.store()
         try:

@@ -1819,8 +1819,13 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
     def key(item):
         return (item.get("task"), item.get("role") or "implementer", item.get("question"))
 
+    # Only an open attempt can replace another. A closure carries a later seq than the attempt it
+    # closed, so folding every view let a closed run outrank the run that replaced it: the
+    # replacement was then superseded by its predecessor's obituary. Compare live runs only.
     last_seq: dict[tuple, int] = {}
     for item in views.values():
+        if item["state"] in ATTEMPT_TERMINAL:
+            continue
         last_seq[key(item)] = max(last_seq.get(key(item), 0), item.get("last_seq") or 0)
 
     by_id = {task["id"]: task for task in registry["tasks"]}
