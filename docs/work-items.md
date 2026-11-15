@@ -92,3 +92,28 @@ a head check that races the next event.
 **Acceptance.** A second dispatcher or a redelivery finds the intent and spawns nothing. The store
 lock is not held across a spawn. An attempt in `starting` with no launch is retried rather than
 skipped.
+
+## LOOM-11 — Write only the documents a mutation changes
+
+**Status.** Ready.
+
+Every command rewrites the whole registry: `save` deletes and reinserts every task and board
+document. Commit cost therefore grows with registry size, and the event dispatcher cannot afford a
+cursor advance per event. Write only the documents a mutation touches and keep the event log as the
+audit chain.
+
+**Acceptance.** A claim rewrites only the changed task document; untouched task rows are not
+rewritten. Commit cost does not grow linearly with the number of tasks in the registry. The event
+log, its chain and the external checkpoint are unchanged in shape.
+
+## LOOM-12 — Make evidence claims executable
+
+**Status.** Ready. Depends on LOOM-4.
+
+An evidence file asserts test counts, validator results and sweeps; those assertions are believed and
+have already been wrong. Generate or re-derive them so a stale claim fails the build instead of
+persuading a reviewer.
+
+**Acceptance.** A stale test count in an evidence file fails the suite. A claimed validator result is
+re-derived rather than copied. The evidence template marks which lines are machine-checked and which
+are prose.
