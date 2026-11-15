@@ -30,8 +30,9 @@ Measured at the tree this file ships with; the commit that carries it changes on
   and `docs/adopting.md:8` (the engine's own public clone URL), `docs/adr/0001-state-leaves-git.md:53`
   (the accepted limit below), this file (11 hits: the sweep commands and the limits), and
   `decisions/published-history-001.md` (32 hits: the 27-path table).
-- The program-id sweep returns the English word "chat" and nothing else: `AGENT-GUIDE.md:3`,
-  `capabilities/work/README.md:411`, `capabilities/work/engine.py:1629`.
+- The program-id sweep returns the English word "chat" and nothing else, apart from this file, which
+  quotes the pattern: `AGENT-GUIDE.md:3`, `capabilities/work/README.md:411`,
+  `capabilities/work/engine.py:1629`.
 - `python3 -m unittest discover -s tests` — 276 tests, all pass (skipped=2).
 - `python3 validate_work.py` — PASS; contracts are skipped unless `--contracts` is given.
 
@@ -51,6 +52,9 @@ round's number disagreeing with it means the tree moved, not that a claim here i
   program name in the path and one registry naming an owner. All were deleted in one commit,
   `36e2973`; `git show --name-only 36e2973` lists them, which is why this file no longer does.
   Every check here is a working-tree check; none of them can make the goal true as published.
+
+## First rework after review (event 740)
+
 - `task`: `OWNER_DEFAULT` was a person's name; now `WORK_OWNER` or `owner`.
 - `hooks/pre-commit`: the engine path was hardcoded; now derived from the hook's own location, and
   the wrapper resolves `WORK_COORDINATION_HOME` or `git config coordination.home`, else no-ops.
@@ -63,10 +67,6 @@ round's number disagreeing with it means the tree moved, not that a claim here i
 - `validate_work.py` gained `--programs`; it previously globbed a directory that no longer exists
   and silently skipped two checks while the docs promised them.
 - Tests no longer use a person's name or this portfolio's program ids as fixtures.
-
-Verification: a case-insensitive grep for the portfolio's program names, a personal handle and two
-private repository slugs over the tracked tree returns nothing outside `docs/adr/0001` and this
-evidence file. 134 tests pass; validator PASS.
 
 ## Second rework after re-review (event 819, changes requested)
 
@@ -92,9 +92,9 @@ pass replaced every remaining portfolio identifier in the engine with neutral on
   `test_linear_sync.py`
 - the personal repository link in the top-level README
 
-Verification: a case-insensitive grep for the portfolio's program names and one private repository
-slug over the tracked tree returns nothing outside `docs/adr/0001` and this evidence file. 134 tests
-pass; validator PASS.
+Verification at that round (false; corrected immediately below): a case-insensitive grep for the
+portfolio's program names and one private repository slug over the tracked tree returns nothing
+outside `docs/adr/0001` and this evidence file; 134 tests pass; validator PASS.
 
 Correction (round 4): that claim was false. The pattern still matched `README.md:49` (a private
 repository slug), three `task` CLI examples still used a program name, and BSD `grep -E` does not
