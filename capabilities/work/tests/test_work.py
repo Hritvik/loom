@@ -1864,6 +1864,25 @@ class WorkCLITest(unittest.TestCase):
         preview = self.invoke("tick", "--max-implementer", "2", "--now", T0).stdout
         self.assertIn("capacity: implementer 1/2", preview)
 
+    def test_a_shadowed_launch_still_holds_its_slot(self):
+        from engine import process_start
+        from store import iso
+
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                                   role="implementer", state="pending", pid=os.getpid(),
+                                   started_at=iso(process_start(os.getpid())), revision=0, now=T0)
+                # A relaunch writes a newer record for the same task with a different pid.
+                store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                                   role="implementer", state="pending", pid=os.getppid(),
+                                   started_at=iso(process_start(os.getppid())), revision=1, now=T0)
+        finally:
+            store.close()
+        preview = self.invoke("tick", "--max-implementer", "4", "--now", T0).stdout
+        self.assertIn("capacity: implementer 2/4", preview)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",

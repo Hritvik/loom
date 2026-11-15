@@ -2668,13 +2668,25 @@ def cmd_tick(args, store: Store) -> int:
     # a live launch is an agent actually running. Deriving capacity from claims let a released or
     # regressed claim free a slot while its worker kept running, and a green task's claim shrink
     # the pool while its review was pending.
-    # A launch closed as done or failed can still have a live process: the worker may be winding
-    # down after its task advanced. Counting the process, not the bookkeeping state, keeps the
-    # slot until the agent has actually exited.
-    live_launches = [
-        record for record in latest_launch.values()
-        if record.get("pid") and launch_is_live(record)
-    ]
+    # A launch closed as done or failed can still have a live process, and a relaunch writes a
+    # newer record for the same task, shadowing the older one. Keying on the latest record per
+    # task therefore loses orphans: after an over-launch, the original worker keeps running while
+    # capacity reads only the dead replacement. Consider every recent launch, deduplicated by pid,
+    # so two live processes for one task occupy two slots. The window bounds the ps calls; a
+    # worker cannot outlive its lease by more than a few hours.
+    window = dt.timedelta(hours=6)
+    by_pid: dict[int, dict] = {}
+    for record in records:
+        if record.get("event") != "launch" or not record.get("pid"):
+            continue
+        try:
+            age = now - parse_time(record.get("ts"))
+        except (TypeError, ValueError):
+            age = dt.timedelta(0)
+        if age > window:
+            continue
+        by_pid[int(record["pid"])] = record
+    live_launches = [record for record in by_pid.values() if launch_is_live(record)]
     active = {role: 0 for role in ROLES}
     for record in live_launches:
         role = record.get("role") or "implementer"
