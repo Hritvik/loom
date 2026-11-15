@@ -2168,9 +2168,11 @@ class WorkCLITest(unittest.TestCase):
             results = list(pool.map(pass_once, range(2)))
         self.assertTrue(all(result.returncode == 0 for result in results),
                         [result.stderr for result in results])
+        # The run's state lives on the attempt now, so the launch record may carry no state.
+        # Assert the invariant, not the shape: one claim, one spawn, no duplicate.
         launches = [event for event in self.ws.events()
                     if event.get("event") == "launch" and event.get("role") == "implementer"
-                    and event.get("state") == "pending"]
+                    and event.get("closes") is None]
         self.assertEqual(len(launches), 1, launches)
         claims = [event for event in self.ws.events() if event.get("event") == "claim"]
         self.assertEqual(len(claims), 1, claims)
