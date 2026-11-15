@@ -1896,6 +1896,17 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(record["limits"]["implementer"], 1)
         self.assertEqual(len(record["launched"]), 1)
 
+    def test_two_tasks_sharing_a_write_path_are_not_launched_together(self):
+        self.invoke("create", "--agent", "agent-a", "--now", T0,
+                    "--id", "demo/W-6", "--board", "demo.board", "--title", "Same path",
+                    "--status", "ready", "--write-path", "src/one")
+        preview = json.loads(self.invoke(
+            "tick", "--json", "--max-implementer", "2", "--now", T0).stdout)
+        chosen = [item["task"] for item in preview["chosen"]]
+        self.assertEqual(len(chosen), 1, preview["chosen"])
+        reasons = [item.get("reason", "") for item in preview["held"]]
+        self.assertTrue(any("write path reserved" in reason for reason in reasons), reasons)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",

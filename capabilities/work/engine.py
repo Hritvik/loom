@@ -2726,14 +2726,27 @@ def cmd_tick(args, store: Store) -> int:
             "title": task.get("title"),
             "revision": task.get("revision", 0),
             "unblocks": len(transitive_dependents(index, task["id"])),
+            "writePaths": list(task.get("write_paths") or []),
         })
     candidates.sort(key=lambda item: (-item["unblocks"], item["task"]))
     slots = {role: limits[role] - active[role] for role in ROLES}
     chosen, held = [], []
+    # A conflict check against claims cannot see the sibling this pass just chose, so two tasks
+    # sharing a write path were launched together into separate worktrees and collided at merge.
+    # Reserve each chosen task's paths for the rest of the selection.
+    reserved: list[tuple[str, str]] = []
     for item in candidates:
+        clash = next((
+            f"{path} overlaps {owner}:{other}"
+            for path in item["writePaths"] for owner, other in reserved
+            if paths_overlap(path, other)), None)
+        if clash:
+            held.append({**item, "reason": f"write path reserved this pass: {clash}"})
+            continue
         if slots[item["role"]] > 0:
             slots[item["role"]] -= 1
             chosen.append(item)
+            reserved.extend((item["task"], path) for path in item["writePaths"])
         else:
             held.append({**item, "reason": f"no {item['role']} slot (limit {limits[item['role']]})"})
 
