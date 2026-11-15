@@ -1,7 +1,7 @@
 # Evidence — LOOM-7 bind an integration receipt to the content it approved
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-7` (worktree `/Users/hritvikdinkar/.local/state/loom/worktrees/loom-loom-7`)
+Branch: `loom/loom-loom-7` (worktree `~/.local/state/loom/worktrees/loom-loom-7`)
 Status: green, resubmitted for independent review after rework
 
 ## Rework after review 1673
