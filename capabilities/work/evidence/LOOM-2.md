@@ -10,8 +10,8 @@ evidence file and nothing else, so the templates and the taxonomy under review a
 to the tree the delta review inspected at `38dbdf3`:
 
 ```bash
-git diff --stat 38dbdf3..<submitted commit> -- docs templates   # empty
-git diff --stat 8168ddc..<submitted commit> -- docs templates   # empty
+git diff --stat 38dbdf3..<submitted commit> -- docs/artifacts.md templates   # empty
+git diff --stat 8168ddc..<submitted commit> -- docs/artifacts.md templates   # empty
 ```
 
 ## Delivered
@@ -34,7 +34,7 @@ starter (see below the table).
 `templates/linear-portfolio.example.json` is the ninth file under `templates/` and is **not** an
 artefact starter: it is the example state and label map for
 `~/.config/loom/linear-portfolio.json`, and the only pointer to it is
-`capabilities/work/README.md:437-438`. It is listed here so the table is not read as a complete
+`capabilities/work/README.md:476-477`. It is listed here so the table is not read as a complete
 inventory of the directory.
 
 `docs/artifacts.md` is the index: its kind table has seven rows and its template table has eight,
@@ -78,9 +78,9 @@ Run from the worktree root unless a step says otherwise.
    python3 -m unittest discover -s tests
    ```
 
-   Result at `82f8bcd`: `Ran 221 tests in 70.733s` — `OK`. `grep -rn "    def test_" tests --include='*.py'
-   | wc -l` also returns `221`, so the runner's number and the source's number agree.
-   This number is measured on the branch being submitted, not carried over from an older commit.
+   Result at this commit: `Ran 276 tests` — `OK (skipped=2)`. `grep -rn "    def test_"
+   tests --include='*.py' | wc -l` also returns `276`, so the runner's number and the source's
+   number agree. The two skips are the private denylist checks, which need `LOOM_BOUNDARY_DENYLIST`.
 
 5. **The registry validates.** From `capabilities/work`:
 
@@ -88,15 +88,15 @@ Run from the worktree root unless a step says otherwise.
    python3 validate_work.py
    ```
 
-   Result at `82f8bcd`: `PASS`, 72 warnings and no errors. Two of the 72 name this task:
+   Result at this commit: `PASS`, 78 warnings and no errors. One of the 78 names this task:
 
-   - `WARN  write-path overlap within ~/repositories/loom: docs in loom/LOOM-1 and loom/LOOM-2` —
-     it follows from the declared paths and is the coordinator's to sequence, not something this
-     diff can clear.
    - `WARN  loom/LOOM-2: registry says …, program says reviewed` — the registry-versus-program
      drift described in Limits. The registry side of the message tracks the task's current status,
      so this is the shape of the warning rather than one snapshot of it: it read `green` at
      `82f8bcd` and reads `claimed` while a worker holds the claim.
+
+   The rest is shared registry state, including 21 reviewed tasks whose receipts record no approved
+   content digest. None of it comes from this diff.
 
    The remaining 70 are conditions of the shared registry and of other boards: stale program-board
    revisions and dependency drift on other boards, expired and legacy (epoch-less) claims on other
@@ -114,7 +114,7 @@ Run from the worktree root unless a step says otherwise.
    after the approved commit. For this task's paths it did not move after the reviewed point:
 
    ```bash
-   git diff --stat 38dbdf3..82f8bcd -- docs templates   # empty
+   git diff --stat 38dbdf3..82f8bcd -- docs/artifacts.md templates   # empty
    git diff --stat 2be45cc..82f8bcd -- docs templates   # the whole delta this task ever had
    ```
 
@@ -132,13 +132,14 @@ Run from the worktree root unless a step says otherwise.
   added such a pointer (`git log -S "templates/" -- README.md` is empty). An adopter who starts at
   the README cannot get to a template without guessing a path. The reachable pointers today are
   `docs/artifacts.md` (the template table) and `docs/adopting.md:103-104`.
-  `README.md` is outside this task's write paths (`docs`, `templates`) and is a shared file in the
+  `README.md` is outside this task's declared write path (`capabilities/work/evidence/LOOM-2.md`)
+  and is a shared file in the
   commit guard, so this submission does not change it. **Recommended follow-up:** a task on
   `README.md` that adds one line pointing at `docs/artifacts.md` and `docs/adopting.md`.
 - **The program board's status lines drift from the registry.** `docs/work-items.md:7`, `:11` and
   `:15` mark LOOM-1, LOOM-2 and LOOM-3 `**Status.** Reviewed.` — text this task's range introduced
   at `2be45cc` — while the registry holds them green, claimed and green. `validate_work.py:436-443`
-  warns on each. The board file is inside this task's write paths (`docs`), but a status line is a
+  warns on each. The board file is outside this task's declared write path, but a status line is a
   projection of the registry and belongs to the board sync, not to a worker editing three tasks'
   entries to make its own warning disappear; doing that here would also fight the next claim and
   release. **Recommended follow-up:** the coordinator runs
@@ -160,10 +161,9 @@ Run from the worktree root unless a step says otherwise.
   state leaving git; replacing it is not part of publishing templates.
 - **`docs/adopting.md:11` carries a doubled trailing comment.** The `coordination.home` line ends
   with two `#` comments in one line, introduced by `d954e99` inside the reviewed range. The file
-  is inside this task's write paths (`docs`, per `loom show loom/LOOM-2` and the guard's
-  `covers()` in `capabilities/work/hooks/pre-commit:100-105`), but it is LOOM-3's deliverable, and
-  `loom show loom/LOOM-3` declares no write paths at all — so no LOOM-3 worker can commit it
-  either. This submission leaves the text alone rather than editing another task's deliverable
+  is outside this task's declared write path (`capabilities/work/evidence/LOOM-2.md`); it is
+  LOOM-3's deliverable, and `loom show loom/LOOM-3` declares five paths including
+  `docs/adopting.md`, so LOOM-3 can commit it and should. This submission leaves the text alone rather than editing another task's deliverable
   under this claim. **Recommended follow-up:** give LOOM-3 the write path and have it fix the
   line, or add it to a documentation-cleanup task.
 
@@ -174,7 +174,7 @@ plus `agents-block.md`, the seven-row kind table against the eight-row template 
 template links, the empty portfolio-instance grep, the YAML and JSON parses,
 `contract-registry.yaml`'s field names against `check_contracts`, the `agents-block` commands
 against `./loom claim --help`, the `efc1b0d..82f8bcd` range touching only this file, and a
-re-measured 221 tests — and rejected one sentence. No template, taxonomy or test-count change was
+re-measured 276 tests — and rejected one sentence. No template, taxonomy or test-count change was
 needed.
 
 1. **A second warning names this task, and the "not of this diff" clause was too broad.** The
@@ -189,7 +189,7 @@ needed.
 
 The reviewer confirmed the deliverable — the template set, the seven-versus-eight table, the
 absence of a portfolio instance, the `agents-block` commands against `./loom claim --help`, the
-`contract-registry.yaml` field names against `check_contracts`, and the re-measured 221 tests — and
+`contract-registry.yaml` field names against `check_contracts`, and the re-measured 221 tests at that round — and
 rejected the record on three points. All three are corrected above; no template or taxonomy
 content changed.
 
@@ -216,5 +216,6 @@ templates; both were corrected in `efc1b0d` and confirmed fixed by the reviewer 
 
 1. **"README.md points at the directory" was false.** It does not — see Limits. The claim is gone
    and the gap is stated as a limit with a follow-up recommendation.
-2. **"132 tests" / "134 tests" were both wrong.** Measured here: 221, with the command recorded
-   above so the number can be reproduced rather than trusted.
+2. **"132 tests" / "134 tests" were both wrong.** Measured at that round: 221, with the command
+   recorded above so the number can be reproduced rather than trusted. The tree has grown since;
+   the current measurement is in step 4.
