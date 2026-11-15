@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -62,6 +63,38 @@ def legacy_home(root: Path, registry: dict, events: int = 1) -> FileStore:
     store = FileStore(root)
     store.load()
     return store
+
+
+class Writes:
+    """Record the statements a block issues against the document tables.
+
+    The store's promise is that a commit touches the rows it changed. Counting statements is the
+    direct test of that: a trace of the connection shows exactly which rows a commit rewrote.
+    """
+
+    def __init__(self, store: SqliteStore):
+        self.store = store
+        self.statements: list[str] = []
+
+    def __enter__(self):
+        self.store.connection.set_trace_callback(self._record)
+        return self
+
+    def __exit__(self, *exc):
+        self.store.connection.set_trace_callback(None)
+        return False
+
+    def _record(self, statement: str) -> None:
+        if statement.split(None, 1)[0].upper() in {"INSERT", "UPDATE", "DELETE"}:
+            self.statements.append(statement)
+
+    def to(self, table: str) -> list[str]:
+        return [statement for statement in self.statements
+                if re.search(rf"\b(?:INTO|UPDATE|FROM)\s+{table}\b", statement)]
+
+    def touched(self) -> int:
+        """Write statements against the registry documents, ignoring the event log."""
+        return sum(len(self.to(table)) for table in ("tasks", "boards", "edges", "claims"))
 
 
 class StoreTest(unittest.TestCase):
@@ -381,6 +414,200 @@ class StoreTest(unittest.TestCase):
         self.assertIsInstance(make_store(self.ws.root, "sqlite", self.db), SqliteStore)
         with self.assertRaises(Exception):
             make_store(self.ws.root, "postgres")
+
+    # --- differential writes -------------------------------------------------------------
+    #
+    # The CLI still hands the store a whole registry. What must not grow is what the store
+    # *writes*: a mutation touches only the documents it changed and leaves the rest alone.
+
+    def _saved(self) -> SqliteStore:
+        """A store whose database already holds the fixture registry."""
+        sqlite = self.sqlite()
+        sqlite.registry = self.ws.load()
+        with sqlite.lock():
+            sqlite.save()
+        return sqlite
+
+    def _scaled(self, count: int) -> dict:
+        """The fixture registry padded with synthetic tasks, for size sensitivity."""
+        registry = self.ws.load()
+        template = registry["tasks"][0]
+        for index in range(count - len(registry["tasks"])):
+            task = json.loads(json.dumps(template))
+            task["id"] = f"demo/S-{index}"
+            task["title"] = f"Synthetic {index}"
+            registry["tasks"].append(task)
+        return registry
+
+    def test_a_claim_rewrites_only_the_changed_task_document(self):
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                task = next(item for item in registry["tasks"] if item["id"] == "demo/W-1")
+                task["status"] = "claimed"
+                task["revision"] = 1
+                with Writes(sqlite) as writes:
+                    sqlite.commit(event="claim", task="demo/W-1", agent="agent-a",
+                                  status="claimed", revision=1, now=T0)
+            task_writes = writes.to("tasks")
+            self.assertEqual(len(task_writes), 1, task_writes)
+            self.assertTrue(task_writes[0].startswith("UPDATE tasks"), task_writes[0])
+            for table in ("boards", "edges", "claims"):
+                self.assertEqual(writes.to(table), [], f"{table} were rewritten")
+        finally:
+            sqlite.close()
+
+    def test_write_amplitude_does_not_grow_with_the_registry(self):
+        touched, stored = {}, {}
+        for size in (4, 400):
+            sqlite = SqliteStore(self.ws.root, Path(self.tmp.name) / f"scale-{size}.db")
+            try:
+                sqlite.registry = self._scaled(size)
+                with sqlite.lock():
+                    sqlite.save()
+                with sqlite.lock():
+                    registry = sqlite.load()
+                    first = registry["tasks"][0]
+                    first["status"] = "claimed"
+                    with Writes(sqlite) as writes:
+                        sqlite.commit(event="claim", task=first["id"], agent="agent-a",
+                                      status="claimed", revision=1, now=T0)
+                touched[size] = writes.touched()
+                stored[size] = len(sqlite.load()["tasks"])
+            finally:
+                sqlite.close()
+        self.assertEqual(stored, {4: 4, 400: 400})
+        self.assertEqual(touched[4], 1)
+        self.assertEqual(touched[400], touched[4],
+                         "commit amplitude grew with the registry")
+
+    def test_an_unchanged_registry_is_not_rewritten(self):
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                sqlite.load()
+                with Writes(sqlite) as writes:
+                    sqlite.save()
+            self.assertEqual(writes.touched(), 0, writes.statements)
+        finally:
+            sqlite.close()
+
+    def test_a_changed_document_keeps_its_place_in_the_registry(self):
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                registry["tasks"][0]["title"] = "Renamed"
+                sqlite.save()
+                after = sqlite.load()
+        finally:
+            sqlite.close()
+        self.assertEqual([task["id"] for task in after["tasks"]],
+                         ["demo/W-1", "demo/W-2", "demo/W-3", "demo/W-4"])
+        self.assertEqual(after["tasks"][0]["title"], "Renamed")
+
+    def test_a_document_dropped_from_the_registry_is_deleted(self):
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                registry["tasks"] = [task for task in registry["tasks"]
+                                     if task["id"] != "demo/W-2"]
+                with Writes(sqlite) as writes:
+                    sqlite.save()
+                after = sqlite.load()
+            self.assertEqual(len(writes.to("tasks")), 1, writes.to("tasks"))
+            self.assertTrue(writes.to("tasks")[0].startswith("DELETE FROM tasks"))
+        finally:
+            sqlite.close()
+        self.assertEqual([task["id"] for task in after["tasks"]],
+                         ["demo/W-1", "demo/W-3", "demo/W-4"])
+
+    def test_an_edge_change_writes_only_that_edge(self):
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                registry["edges"].append({"from": "demo/W-2", "to": "demo/W-3",
+                                          "kind": "depends-on"})
+                with Writes(sqlite) as writes:
+                    sqlite.save()
+                after = sqlite.load()
+            self.assertEqual(len(writes.to("edges")), 1, writes.to("edges"))
+            self.assertEqual(writes.to("tasks"), [])
+        finally:
+            sqlite.close()
+        self.assertEqual([edge["from"] for edge in after["edges"]], ["demo/W-2"])
+
+    def test_a_registry_assigned_without_a_load_replaces_the_stored_documents(self):
+        """`loom migrate --force` sets `registry` directly; stale rows must still go."""
+        sqlite = self._saved()
+        try:
+            replacement = self.ws.load()
+            replacement["tasks"] = replacement["tasks"][:1]
+            replacement["boards"] = []
+            with sqlite.lock():
+                sqlite.registry = replacement
+                sqlite.save()
+            after = sqlite.load()
+        finally:
+            sqlite.close()
+        self.assertEqual([task["id"] for task in after["tasks"]], ["demo/W-1"])
+        self.assertEqual(after["boards"], [])
+
+    def test_a_stale_second_store_does_not_duplicate_a_document(self):
+        """Two stores in one process share the file lock, so neither may clobber the other's rows."""
+        first = self._saved()
+        second = SqliteStore(self.ws.root, self.db)
+        try:
+            second.load()
+            task = json.loads(json.dumps(first.load()["tasks"][0]))
+            task["id"] = "demo/W-5"
+            with first.lock():
+                registry = first.load()
+                registry["tasks"].append(task)
+                first.save()
+            with second.lock():
+                second.registry["tasks"].append(json.loads(json.dumps(task)))
+                second.save()
+            after = second.load()
+        finally:
+            second.close()
+            first.close()
+        self.assertEqual([item["id"] for item in after["tasks"]],
+                         ["demo/W-1", "demo/W-2", "demo/W-3", "demo/W-4", "demo/W-5"])
+
+    def test_a_rolled_back_commit_leaves_the_change_pending(self):
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                task = registry["tasks"][0]
+                task["title"] = "Renamed"
+                original = sqlite._append_event
+
+                def boom(**fields):
+                    raise RuntimeError("event append failed")
+
+                sqlite._append_event = boom
+                try:
+                    with self.assertRaises(RuntimeError):
+                        sqlite.commit(event="annotate", task=task["id"], status="ready", now=T0)
+                finally:
+                    sqlite._append_event = original
+                stored = json.loads(sqlite.connection.execute(
+                    "SELECT body FROM tasks WHERE id = 'demo/W-1'").fetchone()["body"])
+                self.assertEqual(stored["title"], "Task demo/W-1", "the rollback lost a document")
+                # A retry must still write: the store kept no memory of the rolled-back attempt.
+                registry = sqlite.load()
+                registry["tasks"][0]["title"] = "Renamed"
+                with Writes(sqlite) as writes:
+                    sqlite.commit(event="annotate", task="demo/W-1", status="ready", now=T0)
+            self.assertEqual(len(writes.to("tasks")), 1, writes.to("tasks"))
+            self.assertEqual(sqlite.load()["tasks"][0]["title"], "Renamed")
+        finally:
+            sqlite.close()
 
 
 if __name__ == "__main__":

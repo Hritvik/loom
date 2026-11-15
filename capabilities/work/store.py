@@ -2,9 +2,10 @@
 
 The CLI works in whole-registry units — load, decide, commit — so both backends implement that
 coarse contract. Writes require the sidecar lock. `SqliteStore` commits the registry and its event
-in one transaction, keeps tasks and boards as documents, reads registry+events as one snapshot, and
-mirrors the chain head outside the database. `FileStore` is the legacy importer only; its writes
-are sequential, not atomic. See `docs/adr/0002-store-is-a-document-log.md`.
+in one transaction, keeps tasks and boards as documents, writes only the documents a mutation
+changed, reads registry+events as one snapshot, and mirrors the chain head outside the database.
+`FileStore` is the legacy importer only; its writes are sequential, not atomic. See
+`docs/adr/0002-store-is-a-document-log.md`.
 """
 from __future__ import annotations
 
@@ -315,9 +316,10 @@ class SqliteStore(Store):
     """One SQLite file. Tasks and boards are documents; edges and meta are relational.
 
     A task body is the authoritative record. The only structured copies are expression indexes
-    derived from it, so the columns cannot disagree with the document. Whole-registry saves rewrite
-    every document, which is the price of the coarse CLI contract; intent-level operations can
-    replace that later without changing the file format.
+    derived from it, so the columns cannot disagree with the document. The CLI still hands over a
+    whole registry, but the write is differential: a save compares each document against the body
+    recorded when it was read and touches only the rows that differ, so commit cost follows the
+    change set rather than the size of the registry.
     """
 
     def __init__(self, root: Path, db_path: Path | None = None):
@@ -335,6 +337,9 @@ class SqliteStore(Store):
         self._tx_depth = 0
         self._read_depth = 0
         self._last_event: dict | None = None
+        # What the database holds, as `load()` or the first write found it. A save diffs against
+        # this, so only changed documents reach the disk; `None` means "not read yet".
+        self._stored: dict | None = None
 
     def _upgrade(self) -> None:
         """Bring an existing database up to the current schema without losing events."""
@@ -428,8 +433,9 @@ class SqliteStore(Store):
         checkpoint_event = None
         try:
             yield self
-            self._write_registry()
+            pending = self._write_registry()
             self.connection.execute("COMMIT")
+            self._stored = pending
             if self._last_event is not before and self._last_event is not None:
                 checkpoint_event = self._last_event
         except BaseException:
@@ -451,50 +457,108 @@ class SqliteStore(Store):
                     for row in self.connection.execute("SELECT key, value FROM meta")}
             if meta.get("kind") != REGISTRY_KIND:
                 raise WorkError(f"missing registry at {self.db_path}")
+            board_rows = [(row["id"], row["body"]) for row in
+                          self.connection.execute("SELECT id, body FROM boards ORDER BY rowid")]
+            task_rows = [(row["id"], row["body"]) for row in
+                         self.connection.execute("SELECT id, body FROM tasks ORDER BY rowid")]
+            edge_rows = {(row["from_task"], row["to_task"], row["kind"]) for row in
+                         self.connection.execute("SELECT from_task, to_task, kind FROM edges")}
+            claim_rows = [(row["artifact"], row["body"]) for row in
+                          self.connection.execute("SELECT artifact, body FROM claims ORDER BY rowid")]
             data = {
                 "kind": REGISTRY_KIND,
                 "version": int(meta.get("version", 1)),
                 "updated": meta.get("updated", ""),
-                "boards": [json.loads(row["body"]) for row in
-                           self.connection.execute("SELECT body FROM boards ORDER BY rowid")],
-                "tasks": [json.loads(row["body"]) for row in
-                          self.connection.execute("SELECT body FROM tasks ORDER BY rowid")],
-                "edges": [dict(row) for row in
-                          self.connection.execute("SELECT from_task AS \"from\", to_task AS \"to\", kind FROM edges")],
-                "claims": [json.loads(row["body"]) for row in
-                           self.connection.execute("SELECT body FROM claims ORDER BY rowid")],
+                "boards": [json.loads(body) for _, body in board_rows],
+                "tasks": [json.loads(body) for _, body in task_rows],
+                "edges": [{"from": edge[0], "to": edge[1], "kind": edge[2]} for edge in edge_rows],
+                "claims": [json.loads(body) for _, body in claim_rows],
             }
-            data["edges"] = [{"from": edge["from"], "to": edge["to"], "kind": edge["kind"]}
-                             for edge in data["edges"]]
+            self._stored = {
+                "meta": meta,
+                "boards": dict(board_rows),
+                "tasks": dict(task_rows),
+                "edges": edge_rows,
+                "claims": dict(claim_rows),
+            }
         self.registry = data
         return data
 
-    def _write_registry(self) -> None:
+    def _read_stored(self) -> dict:
+        """The rows on disk, for a caller that set `registry` without reading it first."""
+        return {
+            "meta": {row["key"]: row["value"]
+                     for row in self.connection.execute("SELECT key, value FROM meta")},
+            "boards": {row["id"]: row["body"]
+                       for row in self.connection.execute("SELECT id, body FROM boards")},
+            "tasks": {row["id"]: row["body"]
+                      for row in self.connection.execute("SELECT id, body FROM tasks")},
+            "edges": {(row["from_task"], row["to_task"], row["kind"])
+                      for row in self.connection.execute("SELECT from_task, to_task, kind FROM edges")},
+            "claims": {row["artifact"]: row["body"]
+                       for row in self.connection.execute("SELECT artifact, body FROM claims")},
+        }
+
+    def _sync_documents(self, documents, key: str, table: str, column: str,
+                        stored: dict[str, str]) -> dict[str, str]:
+        """Write only the documents whose serialised body differs from what is stored.
+
+        `UPDATE` keeps an existing row where it is, so a task keeps its place in the registry
+        order when it changes; only a new document is appended.
+        """
+        current: dict[str, str] = {}
+        for document in documents:
+            identifier = str(document[key])
+            body = _dump(document)
+            current[identifier] = body
+            if stored.get(identifier) == body:
+                continue
+            # The row decides whether it exists, so a stale cache cannot turn a change into a
+            # lost or a duplicated document.
+            updated = self.connection.execute(
+                f"UPDATE {table} SET body = ? WHERE {column} = ?", (body, identifier))
+            if updated.rowcount == 0:
+                self.connection.execute(
+                    f"INSERT INTO {table} ({column}, body) VALUES (?, ?)", (identifier, body))
+        for identifier in stored:
+            if identifier not in current:
+                self.connection.execute(f"DELETE FROM {table} WHERE {column} = ?", (identifier,))
+        return current
+
+    def _sync_edges(self, edges, stored: set) -> set:
+        current = {(edge["from"], edge["to"], edge.get("kind", "depends-on")) for edge in edges}
+        for edge in current - stored:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO edges (from_task, to_task, kind) VALUES (?, ?, ?)", edge)
+        for edge in stored - current:
+            self.connection.execute(
+                "DELETE FROM edges WHERE from_task = ? AND to_task = ? AND kind = ?", edge)
+        return current
+
+    def _write_registry(self) -> dict:
+        """Persist the registry difference and return the rows the database now holds."""
         self.registry["updated"] = iso(parse_now(None))[:10]
         registry = self.registry
-        self.connection.execute("DELETE FROM boards")
-        self.connection.execute("DELETE FROM tasks")
-        self.connection.execute("DELETE FROM edges")
-        self.connection.execute("DELETE FROM claims")
-        for board in registry.get("boards", []):
-            self.connection.execute(
-                "INSERT INTO boards (id, body) VALUES (?, ?)", (board["id"], _dump(board)))
-        for task in registry.get("tasks", []):
-            self.connection.execute(
-                "INSERT INTO tasks (id, body) VALUES (?, ?)", (task["id"], _dump(task)))
-        for edge in registry.get("edges", []):
-            self.connection.execute(
-                "INSERT OR IGNORE INTO edges (from_task, to_task, kind) VALUES (?, ?, ?)",
-                (edge["from"], edge["to"], edge.get("kind", "depends-on")))
-        for claim in registry.get("claims", []):
-            self.connection.execute(
-                "INSERT OR REPLACE INTO claims (artifact, body) VALUES (?, ?)",
-                (claim["artifact"], _dump(claim)))
+        stored = self._stored if self._stored is not None else self._read_stored()
+        pending = {
+            "meta": stored["meta"],
+            "boards": self._sync_documents(
+                registry.get("boards", []), "id", "boards", "id", stored["boards"]),
+            "tasks": self._sync_documents(
+                registry.get("tasks", []), "id", "tasks", "id", stored["tasks"]),
+            "edges": self._sync_edges(registry.get("edges", []), stored["edges"]),
+            "claims": self._sync_documents(
+                registry.get("claims", []), "artifact", "claims", "artifact", stored["claims"]),
+        }
         for key, value in (("kind", REGISTRY_KIND), ("version", str(registry.get("version", 1))),
                            ("updated", str(registry.get("updated", "")))):
+            if stored["meta"].get(key) == value:
+                continue
             self.connection.execute(
                 "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value))
+            pending["meta"] = {**pending["meta"], key: value}
+        return pending
 
     def save(self) -> None:
         self._require_lock()

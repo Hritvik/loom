@@ -161,6 +161,10 @@ duplicated columns. A mutation commits the registry and its event in one transac
 `work.db.head` mirrors the chain head. `loom events --verify` checks both; see
 `docs/adr/0002-store-is-a-document-log.md` for the threat model.
 
+The commit is differential: the store remembers the body it read for each document and writes
+only the ones the command changed, so a claim updates one task row instead of rewriting the
+registry. The event log is unchanged by this — it was and remains the audit chain.
+
 ```bash
 ./loom list --ready                                                    # default store
 ./loom migrate --from <old work home> --to ~/.local/state/loom/work.db # import a file home
