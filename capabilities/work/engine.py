@@ -1606,7 +1606,7 @@ ATTEMPT_START_GRACE = "10m"
 
 
 def attempt_number(attempt_id) -> int:
-    """The ordinal inside `demo/W-1#a3`, so attempts of one task sort by identity.
+    """The ordinal inside `<task>#a3`, so attempts of one task sort by identity.
 
     A launch from before attempts existed is folded as `<task>#legacy<seq>`; it has no ordinal and
     sorts before the numbered runs of the same task.
@@ -1618,7 +1618,7 @@ def attempt_number(attempt_id) -> int:
 
 
 def attempt_suffix(attempt_id) -> str:
-    """`demo/W-1#a3` -> `a3`: the part of the identity that names the checkout and the branch."""
+    """`<task>#a3` -> `a3`: the part of the identity that names the checkout and the branch."""
     text = str(attempt_id or "")
     return text.split("#", 1)[1] if "#" in text else ""
 
