@@ -74,23 +74,22 @@ def database(_source: str, sampled: str, snapshot: Snapshot) -> Signal:
 
 
 def process(_source: str, sampled: str, snapshot: Snapshot) -> Signal:
-    latest: dict[str, dict] = {}
-    for event in snapshot.events:
-        if event.get("event") == "launch" and event.get("task"):
-            latest[event["task"]] = event
-    pending = [event for event in latest.values() if event.get("state") == "pending"]
-    live, unreadable = [], []
-    for event in pending:
-        if not event.get("pid"):
-            unreadable.append(event.get("task", ""))
-            continue
-        if engine.launch_is_live(event):
-            live.append(event)
-    detail = f"{len(live)} live worker process(es) of {len(pending)} pending launch(es)"
+    """Live workers, folded the way the engine folds them.
+
+    The engine stopped writing a state on `launch` records; the run's state lives on an `attempt`.
+    Reading `state == "pending"` here would report zero live processes while workers run, which is
+    the one thing this surface exists to catch.
+    """
+    views = engine.attempt_views(snapshot.events)
+    live = engine.live_attempts(views)
+    open_attempts = [item for item in views.values()
+                     if item.get("state") not in engine.ATTEMPT_TERMINAL]
+    unreadable = [item.get("task", "") for item in open_attempts if not item.get("pid")]
+    detail = f"{len(live)} live worker process(es) of {len(open_attempts)} open attempt(s)"
     status = OK
     if unreadable:
         status = DEGRADED
-        detail += f"; {len(unreadable)} pending launch(es) carry no pid"
+        detail += f"; {len(unreadable)} open attempt(s) carry no pid"
     return Signal(
         source="process",
         status=status,
@@ -98,11 +97,11 @@ def process(_source: str, sampled: str, snapshot: Snapshot) -> Signal:
         detail=detail,
         data={
             "live": [
-                {"task": event.get("task"), "role": event.get("role"), "pid": event.get("pid"),
-                 "branch": event.get("branch")}
-                for event in live
+                {"task": item.get("task"), "role": item.get("role"), "pid": item.get("pid"),
+                 "branch": item.get("branch")}
+                for item in live
             ],
-            "pending": len(pending),
+            "open": len(open_attempts),
             "unreadable": unreadable,
         },
     )

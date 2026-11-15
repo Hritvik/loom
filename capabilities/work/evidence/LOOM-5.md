@@ -42,8 +42,13 @@ shared one directory and one branch.
   database reports `loom/LOOM-5#legacy1639 running implementer pid 94386` with worktree
   `~/.local/state/loom/worktrees/loom-loom-5` and branch `loom/loom-loom-5` — this worker, started
   by the released engine, folded as an attempt.
-- **State checks.** `verify_registry_events` (engine) and `validate_work.py` no longer treat
-  `attempt`/`launch` as the last word on task state; they carry a revision but no status.
+- **State checks.** The base already makes `verify_registry_events` (engine) and `validate_work.py`
+  skip process-audit records; this branch only removes an unused local and rewords that comment. No
+  behaviour change here.
+- **UI consumer.** `ui/loom_ui/provenance.py` folded the old launch shape (`state == "pending"`),
+  which this branch stops writing, so a healthy system would have rendered "0 live worker
+  process(es)". It now folds through `engine.attempt_views`/`live_attempts`, with a regression test
+  for the new shape and a corrected README row.
 - **Surfaces.** `loom attempts [<task>] [--live] [--json]` added (documented in the README CLI
   table), `loom show` prints the current attempt and `--json` carries all of them, A2A task history
   names the attempt id, and `loom workers` lists the attempt.

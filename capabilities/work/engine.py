@@ -1792,7 +1792,7 @@ def process_start(pid) -> dt.datetime | None:
 
 
 def launch_is_live(launch: dict) -> bool:
-    """A pending launch is live only if the same process still holds the pid."""
+    """The launch is live only if the same process still holds its pid."""
     pid = launch.get("pid")
     if not pid_alive(pid):
         return False

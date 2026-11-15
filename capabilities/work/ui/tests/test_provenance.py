@@ -75,6 +75,24 @@ class ProvenanceTest(unittest.TestCase):
         self.assertEqual(signal.status, "ok")
         self.assertEqual([item["pid"] for item in signal.data["live"]], [child.pid])
 
+    def test_process_reads_the_attempt_model_not_a_launch_state(self):
+        child = subprocess.Popen(["sleep", "30"])
+
+        def reap():
+            child.kill()
+            child.wait(timeout=5)
+
+        self.addCleanup(reap)
+        # The engine no longer writes a state on a launch; the run's state lives on the attempt.
+        self.home.append(event="attempt", task="demo/W-1", agent="opencode/worker",
+                         role="implementer", attempt="demo/W-1#a1", state="running", now=iso())
+        self.home.append(event="launch", task="demo/W-1", agent="opencode/worker",
+                         role="implementer", attempt="demo/W-1#a1", pid=child.pid,
+                         started_at=iso(), now=iso())
+        signal = self.sample()["process"]
+        self.assertEqual(signal.status, "ok")
+        self.assertEqual([item["pid"] for item in signal.data["live"]], [child.pid])
+
     def test_process_flags_a_pending_launch_without_a_pid(self):
         self.home.append(event="launch", task="demo/W-2", agent="opencode/worker",
                          role="implementer", state="pending", now=iso())

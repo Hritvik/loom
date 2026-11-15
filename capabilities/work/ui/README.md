@@ -52,7 +52,7 @@ Six sources are sampled independently, each with its own `as_of` and status (`ok
 | Source | Sampled from |
 |---|---|
 | `database` | the snapshot's read time, head event and content digest |
-| `process` | pending `launch` events in the snapshot, probed with `engine.launch_is_live` |
+| `process` | attempts folded with `engine.attempt_views`, probed for a live pid |
 | `scheduler` | the launch agent plist for the configured tick label |
 | `release` | `engine.release`, the running root, and a recomputed tree digest |
 | `git` | `git -C <owner repo> rev-parse` for each distinct owner repository |
