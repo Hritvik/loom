@@ -1940,6 +1940,17 @@ class WorkCLITest(unittest.TestCase):
         claims = [event for event in self.ws.events() if event.get("event") == "claim"]
         self.assertEqual(len(claims), 1, claims)
 
+    def test_validator_does_not_read_process_audit_as_state(self):
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="attempt", task="demo/W-1", agent="agent-a",
+                                   state="running", attempt="demo/W-1#a1", revision=0, now=T0)
+        finally:
+            store.close()
+        result = validate(self.ws.root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
