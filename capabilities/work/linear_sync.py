@@ -166,11 +166,15 @@ def mirror(client, config, destination, cards, *, apply):
     labels = config.get("labels", {})
     needs_human_label = labels.get("Needs Human")
     states = {}
-    for lane in {card["lane"] for card in ordered}:
+    missing_states = []
+    for lane in sorted({card["lane"] for card in ordered}):
         name = config["states"].get(lane)
         if not name or name not in destination["state_ids"]:
-            raise SyncError(f"Linear workflow state missing for {lane}: {name or 'unmapped'}")
-        states[lane] = destination["state_ids"][name]
+            missing_states.append(f"{lane} -> {name or 'unmapped'}")
+        else:
+            states[lane] = destination["state_ids"][name]
+    if missing_states:
+        raise SyncError("Linear workflow states missing: " + "; ".join(missing_states))
 
     desired_ids = {issue_id(config, card["id"]): card["id"] for card in ordered}
     issues = index_issues(client.issues(config["team_id"], config["project_id"]), desired_ids)
@@ -178,7 +182,13 @@ def mirror(client, config, destination, cards, *, apply):
         if issues.get(card["id"], {}).get("archivedAt"):
             raise SyncError(f"{card['id']} is archived in Linear; restore it before syncing")
 
+    unmapped = sorted({card["program"] for card in ordered
+                       if card["program"] and card["program"] not in labels})
     result = {"created": 0, "updated": 0, "unchanged": 0}
+    if unmapped:
+        result["unmappedPrograms"] = unmapped
+    if any(card.get("needs_human") for card in ordered) and not needs_human_label:
+        result["missingNeedsHumanLabel"] = True
     for card in ordered:
         task_id = card["id"]
         issue = issues.get(task_id)

@@ -272,6 +272,15 @@ class MCPTest(unittest.TestCase):
             else:
                 os.environ["WORK_DB"] = previous
 
+    def test_blocked_needs_human_over_mcp(self):
+        self.structured("work_claim", {"task": "demo/W-1", "revision": 0})
+        self.structured("work_transition", {
+            "task": "demo/W-1", "revision": 1, "to": "blocked", "needs": "human",
+            "reason": "owner decision required", "epoch": 1,
+        })
+        status = self.structured("work_status", {"repo": self.repo})
+        self.assertIn("demo/W-1", [item["id"] for item in status["awaitingHuman"]])
+
     def test_full_lifecycle_through_tools(self):
         claimed = self.structured("work_claim", {"task": "demo/W-1", "revision": 0})
         epoch = claimed["claim"]["epoch"]

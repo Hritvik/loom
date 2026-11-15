@@ -1743,6 +1743,21 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("Stuck launches", result.stdout)
         self.assertIn("demo/W-1", result.stdout)
 
+    def test_tick_reports_paths_diverged(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit("Reviewed", path="src/one/a.txt", content="a")
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+        self.commit("Later", path="src/one/a.txt", content="b")
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--integrate", "--max-integrate", "1",
+                             "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("paths_diverged", result.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",

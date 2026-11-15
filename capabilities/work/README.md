@@ -19,7 +19,6 @@ reconciliation**.
 | `decisions/` | Reconciliation decisions |
 | `a2a/` | A2A v1.0 façade: Agent Card, JSON-RPC, read and claim operations |
 | `mcp/` | MCP stdio server: registry tools that appear in an agent's tool list |
-| `programs/` | Cross-service integration map: journeys, ownership, contracts, gates and startable slices |
 | `tests/` | CLI, validator, A2A and MCP tests on disposable work homes |
 
 ## CLI
@@ -100,7 +99,7 @@ receipt already exists, and the event is appended to the audit log like any othe
 
 `loom` routes engine verbs to `engine.py` in-process; there is no second command name.
 
-The launchd job runs `loom tick --apply --quiet` every **120 seconds**. An idle pass is ~0.25s and
+The launchd job runs `loom tick --apply --quiet` every **120 seconds**. An idle pass is ~0.5s and
 prints nothing; a pass that claims, reviews, records or escalates prints its report. `schedule status`
 shows the interval alongside the label and plist, so the cadence is visible rather than implied.
 
@@ -414,7 +413,7 @@ and edges at call time; nothing is cached.
 
 The read-only projection lives in `linear_projection.py`; the sync is `linear_sync.py` and the front
 door is `loom linear sync --all --apply`. The registry owns claims, review and integration; the
-mirror is one-way and never writes back.
+mirror is one-way and never writes back to the registry; it creates and updates Linear issues.
 
 Cards are one per task, titled `[task-id] title`, with a managed description block (runway, next
 actor, implementer, reviewer, dependencies, blockers, unlocks, revision). Human notes outside the

@@ -198,7 +198,10 @@ class _TrackedLock:
 
 
 class FileStore(Store):
-    """`registry.yaml` plus `events.ndjson` in a work home. Legacy importer; not atomic."""
+    """`registry.yaml` plus `events.ndjson` in a work home. Legacy importer; not atomic.
+
+    Writes exist only for migration fixtures; the runtime default is SQLite (`make_store`).
+    """
 
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -552,7 +555,7 @@ class SqliteStore(Store):
             return None
 
 
-def make_store(root: Path, backend: str = "files", db_path: Path | None = None) -> Store:
+def make_store(root: Path, backend: str = "sqlite", db_path: Path | None = None) -> Store:
     if backend == "sqlite":
         return SqliteStore(root, db_path)
     if backend != "files":

@@ -2070,7 +2070,11 @@ def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], li
                 ["git", "-C", str(repo), "merge-base", "--is-ancestor", review["source"], ref],
                 capture_output=True, text=True, timeout=30)
             if ancestor.returncode != 0:
-                blocked.append({"task": task["id"], "action": "merge_needed", "ref": ref})
+                blocked.append({
+                    "task": task["id"], "action": "merge_needed", "ref": ref,
+                    "source": review["source"],
+                    "branch": f"loom/{task['id'].replace('/', '-').lower()}",
+                })
                 continue
             require_reviewed_source(task, review["source"], ref)
         except (WorkError, OSError, subprocess.SubprocessError) as exc:
@@ -2407,18 +2411,39 @@ def cmd_tick(args, store: Store) -> int:
             print(f"  integrated {item['task']} ({item['source'][:12]})")
     if integration_blocked:
         print("\nIntegration needs attention:")
-        grouped: dict[str, list[str]] = {}
+        grouped: dict[str, list[dict]] = {}
         for item in integration_blocked:
-            grouped.setdefault(item["action"], []).append(item["task"])
-        for action, tasks in sorted(grouped.items()):
-            shown = ", ".join(tasks[:4])
-            more = f" (+{len(tasks) - 4} more)" if len(tasks) > 4 else ""
-            print(f"  {action:<18} {shown}{more}")
+            grouped.setdefault(item["action"], []).append(item)
+        for action, items in sorted(grouped.items()):
+            if action == "merge_needed":
+                for item in items[:4]:
+                    print(f"  merge_needed {item['task']} {item['source'][:12]} -> "
+                          f"{item['ref']} (branch {item['branch']})")
+                if len(items) > 4:
+                    print(f"  ... (+{len(items) - 4} more merge-needed)")
+            elif action == "paths_diverged":
+                for item in items[:4]:
+                    print(f"  paths_diverged {item['task']}: {item.get('reason', '')}")
+                if len(items) > 4:
+                    print(f"  ... (+{len(items) - 4} more paths-diverged)")
+            elif action == "receipt_missing":
+                print(f"  receipt_missing {len(items)} task(s): reopen to ready with a reason, "
+                      "then resubmit for review")
+                print("    " + ", ".join(item["task"] for item in items[:4])
+                      + (f" (+{len(items) - 4} more)" if len(items) > 4 else ""))
+            else:
+                print(f"  {action:<18} " + ", ".join(item["task"] for item in items[:4])
+                      + (f" (+{len(items) - 4} more)" if len(items) > 4 else ""))
     if review_blocked:
         print("\nReview needs attention:")
         for item in review_blocked:
             detail = item.get("to") or item.get("reason") or ""
             print(f"  {item['task']:<22} {item['action']:<18} {detail}")
+        actions = {item["action"] for item in review_blocked}
+        if "resubmit_required" in actions:
+            print("  resubmit_required: submit the current revision; do not reuse the old ask")
+        if "never_submitted" in actions:
+            print("  never_submitted: submit the branch tip for review")
     if rework_queued:
         print("\nRework queued (changes requested):")
         for item in rework_queued:

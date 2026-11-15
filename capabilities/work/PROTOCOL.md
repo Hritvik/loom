@@ -221,7 +221,7 @@ owns the verdict. See the [review pipeline](AGENT-GUIDE.md#independent-review-pi
 ## Adoption phases
 
 1. **Done** — central registry, namespaced IDs, validator, reconciliation decisions, reference-adapter
-   scope, import of all existing boards (69 tasks).
+   scope, migration import of the existing boards.
 2. **Done** — task schema, `work/loom` CLI with CAS/lease/heartbeat/takeover, append-only event log,
    board sync/import, reconcile, and the test suite.
 3. **Done** — A2A v1.0 façade: Agent Card, `ListTasks`, `GetTask`, `SendMessage` actions and

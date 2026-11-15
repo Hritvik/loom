@@ -86,6 +86,12 @@ class SurfaceContractTest(unittest.TestCase):
         documented = {name for name in documented if name in a2a.ACTION_TO_TOOL}
         self.assertEqual(documented, set(a2a.ACTION_TO_TOOL))
 
+    def test_work_readme_names_every_mcp_tool(self):
+        text = (WORK / "README.md").read_text(encoding="utf-8")
+        missing = {name for name in self.mcp_tools if name not in text}
+        self.assertEqual(missing, set(),
+                         "MCP tools missing from capabilities/work/README.md")
+
     def test_work_readme_documents_every_cli_command(self):
         parser = load("surface_task", WORK / "engine.py")
         commands = set(parser.build_parser()._subparsers._group_actions[0].choices)

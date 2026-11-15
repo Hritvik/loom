@@ -46,6 +46,8 @@ class LinearSyncTest(unittest.TestCase):
         self.config = {
             "team_id": "team-id", "project_id": "project-id",
             "states": {"claimable": "Ready", "blocked": "Blocked"},
+            "labels": {"alpha": "alpha-label", "beta": "beta-label",
+                       "Needs Human": "human-label"},
         }
         self.destination = {"state_ids": {"Ready": "ready-id", "Blocked": "blocked-id"}}
 
