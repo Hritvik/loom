@@ -55,6 +55,37 @@ class StoreTest(unittest.TestCase):
     def sqlite(self) -> SqliteStore:
         return SqliteStore(self.ws.root, self.db)
 
+    def test_a_held_lock_fails_loudly_instead_of_waiting_forever(self):
+        import fcntl
+        import os as os_module
+        import time as time_module
+
+        from store import _FileLock
+
+        path = Path(self.tmp.name) / "held.lock"
+        handle = path.open("a+")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            started = time_module.monotonic()
+            with self.assertRaises(WorkError) as caught:
+                with _FileLock(path, timeout=0.05):
+                    pass
+            elapsed = time_module.monotonic() - started
+            self.assertLess(elapsed, 2.0, "the lock wait was not bounded")
+            self.assertIn("store lock", str(caught.exception))
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def test_a_contended_lock_is_recorded_and_then_released(self):
+        from store import _FileLock
+
+        path = Path(self.tmp.name) / "shared.lock"
+        with _FileLock(path, timeout=1.0):
+            pass
+        with _FileLock(path, timeout=1.0) as acquired:
+            self.assertIsNotNone(acquired.handle)
+
     def test_sqlite_round_trips_the_registry(self):
         expected = normalised(self.ws.load())
 

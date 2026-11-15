@@ -1758,6 +1758,51 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("paths_diverged", result.stdout)
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
 
+    def test_integration_plan_emits_a_merge_command(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        repo = self.ws.repo
+        self.commit("Base")
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "loom/demo-w-1"],
+                       check=True)
+        source = self.commit("Branch work")
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "main"], check=True)
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        result = self.invoke("integration-plan", "--implementer", "worker-x",
+                             "--reviewer-identity", "reviewer-x")
+        self.assertIn("Merge needed (1)", result.stdout)
+        self.assertIn("merge --no-ff", result.stdout)
+        self.assertIn(source, result.stdout)
+        self.assertIn("loom/demo-w-1", result.stdout)
+
+    def test_integration_plan_explains_a_diverged_delta(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit("Reviewed", path="src/one/a.txt", content="a")
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+        self.commit("Later", path="src/one/a.txt", content="b")
+        result = self.invoke("integration-plan", "--implementer", "worker-x",
+                             "--reviewer-identity", "reviewer-x")
+        self.assertIn("Paths diverged (1)", result.stdout)
+        self.assertIn("moved since approval: 1", result.stdout)
+        self.assertIn("src/one/a.txt", result.stdout)
+        self.assertIn("--review-base", result.stdout)
+        self.assertIn("--review-source", result.stdout)
+
+    def test_integration_plan_is_read_only_and_grouped_as_json(self):
+        revision = self.ws.task_record("demo/W-1")["revision"]
+        result = self.invoke("integration-plan", "--json")
+        plan = json.loads(result.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["revision"], revision)
+        self.assertIn("counts", plan)
+        self.assertIn("merge_needed", plan["counts"])
+        self.assertIn("humanBlocked", plan)
+
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",

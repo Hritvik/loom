@@ -15,7 +15,9 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -161,22 +163,73 @@ class Store(abc.ABC):
 
 
 class _FileLock:
-    def __init__(self, path: Path):
+    """An advisory whole-store lock that fails loudly instead of waiting forever.
+
+    `flock(LOCK_EX)` with no timeout queues indefinitely. One command that hangs while holding the
+    lock would then stall the scheduler silently: launchd reports exit 0 for the passes that never
+    ran, and every other writer waits behind it. A bounded non-blocking retry turns that into a
+    named error with the holder recorded in the lock file.
+    """
+
+    def __init__(self, path: Path, timeout: float | None = None):
         self.path = path
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("WORK_LOCK_TIMEOUT", "20"))
+            except ValueError:
+                timeout = 20.0
+        self.timeout = max(0.0, timeout)
         self.handle = None
+
+    def _holder(self) -> str:
+        try:
+            lines = [line for line in self.path.read_text().splitlines() if line.strip()]
+        except OSError:
+            return ""
+        return lines[-1] if lines else ""
+
+    def _record_holder(self) -> None:
+        try:
+            self.handle.seek(0)
+            self.handle.truncate()
+            self.handle.write(f"{os.getpid()} {' '.join(sys.argv[:3])}\n")
+            self.handle.flush()
+        except OSError:
+            pass
 
     def __enter__(self):
         import fcntl
 
         self.handle = self.path.open("a+")
-        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        deadline = time.monotonic() + self.timeout
+        delay = 0.01
+        while True:
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    holder = self._holder()
+                    self.handle.close()
+                    self.handle = None
+                    detail = f"; held by {holder}" if holder else ""
+                    raise WorkError(
+                        f"timed out after {self.timeout:g}s waiting for the store lock at "
+                        f"{self.path}{detail}. Another loom command is holding it, or a stale "
+                        "process never released it. Raise WORK_LOCK_TIMEOUT or stop that process."
+                    ) from None
+                time.sleep(delay)
+                delay = min(delay * 2, 0.25)
+        self._record_holder()
         return self
 
     def __exit__(self, *exc):
         import fcntl
 
-        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        self.handle.close()
+        if self.handle is not None:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+            self.handle = None
         return False
 
 

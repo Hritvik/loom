@@ -35,6 +35,7 @@ identical on all three surfaces.
 | `dependents` | Who is waiting on a task, directly and transitively |
 | `graph` | Render the dependency graph: `text`, `mermaid`, `dot` or standalone `html` |
 | `decisions` | What needs the owner: human-blocked tasks and questions addressed to them |
+| `integration-plan` | The lane-3 worklist: merge commands, delta re-reviews, reopens and the decisions the loop is holding; `--out` writes markdown |
 | `tick` | Policy pass: reconcile, record approvals, claim and launch implementers and reviewers; `--apply` acts, `--quiet` is silent when idle |
 | `migrate` | Copy a file work home into SQLite, verifying the event chain |
 | `export` | Render the store as YAML or JSON, replacing diffable state in git |

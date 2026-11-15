@@ -2062,6 +2062,7 @@ def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], li
             blocked.append({"task": task["id"], "action": "dependency_blocked",
                             "reason": ", ".join(unmet)})
             continue
+        board = None
         try:
             board = find_board(registry, task["board"])
             ref = board.get("integration_ref", "refs/heads/main")
@@ -2072,7 +2073,7 @@ def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], li
             if ancestor.returncode != 0:
                 blocked.append({
                     "task": task["id"], "action": "merge_needed", "ref": ref,
-                    "source": review["source"],
+                    "repo": str(repo), "source": review["source"],
                     "branch": f"loom/{task['id'].replace('/', '-').lower()}",
                 })
                 continue
@@ -2080,7 +2081,13 @@ def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], li
         except (WorkError, OSError, subprocess.SubprocessError) as exc:
             message = str(exc)
             action = "paths_diverged" if ("differ" in message or "paths" in message) else "integration_blocked"
-            blocked.append({"task": task["id"], "action": action, "reason": message})
+            blocked.append({
+                "task": task["id"], "action": action, "reason": message,
+                "repo": str(Path(str(task.get("owner_repo") or ".")).expanduser()),
+                "ref": (board or {}).get("integration_ref", "refs/heads/main"),
+                "source": review["source"],
+                "branch": f"loom/{task['id'].replace('/', '-').lower()}",
+            })
             continue
         queue.append({"task": task["id"], "revision": task.get("revision", 0),
                       "source": review["source"], "evidence": review["evidence"],
@@ -2146,6 +2153,446 @@ def write_roots(signature: str) -> None:
     path = roots_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(signature + "\n")
+
+
+def short_path(value) -> str:
+    text = str(value)
+    home = str(Path.home())
+    return "~" + text[len(home):] if text.startswith(home + "/") else text
+
+
+def branch_tip(repo: Path, branch: str) -> str | None:
+    """The commit a branch points at, or None when the branch or repo is gone."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def ref_tip(repo: Path, ref: str | None) -> str | None:
+    """The commit an integration ref points at."""
+    if not ref:
+        return None
+    try:
+        result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
+                                capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def commit_paths(repo: Path, base: str, tip: str) -> list[str]:
+    """Paths a commit changed relative to its review base."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--name-only", base, tip],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def commit_delta(repo: Path, base: str, tip: str) -> dict:
+    """How far a branch moved past the commit a reviewer approved."""
+    info = {"commits": None, "paths": []}
+    try:
+        count = subprocess.run(["git", "-C", str(repo), "rev-list", "--count", f"{base}..{tip}"],
+                               capture_output=True, text=True, timeout=15)
+        if count.returncode == 0 and count.stdout.strip().isdigit():
+            info["commits"] = int(count.stdout.strip())
+        paths = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", base, tip],
+                               capture_output=True, text=True, timeout=15)
+        if paths.returncode == 0:
+            info["paths"] = [line for line in paths.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return info
+
+
+def integration_plan(store: Store, registry: dict, args) -> dict:
+    """Everything the unattended loop is holding, grouped so a person can act on it."""
+    now = parse_now(args.now)
+    queue, integration_blocked = plan_integration(store, registry, args)
+    _, review_blocked = review_request_sweep(store, registry, now, args)
+    index = dependents_index(registry)
+    by_id = {task["id"]: task for task in registry["tasks"]}
+
+    for item in integration_blocked:
+        task = by_id.get(item["task"], {})
+        item["revision"] = task.get("revision", 0)
+        item["evidence"] = task.get("evidence")
+        item["board"] = task.get("board")
+        item["unblocks"] = len(transitive_dependents(index, item["task"]))
+        repo = Path(item.get("repo") or ".").expanduser()
+        if item.get("branch"):
+            item["tip"] = branch_tip(repo, item["branch"]) or None
+        if item["action"] != "paths_diverged":
+            continue
+        # The approved commit is already on the ref; the delta to re-verify runs to the ref tip.
+        item["tip"] = ref_tip(repo, item.get("ref")) or item.get("tip")
+        source = item.get("source")
+        tip = item.get("tip")
+        if not source or not tip:
+            continue
+        item["delta"] = commit_delta(repo, source, tip)
+        base = (task.get("review") or {}).get("base")
+        reviewed = commit_paths(repo, base, source) if base else []
+        moved = set(item["delta"].get("paths") or ())
+        item["reviewedPaths"] = reviewed
+        item["divergedPaths"] = [path for path in reviewed if path in moved]
+
+    expired = []
+    for task in registry["tasks"]:
+        claim = task.get("claim") or {}
+        if not claim:
+            continue
+        expiry = lease_expiry(task)
+        if not expiry or expiry <= now:
+            expired.append({"task": task["id"], "agent": claim.get("agent"),
+                            "expired": claim.get("lease_expires"), "revision": task.get("revision", 0)})
+
+    blocked_tasks = [task for task in registry["tasks"] if task.get("status") == "blocked"]
+    planned_roots = sorted({
+        dep for task in registry["tasks"] if task.get("status") == "ready"
+        for dep in task_edges(registry, task["id"])
+        if by_id.get(dep, {}).get("status") in {"planned", "draft"}})
+
+    for item in review_blocked:
+        task = by_id.get(item["task"], {})
+        item["revision"] = task.get("revision", 0)
+        item["evidence"] = task.get("evidence")
+        item["repo"] = task.get("owner_repo")
+        item["writePaths"] = task.get("write_paths") or []
+        branch = f"loom/{item['task'].replace('/', '-').lower()}"
+        item["branch"] = branch
+        item["tip"] = branch_tip(Path(str(task.get("owner_repo") or ".")), branch)
+
+    return {
+        "queue": queue,
+        "integration": integration_blocked,
+        "review": review_blocked,
+        "expired": expired,
+        "humanBlocked": [task["id"] for task in blocked_tasks
+                         if (task.get("blocked_needs") or "agent") == "human"],
+        "agentBlocked": [task["id"] for task in blocked_tasks
+                         if (task.get("blocked_needs") or "agent") != "human"],
+        "planned": planned_roots,
+        "counts": {
+            "merge_needed": sum(1 for item in integration_blocked if item["action"] == "merge_needed"),
+            "paths_diverged": sum(1 for item in integration_blocked if item["action"] == "paths_diverged"),
+            "receipt_missing": sum(1 for item in integration_blocked if item["action"] == "receipt_missing"),
+            "dependency_blocked": sum(1 for item in integration_blocked
+                                      if item["action"] == "dependency_blocked"),
+            "never_submitted": sum(1 for item in review_blocked if item["action"] == "never_submitted"),
+            "rework": sum(1 for item in review_blocked if item["action"] == "rework"),
+            "human_review": sum(1 for item in review_blocked if item["action"] == "human"),
+            "resubmit_required": sum(1 for item in review_blocked
+                                     if item["action"] == "resubmit_required"),
+            "expired": len(expired),
+            "human_blocked": sum(1 for task in blocked_tasks
+                                 if (task.get("blocked_needs") or "agent") == "human"),
+            "agent_blocked": sum(1 for task in blocked_tasks
+                                 if (task.get("blocked_needs") or "agent") != "human"),
+            "planned": len(planned_roots),
+        },
+    }
+
+
+def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) -> str:
+    implementer = args.implementer
+    reviewer = args.reviewer_identity
+    counts = plan["counts"]
+    lines: list[str] = []
+    add = lines.append
+
+    add("# Loom integration plan")
+    add("")
+    add(f"Generated **{generated}** from `{short_path(args.db)}`.")
+    add("")
+    add(f"Registry: **{len(registry['tasks'])} tasks · {len(registry['boards'])} boards · "
+        f"{len(registry.get('edges') or [])} edges**")
+    add("")
+    add("| Bucket | Count |")
+    add("|---|---:|")
+    for key, label in (("merge_needed", "Merge needed"), ("paths_diverged", "Paths diverged"),
+                       ("receipt_missing", "Receipt missing"), ("dependency_blocked", "Dependency blocked"),
+                       ("never_submitted", "Never submitted"), ("resubmit_required", "Resubmit required"),
+                       ("rework", "Changes requested"), ("human_review", "Human review"),
+                       ("human_blocked", "Blocked on a human"), ("agent_blocked", "Blocked on an agent"),
+                       ("planned", "Planned prerequisite"), ("expired", "Expired lease")):
+        add(f"| {label} | {counts.get(key, 0)} |")
+    add("")
+    add("Nothing in this file is applied automatically. Each block is one decision the engine will")
+    add("keep reporting until it is made.")
+    add("")
+
+    merge = [item for item in plan["integration"] if item["action"] == "merge_needed"]
+    add(f"---")
+    add("")
+    add(f"## 1. Merge needed ({len(merge)})")
+    add("")
+    add("The approved commit is reviewed and is **not** on the integration ref. The engine will not")
+    add("merge it. Merge the **approved commit**, not the branch tip: if the branch moved past it,")
+    add("those extra commits need their own review.")
+    add("")
+    if merge:
+        add("| Task | Approved | Branch | Ref | Repo | Unblocks |")
+        add("|---|---|---|---|---|---:|")
+        for item in merge:
+            add(f"| `{item['task']}` | `{item['source'][:12]}` | `{item.get('branch') or '-'}` | "
+                f"`{item.get('ref') or '-'}` | `{short_path(item.get('repo') or '-')}` | "
+                f"{item.get('unblocks', 0)} |")
+        add("")
+        add("```bash")
+        for item in merge:
+            add(f"git -C {short_path(item.get('repo') or '.')} merge --no-ff {item['source']} \\")
+            add(f"  -m \"merge {item['task']} ({item['source'][:12]})\"")
+        add("```")
+        add("")
+        add("Then record the receipts: `loom tick --integrate` (or leave it to the scheduler when")
+        add("`auto_integrate` is on).")
+    else:
+        add("Nothing is waiting on a merge.")
+    add("")
+
+    diverged = [item for item in plan["integration"] if item["action"] == "paths_diverged"]
+    add(f"---")
+    add("")
+    add(f"## 2. Paths diverged ({len(diverged)})")
+    add("")
+    add("The approved commit is on the ref, but the paths it changed have moved since. The old")
+    add("receipt cannot be reused. Re-verify the **delta** at the current tip, then integrate at the")
+    add("tip. The commands below are the whole cycle, with the revisions already worked out.")
+    add("")
+    for item in diverged:
+        task = item["task"]
+        revision = item.get("revision", 0)
+        delta = item.get("delta") or {}
+        tip = item.get("tip")
+        add(f"### `{task}`")
+        add("")
+        add(f"- approved: `{item.get('source', '?')[:12]}` · tip: "
+            f"`{(tip or 'unknown')[:12]}` · revision {revision}")
+        if delta.get("commits") is not None:
+            add(f"- delta to the ref tip: {delta['commits']} commit(s), "
+                f"{len(delta.get('paths') or [])} path(s)")
+        reviewed = item.get("reviewedPaths") or []
+        diverged = item.get("divergedPaths") or []
+        if reviewed:
+            add(f"- reviewed paths: {len(reviewed)} · moved since approval: {len(diverged)}")
+            for path in diverged[:12]:
+                add(f"  - `{path}`")
+            if len(diverged) > 12:
+                add(f"  - … {len(diverged) - 12} more")
+        add(f"- reason: {item.get('reason', 'paths changed')}")
+        add("")
+        if tip:
+            add("```bash")
+            add(f"loom transition {task} --revision {revision} --to ready \\")
+            add(f"  --reason \"re-open to re-review the delta {item.get('source', '')[:12]}..{tip[:12]}\" --agent {implementer}")
+            add(f"loom claim {task} --revision {revision + 1} --agent {implementer}")
+            add(f"loom transition {task} --revision {revision + 2} --to green --epoch <epoch from claim> \\")
+            add(f"  --evidence {item.get('evidence') or 'evidence/' + task.split('/')[-1] + '.md'} --agent {implementer}")
+            add(f"loom ask {task} --to {reviewer} \\")
+            add(f"  --question \"Delta review {item.get('source', '')[:12]}..{tip[:12]}\" \\")
+            add(f"  --review-source {tip} --review-base {item.get('source')} \\")
+            add(f"  --review-evidence {item.get('evidence') or 'evidence/' + task.split('/')[-1] + '.md'} \\")
+            add(f"  --agent {implementer}")
+            add(f"# after the reviewer records an approval:")
+            add(f"loom transition {task} --revision {revision + 4} --to integrated \\")
+            add(f"  --integrated-source {tip} \\")
+            add(f"  --evidence {item.get('evidence') or 'evidence/' + task.split('/')[-1] + '.md'} \\")
+            add(f"  --agent {args.coordinator}")
+            add("```")
+        else:
+            add("The branch tip could not be resolved; check the repository and the branch name.")
+        add("")
+
+    missing = [item for item in plan["integration"] if item["action"] == "receipt_missing"]
+    add(f"---")
+    add("")
+    add(f"## 3. Receipt missing ({len(missing)})")
+    add("")
+    add("These are `reviewed` without a verifiable receipt (they predate the receipt requirement).")
+    add("`annotate` only covers already-integrated work, so the only repair is to reopen and run the")
+    add("review again.")
+    add("")
+    if missing:
+        legacy = [item for item in missing if re.match(r"iam/W0[0-9]", item["task"])]
+        add("| Task | Revision | Evidence |")
+        add("|---|---:|---|")
+        for item in missing:
+            add(f"| `{item['task']}` | {item.get('revision', 0)} | `{item.get('evidence') or '-'}` |")
+        add("")
+        add("```bash")
+        for item in missing:
+            add(f"loom transition {item['task']} --revision {item.get('revision', 0)} --to ready \\")
+            add(f"  --reason \"reopen: review receipt missing; re-run the review\" --agent {implementer}")
+        add("```")
+        add("")
+        add("Then, per task: `loom claim` → `loom transition --to green --evidence <path>` →")
+        add("`loom ask --review-source <branch tip>`.")
+        if legacy:
+            add("")
+            add(f"**Decision needed for the {len(legacy)} legacy `iam/W0*` tasks:** re-run them, or")
+            add("record them as accepted historical debt in a decisions entry. The engine should not")
+            add("infer either.")
+    else:
+        add("Nothing is missing a receipt.")
+    add("")
+
+    review = plan["review"]
+    never = [item for item in review if item["action"] == "never_submitted"]
+    add(f"---")
+    add("")
+    add(f"## 4. Never submitted ({len(never)})")
+    add("")
+    add("Green work that never asked for review. Submit the branch tip, or reopen it.")
+    add("")
+    if never:
+        add("```bash")
+        for item in never:
+            tip = item.get("tip")
+            evidence = item.get("evidence") or f"evidence/{item['task'].split('/')[-1]}.md"
+            if tip:
+                add(f"loom ask {item['task']} --to {reviewer} \\")
+                add(f"  --question \"Review request for {item['task']} at {tip[:12]}\" \\")
+                add(f"  --review-source {tip} --review-evidence {evidence} --agent {implementer}")
+            else:
+                add(f"# {item['task']}: no branch {item.get('branch')}; the work was done in")
+                add(f"#   {short_path(item.get('repo') or '?')} — confirm it is committed, then submit that")
+                add(f"#   commit, or reopen the task:")
+                paths = item.get("writePaths") or []
+                hint = f" -- {' '.join(paths)}" if paths else ""
+                add(f"#   git -C {short_path(item.get('repo') or '.')} log --oneline -5{hint}")
+        add("```")
+    else:
+        add("Nothing is unsubmitted.")
+    add("")
+
+    rework = [item for item in review if item["action"] in {"rework", "resubmit_required",
+                                                            "review_unavailable", "unknown",
+                                                            "reviewer_live"}]
+    add(f"---")
+    add("")
+    add(f"## 5. Review needs attention ({len(rework)})")
+    add("")
+    if rework:
+        add("| Task | Action | Detail |")
+        add("|---|---|---|")
+        for item in rework:
+            detail = item.get("to") or item.get("reason") or f"request {item.get('request')}"
+            add(f"| `{item['task']}` | {item['action']} | {detail} |")
+        add("")
+        rework_items = [item for item in rework if item["action"] == "rework"]
+        if rework_items:
+            add("Changes requested: reopen the claim and redo the work, then return to green.")
+            add("")
+            add("```bash")
+            for item in rework_items:
+                add(f"loom takeover {item['task']} --revision {item.get('revision', 0)} \\")
+                add(f"  --reason \"changes requested in review\" --agent {implementer}")
+            add("```")
+        resubmit = [item for item in rework if item["action"] == "resubmit_required"]
+        if resubmit:
+            add("")
+            add("A stale source is never re-asked. Submit the current tip as a new request:")
+            add("")
+            add("```bash")
+            for item in resubmit:
+                tip = item.get("tip")
+                if tip:
+                    add(f"loom ask {item['task']} --to {reviewer} \\")
+                    add(f"  --question \"Review request for {item['task']} at {tip[:12]}\" \\")
+                    add(f"  --review-source {tip} \\")
+                    add(f"  --review-evidence {item.get('evidence') or 'evidence/' + item['task'].split('/')[-1] + '.md'} \\")
+                    add(f"  --agent {implementer}")
+            add("```")
+    else:
+        add("Nothing is stuck in review.")
+    add("")
+
+    humans = [item for item in review if item["action"] == "human"]
+    add(f"---")
+    add("")
+    add(f"## 6. Reviews addressed to a human ({len(humans)})")
+    add("")
+    if humans:
+        add("```bash")
+        for item in humans:
+            add(f"loom answer {item['task']} --question {item.get('request')} --decision approve \\")
+            add(f"  --agent {item.get('to') or 'you'}")
+        add("```")
+        add("")
+        add("Use `--decision \"changes requested\"` with `--reason` when the work is not acceptable.")
+    else:
+        add("No review is addressed to a human.")
+    add("")
+
+    add("---")
+    add("")
+    add(f"## 7. Blocked decisions ({len(plan['humanBlocked']) + len(plan['agentBlocked'])})")
+    add("")
+    if plan["humanBlocked"]:
+        add("**Needs a human:** " + ", ".join(f"`{task}`" for task in plan["humanBlocked"]))
+        add("")
+    if plan["agentBlocked"]:
+        add("**Needs an agent:** " + ", ".join(f"`{task}`" for task in plan["agentBlocked"]))
+        add("")
+    if not plan["humanBlocked"] and not plan["agentBlocked"]:
+        add("Nothing is blocked.")
+        add("")
+
+    add("---")
+    add("")
+    add(f"## 8. Planned prerequisites ({len(plan['planned'])})")
+    add("")
+    if plan["planned"]:
+        add(", ".join(f"`{task}`" for task in plan["planned"]) + " — promote to `ready` or write the")
+        add("plan. Nothing downstream can be claimed until this is decided.")
+    else:
+        add("No ready task is waiting on a planned prerequisite.")
+    add("")
+
+    add("---")
+    add("")
+    add(f"## 9. Expired leases ({len(plan['expired'])})")
+    add("")
+    if plan["expired"]:
+        add("| Task | Agent | Expired |")
+        add("|---|---|---|")
+        for item in plan["expired"]:
+            add(f"| `{item['task']}` | `{item.get('agent')}` | {item.get('expired')} |")
+        add("")
+        add("Take over the ones that should continue; release the rest so the slot is visible.")
+    else:
+        add("No lease is expired.")
+    add("")
+    return "\n".join(lines)
+
+
+def cmd_integration_plan(args, store: Store) -> int:
+    """Write the lane-3 worklist: what to merge, re-review, reopen and decide."""
+    registry = store.load()
+    plan = integration_plan(store, registry, args)
+    now = parse_now(args.now)
+    if args.json:
+        print(json.dumps(plan, indent=2, default=str))
+        return 0
+    body = integration_plan_markdown(plan, registry, args, iso(now))
+    if args.out:
+        path = Path(args.out).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body + "\n", encoding="utf-8")
+        print(f"wrote {path}")
+    else:
+        print(body)
+    return 0
 
 
 def cmd_tick(args, store: Store) -> int:
@@ -3079,7 +3526,7 @@ ENGINE_COMMANDS = {
     "create", "list", "show", "claim", "renew", "release", "takeover", "transition",
     "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
     "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
-    "init",
+    "init", "integration-plan",
 }
 
 
@@ -3265,6 +3712,21 @@ def build_parser() -> argparse.ArgumentParser:
     decisions.add_argument("--owner", default=None, help="owner identity (default WORK_OWNER or \"owner\")")
     decisions.add_argument("--json", action="store_true")
     decisions.set_defaults(func=cmd_decisions)
+
+    plan = sub.add_parser(
+        "integration-plan",
+        help="write the worklist of merges, re-reviews, reopens and decisions the loop is holding",
+        parents=[common])
+    plan.add_argument("--out", help="write the markdown worklist here instead of stdout")
+    plan.add_argument("--json", action="store_true", help="emit the grouped plan as JSON")
+    plan.add_argument("--implementer", default=WORKER_IDENTITY,
+                      help="identity used in the emitted claim/green/ask commands")
+    plan.add_argument("--reviewer-identity", default=REVIEWER_IDENTITY)
+    plan.add_argument("--human", action="append", dest="humans")
+    plan.add_argument("--known-agent", action="append", dest="known_agents")
+    plan.add_argument("--max-review-attempts", type=int, default=MAX_REVIEW_ATTEMPTS)
+    plan.add_argument("--coordinator", default=REVIEW_COORDINATOR)
+    plan.set_defaults(func=cmd_integration_plan)
 
     tick = sub.add_parser("tick", help="policy preview: what would be claimed and launched", parents=[common])
     tick.add_argument("--max-implementer", type=int, default=3)
