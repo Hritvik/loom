@@ -11,18 +11,13 @@ review, and an audit log that proves what happened.
 """
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 LOOM = Path(__file__).resolve().parents[2]
-WORK = LOOM / "capabilities/work"
-TASK = WORK / "loom"
-sys.path.insert(0, str(WORK))
-
-from store import make_store  # noqa: E402
+TASK = LOOM / "capabilities" / "work" / "loom"
 
 DB = Path(tempfile.mkdtemp(prefix="loom-walkthrough-")) / "work.db"
 COMMIT = ""
@@ -44,7 +39,7 @@ def run(*args: str, expect: int = 0) -> str:
 
 
 def seed() -> None:
-    """Register two program boards. Boards are configuration, not events."""
+    """Register two program boards, the way an adopter does: `loom init`, then `loom board add`."""
     root = Path(tempfile.mkdtemp(prefix="loom-walkthrough-repo-"))
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     (root / "README.md").write_text("# example repository\n")
@@ -58,21 +53,11 @@ def seed() -> None:
     (root / "alpha.md").write_text("## W-1 — Build the first thing\n\n**Status.** ready\n\n"
                                    "## W-2 — Build the second thing\n\n**Status.** ready\n")
     (root / "beta.md").write_text("## W-1 — Depend on alpha\n\n**Status.** ready\n")
-    store = make_store(WORK, "sqlite", DB)
-    registry = {
-        "kind": "work-coordination-registry", "version": 1, "updated": "2026-01-01",
-        "boards": [
-            {"id": "alpha.program", "kind": "program", "role": "provider",
-             "repo": str(root), "path": "alpha.md"},
-            {"id": "beta.program", "kind": "program", "role": "consumer",
-             "repo": str(root), "path": "beta.md"},
-        ],
-        "tasks": [], "edges": [], "claims": [],
-    }
-    store.registry = registry
-    with store.lock():
-        store.save()
-    store.close()
+    print(run("init", "--id", "alpha.program", "--kind", "program",
+              "--repo", str(root), "--path", "alpha.md", "--agent", AGENT_A))
+    print(run("board", "add", "--board", "beta.program", "--kind", "program",
+              "--role", "consumer", "--repo", str(root), "--path", "beta.md",
+              "--agent", AGENT_A))
 
 
 def main() -> int:
@@ -91,13 +76,19 @@ def main() -> int:
     print(run("list", "--ready"))
 
     step(2, "Claim with a lease, against the revision you read")
-    print(run("claim", "alpha/W-1", "--revision", "0", "--ttl", "45m", "--agent", AGENT_A))
+    claimed = run("claim", "alpha/W-1", "--revision", "0", "--ttl", "45m", "--agent", AGENT_A)
+    print(claimed)
     print(run("claim", "alpha/W-1", "--revision", "1", "--ttl", "45m", "--agent", AGENT_B,
               expect=2).splitlines()[-1])
 
+    # The claim prints its fencing epoch; the holder must present it on every later mutation.
+    epoch = claimed.rsplit("epoch ", 1)[-1].strip()
+
     step(3, "Move it through the implementation loop")
-    print(run("transition", "alpha/W-1", "--revision", "1", "--to", "red", "--agent", AGENT_A))
-    print(run("transition", "alpha/W-1", "--revision", "2", "--to", "green", "--agent", AGENT_A))
+    print(run("transition", "alpha/W-1", "--revision", "1", "--epoch", epoch,
+              "--to", "red", "--agent", AGENT_A))
+    print(run("transition", "alpha/W-1", "--revision", "2", "--epoch", epoch,
+              "--to", "green", "--agent", AGENT_A))
 
     step(4, "An independent reviewer, never a claimant")
     print(run("transition", "alpha/W-1", "--revision", "3", "--to", "reviewed",
@@ -112,12 +103,15 @@ def main() -> int:
                    "--note", "Reproduced the checks from the pinned revision", "--agent", REVIEWER)
     print(answered)
     answer_seq = int(answered.rsplit("event ", 1)[-1].rstrip(")"))
-    print(run("transition", "alpha/W-1", "--revision", "3", "--to", "reviewed",
+    # The CLI names the addressee of an answer, which is the asker; the decision below is the
+    # reviewer's, recorded under the reviewer's identity in the event log.
+    print(f"  {REVIEWER} recorded approve (event {answer_seq})")
+    print(run("transition", "alpha/W-1", "--revision", "3", "--epoch", epoch, "--to", "reviewed",
               "--reviewer", REVIEWER, "--decision", "approve", "--review-answer", str(answer_seq),
               "--agent", AGENT_B))
 
     step(5, "Evidence, then integration")
-    print(run("transition", "alpha/W-1", "--revision", "4", "--to", "integrated",
+    print(run("transition", "alpha/W-1", "--revision", "4", "--epoch", epoch, "--to", "integrated",
               "--evidence", "evidence/W-1.md", "--integrated-source", COMMIT, "--agent", AGENT_A))
 
     step(6, "The dependency gate opens on its own")

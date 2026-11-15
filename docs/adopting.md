@@ -8,7 +8,7 @@ Fifteen minutes from nothing to a claimed task.
 git clone https://github.com/Hritvik/loom.git ~/repositories/loom
 cd ~/repositories/loom
 git config core.hooksPath .githooks
-git config --global coordination.home ~/repositories/loom   # required: the guard fails closed without it        # the coordination pre-commit guard
+git config --global coordination.home ~/repositories/loom   # the guard fails closed without it
 python3 -m unittest discover -s capabilities/work/tests
 ```
 
@@ -38,7 +38,15 @@ cd ~/repositories/loom/capabilities/work
 ```
 
 `loom init` writes the registry and the genesis event atomically. It refuses a database that
-already holds a registry; use `loom board add` for later boards.
+already holds a registry; use `loom board add` for later boards. `--board` is mandatory there — it is
+the new board's id, not a selection of an existing one:
+
+```bash
+./loom board add --board beta.program --kind program --role consumer \
+  --repo ~/repositories/beta --path docs/work-items.md --agent you/alpha-agent
+```
+
+Add a task to a registered board with `loom create`:
 
 ```bash
 cd ~/repositories/loom/capabilities/work
@@ -96,7 +104,11 @@ repository.
 python3 examples/walkthrough/walkthrough.py
 ```
 
-Two synthetic programs, three tasks, one complete cycle in a throwaway database.
+Two synthetic programs, three tasks, one complete cycle in a throwaway database. It registers its
+boards the same way you did — `loom init` and `loom board add` — then claims, runs red/green, asks an
+independent reviewer, records the approval, integrates, watches the dependency gate open, and
+verifies the chain. It ends with `event chain OK`; anything else means the example and the engine
+have drifted apart.
 
 ## Where things live afterwards
 
