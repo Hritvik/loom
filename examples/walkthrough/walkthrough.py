@@ -39,24 +39,37 @@ def run(*args: str, expect: int = 0) -> str:
 
 
 def seed() -> None:
-    """Register two program boards, the way an adopter does: `loom init`, then `loom board add`."""
-    root = Path(tempfile.mkdtemp(prefix="loom-walkthrough-repo-"))
-    subprocess.run(["git", "init", "-q", str(root)], check=True)
-    (root / "README.md").write_text("# example repository\n")
-    subprocess.run(["git", "-C", str(root), "add", "README.md"], check=True)
-    subprocess.run(["git", "-C", str(root), "-c", "user.name=Example",
+    """Create two board files, then register both boards exactly as §3 of the guide says.
+
+    The order matters: `loom board add` refuses a missing board file, so the file exists before the
+    board is registered. An example that skipped this would hide the first step a stranger needs.
+    """
+    alpha = Path(tempfile.mkdtemp(prefix="loom-walkthrough-alpha-"))
+    beta = Path(tempfile.mkdtemp(prefix="loom-walkthrough-beta-"))
+    for repo, title in ((alpha, "alpha"), (beta, "beta")):
+        (repo / "docs").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "work-items.md").write_text(f"# Work items — {title}\n")
+    (alpha / "docs" / "work-items.md").write_text(
+        "# Work items — alpha\n\n"
+        "## W-1 — Build the first thing\n\n**Status.** ready\n\n"
+        "## W-2 — Build the second thing\n\n**Status.** ready\n")
+    (beta / "docs" / "work-items.md").write_text(
+        "# Work items — beta\n\n## W-1 — Depend on alpha\n\n**Status.** ready\n")
+
+    subprocess.run(["git", "init", "-q", str(alpha)], check=True)
+    subprocess.run(["git", "-C", str(alpha), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(alpha), "-c", "user.name=Example",
                     "-c", "user.email=example@example.invalid",
                     "commit", "-qm", "example"], check=True)
     global COMMIT
-    COMMIT = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+    COMMIT = subprocess.run(["git", "-C", str(alpha), "rev-parse", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
-    (root / "alpha.md").write_text("## W-1 — Build the first thing\n\n**Status.** ready\n\n"
-                                   "## W-2 — Build the second thing\n\n**Status.** ready\n")
-    (root / "beta.md").write_text("## W-1 — Depend on alpha\n\n**Status.** ready\n")
+
+    print(f"board files: {(alpha / 'docs' / 'work-items.md')} and {(beta / 'docs' / 'work-items.md')}")
     print(run("init", "--id", "alpha.program", "--kind", "program",
-              "--repo", str(root), "--path", "alpha.md", "--agent", AGENT_A))
+              "--repo", str(alpha), "--path", "docs/work-items.md", "--agent", AGENT_A))
     print(run("board", "add", "--board", "beta.program", "--kind", "program",
-              "--role", "consumer", "--repo", str(root), "--path", "beta.md",
+              "--role", "consumer", "--repo", str(beta), "--path", "docs/work-items.md",
               "--agent", AGENT_A))
 
 
