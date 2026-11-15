@@ -2,14 +2,15 @@
 
 Repository: `~/repositories/loom`
 Branch: `loom/loom-loom-2` (isolated worktree)
-Status: green, resubmitted after changes requested on review request 1547
+Status: green, resubmitted after changes requested on review requests 1547 and 1592
 
-All checks below were measured on `efc1b0d68d18a161c0ecf075a1814fc3c72b5090` (the branch tip
-before this submission) except where a step names a different command. This submission changes
-this evidence file and nothing else, so the templates and the taxonomy under review are
-byte-identical to the ones the delta review inspected at `38dbdf3` and re-inspected at `efc1b0d`:
+Every check below was re-measured on `82f8bcd32ee68daaa76fc214a8cdb1219f289f75` (the branch tip
+before this submission), each beside the command that reproduces it. This submission changes this
+evidence file and nothing else, so the templates and the taxonomy under review are byte-identical
+to the tree the delta review inspected at `38dbdf3`:
 
 ```bash
+git diff --stat 38dbdf3..<submitted commit> -- docs templates   # empty
 git diff --stat 8168ddc..<submitted commit> -- docs templates   # empty
 ```
 
@@ -77,7 +78,7 @@ Run from the worktree root unless a step says otherwise.
    python3 -m unittest discover -s tests
    ```
 
-   Result at `efc1b0d`: `Ran 221 tests in 70.451s` — `OK`. `grep -rn "    def test_" tests --include='*.py'
+   Result at `82f8bcd`: `Ran 221 tests in 70.733s` — `OK`. `grep -rn "    def test_" tests --include='*.py'
    | wc -l` also returns `221`, so the runner's number and the source's number agree.
    This number is measured on the branch being submitted, not carried over from an older commit.
 
@@ -87,21 +88,34 @@ Run from the worktree root unless a step says otherwise.
    python3 validate_work.py
    ```
 
-   Result: `PASS`, 72 warnings. All of them are conditions of the shared registry, not of this
-   diff: stale program-board revisions and dependency drift on other boards, expired and legacy
-   (epoch-less) claims on other boards, control-plane drift between registry and program files,
-   one ordering warning inside the shared event log (`event line 1040: timestamp moved
+   Result at `82f8bcd`: `PASS`, 72 warnings and no errors. Two of the 72 name this task:
+
+   - `WARN  write-path overlap within ~/repositories/loom: docs in loom/LOOM-1 and loom/LOOM-2` —
+     it follows from the declared paths and is the coordinator's to sequence, not something this
+     diff can clear.
+   - `WARN  loom/LOOM-2: registry says …, program says reviewed` — the registry-versus-program
+     drift described in Limits. The registry side of the message tracks the task's current status,
+     so this is the shape of the warning rather than one snapshot of it: it read `green` at
+     `82f8bcd` and reads `claimed` while a worker holds the claim.
+
+   The remaining 70 are conditions of the shared registry and of other boards: stale program-board
+   revisions and dependency drift on other boards, expired and legacy (epoch-less) claims on other
+   boards, one ordering warning inside the shared event log (`event line 1040: timestamp moved
    backwards`), and 52 pre-migration integrations proven by evidence only (accepted by
-   `decisions/integration-receipts-001.md`). The only warning that names this task is the `docs`
-   write-path overlap with `loom/LOOM-1`, which follows from the declared paths and is the
-   coordinator's to sequence, not something this diff can clear.
+   `decisions/integration-receipts-001.md`).
+
+   The drift warning is the one place where "external to this diff" would be false: this task's own
+   range edits `docs/work-items.md` and moves LOOM-1, LOOM-2 and LOOM-3 to `**Status.** Reviewed.`,
+   while the registry holds them green, claimed and green — so all three warn and the board text
+   came from this diff. It is recorded as a known limit in Limits rather than cleared by editing
+   three tasks' entries under this claim.
 
 6. **The reviewed guarantee still holds.** The delta review's concern was that the engine moved
    after the approved commit. For this task's paths it did not move after the reviewed point:
 
    ```bash
-   git diff --stat 38dbdf3..efc1b0d -- docs templates   # empty
-   git diff --stat 2be45cc..efc1b0d -- docs templates   # the whole delta this task ever had
+   git diff --stat 38dbdf3..82f8bcd -- docs templates   # empty
+   git diff --stat 2be45cc..82f8bcd -- docs templates   # the whole delta this task ever had
    ```
 
    The second command reports 7 files. The two that carry this task's content —
@@ -121,6 +135,15 @@ Run from the worktree root unless a step says otherwise.
   `README.md` is outside this task's write paths (`docs`, `templates`) and is a shared file in the
   commit guard, so this submission does not change it. **Recommended follow-up:** a task on
   `README.md` that adds one line pointing at `docs/artifacts.md` and `docs/adopting.md`.
+- **The program board's status lines drift from the registry.** `docs/work-items.md:7`, `:11` and
+  `:15` mark LOOM-1, LOOM-2 and LOOM-3 `**Status.** Reviewed.` — text this task's range introduced
+  at `2be45cc` — while the registry holds them green, claimed and green. `validate_work.py:436-443`
+  warns on each. The board file is inside this task's write paths (`docs`), but a status line is a
+  projection of the registry and belongs to the board sync, not to a worker editing three tasks'
+  entries to make its own warning disappear; doing that here would also fight the next claim and
+  release. **Recommended follow-up:** the coordinator runs
+  `./loom reconcile --board loom.program --apply --agent <coordinator>` so the three lines follow
+  the registry, after which all three warnings clear without a template change.
 - **The contract registry is validated; the capability map is only cross-referenced — not
   validated.** `validate_work.py:check_contracts` checks the contract-registry shape and its
   copies: `kind` in `http|event`, a known `status`, an `id` ending `.v<version>`, `gate` naming a
@@ -143,6 +166,24 @@ Run from the worktree root unless a step says otherwise.
   either. This submission leaves the text alone rather than editing another task's deliverable
   under this claim. **Recommended follow-up:** give LOOM-3 the write path and have it fix the
   line, or add it to a documentation-cleanup task.
+
+## Rework after review request 1592 (event 1608, changes requested)
+
+The reviewer re-verified the deliverable end to end — the eight starters covering the seven kinds
+plus `agents-block.md`, the seven-row kind table against the eight-row template table, all eight
+template links, the empty portfolio-instance grep, the YAML and JSON parses,
+`contract-registry.yaml`'s field names against `check_contracts`, the `agents-block` commands
+against `./loom claim --help`, the `efc1b0d..82f8bcd` range touching only this file, and a
+re-measured 221 tests — and rejected one sentence. No template, taxonomy or test-count change was
+needed.
+
+1. **A second warning names this task, and the "not of this diff" clause was too broad.** The
+   previous version said the `docs` write-path overlap with `loom/LOOM-1` was the only warning
+   naming this task. `validate_work.py` emits two: that overlap, and
+   `loom/LOOM-2: registry says …, program says reviewed`, which is raised against
+   `docs/work-items.md` — a file this task's own range edits. Verification step 5 now names both
+   and attributes the drift correctly, and the drift is carried in Limits as a known limit with the
+   board-sync follow-up, instead of being described as external.
 
 ## Rework after review request 1547 (event 1579, changes requested)
 
