@@ -4,15 +4,18 @@ Repository: `~/repositories/loom`
 Branch: `loom/loom-loom-2` (isolated worktree)
 Status: green, resubmitted after changes requested on review requests 1547 and 1592
 
-Every check below was re-measured on `82f8bcd32ee68daaa76fc214a8cdb1219f289f75` (the branch tip
-before this submission), each beside the command that reproduces it. This submission changes this
-evidence file and nothing else, so the templates and the taxonomy under review are byte-identical
-to the tree the delta review inspected at `38dbdf3`:
+Every check below was re-measured on the tree this file ships with, each beside the command that
+reproduces it. This submission changes this evidence file and nothing else, so the templates and the
+taxonomy are byte-identical to the tree the delta reviews inspected:
 
 ```bash
 git diff --stat 38dbdf3..<submitted commit> -- docs/artifacts.md templates   # empty
 git diff --stat 8168ddc..<submitted commit> -- docs/artifacts.md templates   # empty
 ```
+
+The round sections further down record what each review asked for. Their measurements belong to the
+tree of that round: where a number there disagrees with the block above, the tree has moved, not the
+claim.
 
 ## Delivered
 
@@ -98,11 +101,12 @@ Run from the worktree root unless a step says otherwise.
    The rest is shared registry state, including 21 reviewed tasks whose receipts record no approved
    content digest. None of it comes from this diff.
 
-   The remaining 70 are conditions of the shared registry and of other boards: stale program-board
+   The rest are conditions of the shared registry and of other boards: stale program-board
    revisions and dependency drift on other boards, expired and legacy (epoch-less) claims on other
    boards, one ordering warning inside the shared event log (`event line 1040: timestamp moved
-   backwards`), and 52 pre-migration integrations proven by evidence only (accepted by
-   `decisions/integration-receipts-001.md`).
+   backwards`), and two aggregate lines — 52 pre-migration integrations proven by evidence only
+   (accepted by `decisions/integration-receipts-001.md`) and the 21 digest-less receipts above. Both
+   aggregate lines are single warnings, not per-task counts, so they do not partition the total.
 
    The drift warning is the one place where "external to this diff" would be false: this task's own
    range edits `docs/work-items.md` and moves LOOM-1, LOOM-2 and LOOM-3 to `**Status.** Reviewed.`,
@@ -138,7 +142,7 @@ Run from the worktree root unless a step says otherwise.
   `README.md` that adds one line pointing at `docs/artifacts.md` and `docs/adopting.md`.
 - **The program board's status lines drift from the registry.** `docs/work-items.md:7`, `:11` and
   `:15` mark LOOM-1, LOOM-2 and LOOM-3 `**Status.** Reviewed.` — text this task's range introduced
-  at `2be45cc` — while the registry holds them green, claimed and green. `validate_work.py:436-443`
+  at `2be45cc` — while the registry holds them green, claimed and green. `validate_work.py:450-454`
   warns on each. The board file is outside this task's declared write path, but a status line is a
   projection of the registry and belongs to the board sync, not to a worker editing three tasks'
   entries to make its own warning disappear; doing that here would also fight the next claim and
@@ -152,9 +156,9 @@ Run from the worktree root unless a step says otherwise.
   and fixtures present, consumer pins compared to the artifact digest, and program maps barred
   from inventing a contract id. `validate_work.py:cross_check_capabilities` reads the
   capability-steward `registry.yaml` beside the work home (its `efforts`/`contracts`/`decisions`
-  entries with `id`, `path`, `status`, `owner`) and never parses a capability map. So the five
+  entries with `id`, `path`, `status`, `owner`) and never parses a capability map. So the six
   sections of `templates/capability-map.yaml` — `provides`, `consumes`, `owns`, `excludes`,
-  `open_questions` — are a hand-filled shape with no machine check behind them, and the six prose
+  `open_questions`, `evidence` — are a hand-filled shape with no machine check behind them, and the six prose
   starters (wayfinder map, spec, plan, ADR, memory, agents block) are in the same position.
 - **`docs/adr/0001-state-leaves-git.md` is history, not a template instance.** It records this
   engine's own split and cites this portfolio's scale. It is the engine's decision record about
@@ -174,7 +178,7 @@ plus `agents-block.md`, the seven-row kind table against the eight-row template 
 template links, the empty portfolio-instance grep, the YAML and JSON parses,
 `contract-registry.yaml`'s field names against `check_contracts`, the `agents-block` commands
 against `./loom claim --help`, the `efc1b0d..82f8bcd` range touching only this file, and a
-re-measured 276 tests — and rejected one sentence. No template, taxonomy or test-count change was
+re-measured 221 tests at that round — and rejected one sentence. No template, taxonomy or test-count change was
 needed.
 
 1. **A second warning names this task, and the "not of this diff" clause was too broad.** The
@@ -194,9 +198,11 @@ rejected the record on three points. All three are corrected above; no template 
 content changed.
 
 1. **False write-path claim.** The previous version said `docs/adopting.md` was "outside this
-   task's write paths". It is not: `loom show loom/LOOM-2` lists `docs`, and the guard's `covers()`
-   matches any path under a declared root. The claim is replaced by the accurate statement in
-   Limits, together with the fact that LOOM-3 declares no write paths.
+   task's write paths". It was, at that round: `loom show loom/LOOM-2` listed `docs` and
+   `templates`, and the guard's `covers()` matches any path under a declared root. Those paths were
+   narrowed to `capabilities/work/evidence/LOOM-2.md` by event 1791, so the present-tense version no
+   longer holds and Limits states the current position. LOOM-3 now declares five paths including
+   `docs/adopting.md`, so it can commit that file.
 
 2. **Wrong line number.** The doubled comment is at `docs/adopting.md:11`, not `:10` — line 10 is
    the `core.hooksPath` line. Corrected everywhere it appears.
