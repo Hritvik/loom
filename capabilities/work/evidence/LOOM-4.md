@@ -17,8 +17,9 @@ and tracked files that carry a name the operator guards.
     comparison against a namespace literal, a regex branch on `<program>/…`, or a
     `--program`/`--namespace`/`--focus` default that names a program.
   - **tree** — every tracked file is checked for an absolute home path (`/Users/<name>`,
-    `/home/<name>`, `/root/<name>`, `C:\Users\<name>`) and for a mailbox outside the reserved
-    example domains.
+    `/home/<name>`, `/root/<name>`, `C:\Users\<name>` in either separator style) and for a mailbox
+    outside the reserved example domains; `TreeDetectorTest` proves both detectors on synthetic
+    text.
   - **denylist** — `LOOM_BOUNDARY_DENYLIST` points at the operator's list outside this repository;
     the sweep is literal, case-insensitive and whole-token. A test also fails if the list itself
     resolves inside the public checkout.
@@ -91,12 +92,53 @@ FAILED (failures=1)
 `test_the_denylist_lives_outside_the_repository` passed, so the list was accepted from outside the
 checkout and would have been refused from inside it.
 
+## Review round two — the Windows branch repaired
+
+Review of `2086122` requested changes: the Windows half of the tree scan did not match a real
+home path. `WINDOWS_HOME` required *two literal backslashes* after the drive letter and two after
+the directory, so only a JSON-escaped string hit; `C:\Users\<name>`, `C:/Users/<name>` and
+`D:\home\<name>` all passed the scan clean. Acceptance criterion 2 was met for POSIX only, and the
+docstring's "a refactor cannot quietly turn them into no-ops" was untrue for the tree detectors,
+which had no synthetic test.
+
+Fixed in `d27dfd2`:
+
+- `WINDOWS_HOME` now accepts one or two separators of either kind,
+  `[A-Za-z]:[\\/]{1,2}(?:Users|home|root)[\\/]{1,2}[A-Za-z0-9._-]+`.
+- `TreeDetectorTest` exercises `home_paths` and `personal_emails` on synthetic text: POSIX
+  homes, Windows homes with `\`, `/` and escaped `\\`, relative/placeholder paths that must not
+  match, and reserved versus reachable mailboxes. The fixtures are assembled from parts because
+  this file is itself tracked and scanned.
+
+The detector before and after, on the reviewer's three examples:
+
+```
+'C:\\Users\\<name>' old: False new: True
+'C:/Users/<name>'   old: False new: True
+'D:\\home\\<name>'  old: False new: True
+```
+
+The repaired scan re-ran over every tracked file and found no Windows home path, so the change
+exposes no new leak.
+
+```
+python3 -m unittest tests.test_boundary -v
+Ran 13 tests ... OK (skipped=2)
+
+python3 -m unittest discover -s tests
+Ran 235 tests in 73.5s
+OK (skipped=2)
+
+python3 validate_work.py
+PASS
+```
+
 ## Acceptance
 
 | Criterion | Where it is proved |
 |---|---|
 | A structural test fails on a literal program-namespace id or a branch on one | `EngineSourceTest.test_engine_source_carries_no_task_id_literal`, `…_does_not_branch_on_a_namespace`; red run above |
-| A test fails on an absolute home path or a personal email in tracked files | `TrackedTreeTest`; scratch run above |
+| A test fails on an absolute home path or a personal email in tracked files | `TrackedTreeTest`; `TreeDetectorTest` for both separator styles and for reserved versus reachable mailboxes; scratch run above |
 | The private denylist runs without the list entering the public repo | `PrivateDenylistTest`: env-var path, outside-repo assertion, skip-with-pointer, synthetic mechanism tests |
 
 ## Private denylist, against this checkout
