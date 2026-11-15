@@ -1697,8 +1697,18 @@ def attempt_views(records: list[dict]) -> dict[str, dict]:
 
 
 def attempt_is_live(item: dict) -> bool:
-    """The attempt's own process is still running: identity, not bookkeeping."""
-    return any(launch_is_live(launch) for launch in item.get("launches") or [])
+    """The attempt's own process is still running: identity, not bookkeeping.
+
+    A closure copies the pid it closed and carries no start time. Counting it as liveness makes a
+    finished run look alive forever whenever that pid is recycled, and `workers stop` would then
+    signal an unrelated process. Only the launch that attached the process counts. A finished run
+    may still be winding down and keeps its slot, but only a recorded start time can prove the pid
+    is ours.
+    """
+    launches = [launch for launch in item.get("launches") or [] if launch.get("closes") is None]
+    if item.get("state") in ATTEMPT_TERMINAL:
+        return any(launch_is_live(launch) and launch.get("started_at") for launch in launches)
+    return any(launch_is_live(launch) for launch in launches)
 
 
 def live_attempts(views: dict[str, dict]) -> list[dict]:

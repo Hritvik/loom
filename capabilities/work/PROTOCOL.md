@@ -124,7 +124,7 @@ One agent run is one attempt. The claim opens it in the same transaction that gr
   left alone — a claim is authority, a run is work.
 - A relaunch, takeover or retry allocates a new attempt. The previous one keeps its identity, its
   process record and its checkout, and `loom attempts <task>` still lists it.
-- Each attempt owns a checkout and a branch (`worktrees/<slug>-a<N>` on `loom/<slug>-a<N>`), so two
+- Each implementer attempt owns a checkout and a branch (`worktrees/<slug>-a<N>` on `loom/<slug>-a<N>`), so two
   runs of one task cannot write into one directory. A relaunch starts from the previous attempt's
   branch when that branch exists, so committed work is not thrown away.
 - Capacity is the number of attempts whose recorded process is still running, one slot per process.

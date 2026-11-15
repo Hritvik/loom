@@ -2223,6 +2223,29 @@ class WorkCLITest(unittest.TestCase):
             store.close()
         self.assertEqual(errors, [])
 
+    def test_a_legacy_closure_pid_never_reads_as_a_live_worker(self):
+        """A closure copies the pid it closed; if that pid is recycled, it is not our process."""
+        import os as os_module
+
+        from engine import attempt_is_live, attempt_views
+
+        store = self.ws.store()
+        try:
+            with store.lock():
+                opened = store.append_event(
+                    event="launch", task="demo/W-1", agent="agent-a", role="implementer",
+                    state="pending", pid=999999, started_at="2020-01-01T00:00:00Z",
+                    revision=0, now=T0)
+                store.append_event(
+                    event="launch", task="demo/W-1", agent="agent-a", role="implementer",
+                    state="done", pid=os_module.getpid(), closes=opened["seq"],
+                    revision=0, now=T0)
+        finally:
+            store.close()
+        views = attempt_views(self.ws.events())
+        legacy = views[f"demo/W-1#legacy{opened['seq']}"]
+        self.assertFalse(attempt_is_live(legacy), legacy)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",

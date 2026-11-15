@@ -113,7 +113,7 @@ green task is not mistaken for the implementer.
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s tests      # 232 tests, OK
+python3 -m unittest discover -s tests      # 251 tests, OK
 python3 validate_work.py                   # PASS (against the live registry)
 ./loom attempts --live                     # folds this worker's legacy launch correctly
 ./loom show loom/LOOM-5                    # prints the current attempt
