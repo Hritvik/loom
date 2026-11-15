@@ -1518,8 +1518,12 @@ class WorkCLITest(unittest.TestCase):
 
         started = process_start(os.getpid())
         self.assertIsNotNone(started)
-        self.assertFalse(launch_is_live({"pid": os.getpid(), "ts": "2020-01-01T00:00:00Z"}))
-        self.assertTrue(launch_is_live({"pid": os.getpid(), "ts": iso(started)}))
+        self.assertFalse(launch_is_live({"pid": os.getpid(), "started_at": "2020-01-01T00:00:00Z"}))
+        self.assertTrue(launch_is_live({"pid": os.getpid(), "started_at": iso(started)}))
+        # Without the process's own start time we cannot prove reuse, so the slot is kept:
+        # a false "dead" duplicates the worker, a false "live" only holds a slot the age
+        # report already names.
+        self.assertTrue(launch_is_live({"pid": os.getpid(), "ts": "2020-01-01T00:00:00Z"}))
 
     def test_reconcile_closes_superseded_pending_launches(self):
         store = self.ws.store()
@@ -1543,6 +1547,23 @@ class WorkCLITest(unittest.TestCase):
         store = self.ws.store()
         try:
             with store.lock():
+                # The pid belongs to this test process, but the launch claims the process started
+                # in 2020. That is a reused pid, and the recorded start time proves it.
+                store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                                   role="implementer", state="pending", pid=os.getpid(),
+                                   started_at="2020-01-01T00:00:00Z", revision=0, now=T0)
+        finally:
+            store.close()
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", T0)
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
+        self.assertEqual(launches[-1].get("state"), "failed")
+
+    def test_reconcile_keeps_a_launch_it_cannot_prove_is_reused(self):
+        store = self.ws.store()
+        try:
+            with store.lock():
                 store.append_event(event="launch", task="demo/W-1", agent="opencode/loom-worker",
                                    role="implementer", state="pending", pid=os.getpid(),
                                    revision=0, now=T0)
@@ -1552,7 +1573,7 @@ class WorkCLITest(unittest.TestCase):
                     "--worker-command", "/usr/bin/true", "--now", T0)
         launches = [event for event in self.ws.events()
                     if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
-        self.assertEqual(launches[-1].get("state"), "failed")
+        self.assertEqual(launches[-1].get("state"), "pending")
 
     def changes_requested_task(self, agent="agent-a", ttl="30m"):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", ttl,
@@ -1802,6 +1823,25 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("counts", plan)
         self.assertIn("merge_needed", plan["counts"])
         self.assertIn("humanBlocked", plan)
+
+    def test_consecutive_passes_never_exceed_the_implementer_limit(self):
+        for index, name in ((5, "five"), (6, "six"), (7, "seven")):
+            self.invoke("create", "--agent", "agent-a", "--now", T0,
+                        "--id", f"demo/W-{index}", "--board", "demo.board",
+                        "--title", f"Ready {name}", "--status", "ready",
+                        "--write-path", f"src/{name}")
+        passes = []
+        for _ in range(3):
+            self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                        "--no-integrate", "--worker-command", "sh -c 'sleep 60'",
+                        "--now", T0)
+            passes.append(len([event for event in self.ws.events()
+                               if event.get("event") == "launch"
+                               and event.get("role") == "implementer"
+                               and event.get("state") == "pending"]))
+        self.assertEqual(passes[0], 2, passes)
+        self.assertEqual(passes[1], 2, passes)
+        self.assertEqual(passes[2], 2, passes)
 
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)

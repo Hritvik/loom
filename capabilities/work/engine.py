@@ -1559,9 +1559,12 @@ def launch_is_live(launch: dict) -> bool:
     started = process_start(pid)
     if started is None:
         return True  # cannot prove reuse; do not close a process we cannot identify
-    expected = launch.get("started_at") or launch.get("ts")
+    # Only `started_at` is the process's own start time. `ts` is when the event was written, which
+    # can differ from the process start by more than the tolerance (a slow spawn, an overridden
+    # clock), and a false "dead" verdict duplicates the worker while freeing its slot.
+    expected = launch.get("started_at")
     if not expected:
-        return True
+        return True  # cannot prove reuse; keep the slot and let the age report surface it
     try:
         expected_at = parse_time(expected)
     except (TypeError, ValueError):
@@ -2643,19 +2646,13 @@ def cmd_tick(args, store: Store) -> int:
         "reviewer": args.max_reviewer,
         "integrator": args.max_integrator,
     }
-    active = {role: 0 for role in ROLES}
     expired = []
     for task in registry["tasks"]:
         claim = task.get("claim") or {}
         if not claim:
             continue
         expiry = lease_expiry(task)
-        if expiry and expiry > now:
-            # A green task is waiting on review; its implementer is done. Counting it would
-            # shrink the implementer pool exactly while the review queue is draining.
-            if task.get("status") != "green":
-                active[task_role(task)] += 1
-        else:
+        if not (expiry and expiry > now):
             expired.append({
                 "task": task["id"],
                 "agent": claim.get("agent"),
@@ -2667,11 +2664,19 @@ def cmd_tick(args, store: Store) -> int:
     for record in records:
         if record.get("event") == "launch" and record.get("task"):
             latest_launch[record["task"]] = record
-    live_reviewers = [
+    # Concurrency is the number of live processes, not the number of claims. A claim is authority;
+    # a live launch is an agent actually running. Deriving capacity from claims let a released or
+    # regressed claim free a slot while its worker kept running, and a green task's claim shrink
+    # the pool while its review was pending.
+    live_launches = [
         record for record in latest_launch.values()
-        if record.get("role") == "reviewer" and record.get("state") == "pending"
-        and launch_is_live(record)
+        if record.get("state") == "pending" and launch_is_live(record)
     ]
+    active = {role: 0 for role in ROLES}
+    for record in live_launches:
+        role = record.get("role") or "implementer"
+        active[role] = active.get(role, 0) + 1
+    live_reviewers = [record for record in live_launches if record.get("role") == "reviewer"]
     stuck_after = parse_duration(args.stuck_after)
     stuck = []
     for record in latest_launch.values():
