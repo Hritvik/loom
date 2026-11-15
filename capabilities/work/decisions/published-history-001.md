@@ -13,10 +13,66 @@ file names the files and the checks, and it is the place to look for what was re
 
 The repository is public, and a working-tree check cannot see history. `origin/main` reaches the
 commits that added the removed files, and the raw file service serves any tracked path at any
-commit. Two files removed by LOOM-1 return `200` at their historical paths today and still name the
-portfolio's programs, ownership and workspace. So every check in the evidence file passes while the
-goal — "the public engine must not name or embed this portfolio's programs, maps or identifiers" —
-is not met as published.
+commit. So every check in the evidence file passes while the goal — "the public engine must not
+name or embed this portfolio's programs, maps or identifiers" — is not met as published.
+
+**The exposure is 27 tracked paths, not two.** `36e2973` ("refactor: keep portfolio content out of
+the public engine", the commit that carries this task's removals) deleted 27 paths in one commit:
+`capabilities/work/linear-sync.md`, `capabilities/work/programs/identity-platform-integration.yaml`,
+and 25 under `contracts/`. The two documentation files are the ones the evidence file names first;
+the 25 contract paths are the larger part of the exposure and were deleted in the same commit.
+
+| Where | Count | Paths |
+| --- | --- | --- |
+| `capabilities/work/` | 2 | `linear-sync.md`, `programs/identity-platform-integration.yaml` |
+| `contracts/registry*` | 2 | `registry.yaml`, `registry.schema.json` |
+| `contracts/events/` | 7 | three under `iam.app-subject.onboarding-ready.v1/v1/`, two under `ums.profile.association-report.v1/v1/`, `ums.profile.state-changed.v1/v1/schema.json`, `dutch.member-profile.mapping-changed.v1/v1/schema.json` |
+| `contracts/http/` | 4 | two under `iam.onboarding-snapshot.v1/v1/`, `ums.profile-status.v1/v1/openapi.json`, `dutch.profile-state.v1/v1/openapi.yaml` |
+| `contracts/fixtures/` | 12 | two `dutch.member-profile.mapping-changed.v1`, two `dutch.profile-state.v1`, one `iam.app-subject.onboarding-ready.v1`, one `iam.onboarding-snapshot.v1`, one `ums.profile-status.v1`, four `ums.profile.association-report.v1`, one `ums.profile.state-changed.v1` |
+
+The paths carry the identifiers directly: `contracts/events/iam.*`, `contracts/events/ums.*`,
+`contracts/http/dutch.*`, `contracts/fixtures/iam.*`, `contracts/fixtures/ums.*` and
+`contracts/fixtures/dutch.*`. `contracts/registry.yaml` at `a68c436` names `owner: iam` and a note
+that `UMS` and `Dutch` must re-pin. Six of the 27 were fetched from
+`https://raw.githubusercontent.com/Hritvik/loom/a68c436/<path>` and each returned `200`
+(`contracts/registry.yaml`, an `iam` event schema, the `dutch` HTTP contract, a `ums` status
+fixture, `linear-sync.md`, `programs/identity-platform-integration.yaml`). The other 21 were not
+fetched one by one; the deletion set below is the tracked set at `a68c436`, and the raw service
+serves any tracked path at that commit.
+
+Whoever acts on this decision must treat the contract paths as in scope. Option A as it was first
+drafted said "purge the removed paths", which read as the two documentation files; it would have
+left the 25 portfolio-identifying contract paths public. Full deletion set at `36e2973`:
+
+```
+capabilities/work/linear-sync.md
+capabilities/work/programs/identity-platform-integration.yaml
+contracts/events/dutch.member-profile.mapping-changed.v1/v1/schema.json
+contracts/events/iam.app-subject.onboarding-ready.v1/v1/event-envelope.schema.json
+contracts/events/iam.app-subject.onboarding-ready.v1/v1/payload.schema.json
+contracts/events/iam.app-subject.onboarding-ready.v1/v1/schema.json
+contracts/events/ums.profile.association-report.v1/v1/common.json
+contracts/events/ums.profile.association-report.v1/v1/schema.json
+contracts/events/ums.profile.state-changed.v1/v1/schema.json
+contracts/fixtures/dutch.member-profile.mapping-changed.v1/v1/invalid/forbidden-identity.json
+contracts/fixtures/dutch.member-profile.mapping-changed.v1/v1/valid/member-profile-mapping-changed.json
+contracts/fixtures/dutch.profile-state.v1/v1/valid/profile-state-ready.json
+contracts/fixtures/dutch.profile-state.v1/v1/valid/profile-state-required.json
+contracts/fixtures/iam.app-subject.onboarding-ready.v1/v1/valid/onboarding-ready-event.json
+contracts/fixtures/iam.onboarding-snapshot.v1/v1/valid/onboarding-snapshot-response.json
+contracts/fixtures/ums.profile-status.v1/v1/valid/status-ready.json
+contracts/fixtures/ums.profile.association-report.v1/v1/association-report-invalid-display.json
+contracts/fixtures/ums.profile.association-report.v1/v1/association-report-invalid-environment.json
+contracts/fixtures/ums.profile.association-report.v1/v1/association-report-invalid-tombstone.json
+contracts/fixtures/ums.profile.association-report.v1/v1/association-report.json
+contracts/fixtures/ums.profile.state-changed.v1/v1/valid/state-event.json
+contracts/http/dutch.profile-state.v1/v1/openapi.yaml
+contracts/http/iam.onboarding-snapshot.v1/v1/onboarding-snapshot-response.schema.json
+contracts/http/iam.onboarding-snapshot.v1/v1/openapi.yaml
+contracts/http/ums.profile-status.v1/v1/openapi.json
+contracts/registry.schema.json
+contracts/registry.yaml
+```
 
 A worker cannot close this: the remediation rewrites a public remote and re-points published SHAs,
 which needs the owner's decision and an owner's push. Recording it as an accepted limit would be
@@ -26,7 +82,8 @@ the owner accepting a limit on the owner's behalf, so this entry is proposed, no
 
 Not yet taken. The options as they stand:
 
-**A. Rewrite the published history (recommended).** Purge the removed paths from all commits with
+**A. Rewrite the published history (recommended).** Purge all 27 paths listed above — the two
+documentation files and the 25 `iam`/`ums`/`dutch` contract paths — from all commits with
 `git filter-repo`, force-push the rewritten refs, and re-point the clone URL's users. Every commit
 SHA in the public engine changes. The approval records for in-flight tasks name those SHAs, so the
 rewrite must be scheduled when no review is mid-flight, or the review requests must be re-issued

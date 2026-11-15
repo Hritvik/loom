@@ -1,7 +1,7 @@
 # Evidence — LOOM-1 remove portfolio content from the public engine
 
 Repository: `~/repositories/loom`
-Status: green, submitted for independent review (round 6)
+Status: green, submitted for independent review (round 7)
 
 > Redacted by LOOM-4. The commands below once quoted this portfolio's program names, a personal
 > handle and two private repository slugs. Those are now guarded by
@@ -39,13 +39,18 @@ here rather than annotated, because this block is the summary a reviewer reads f
   example of an ADR more than an engine decision; it should move to the content repository once a
   generic ADR template exists.
 - **The published history still serves the removed material.** The repository is public and
-  `origin/main` reaches the earlier commits, so the two files this task deleted remain downloadable
-  from the raw file service at their historical paths, and they name this portfolio's programs,
-  ownership and workspace. Every check in this file is a working-tree check; none of them can make
-  the goal true as published. This is not fixable from inside a task claim: it needs the engine
-  maintainer's decision, and the remediation rewrites a public remote, which a worker is not
-  permitted to push. Decision: `decisions/published-history-001.md` (status: proposed, awaiting the
-  owner). Until it is accepted and executed, the goal is met in the tree and not in the history.
+  `origin/main` reaches the earlier commits, so the **27 paths this task deleted** remain
+  downloadable from the raw file service at their historical paths, and they name this portfolio's
+  programs, ownership and workspace. Two of the 27 are documentation (`linear-sync.md`, the program
+  map); the other 25 are under `contracts/` and carry `iam`/`ums`/`dutch` in their own paths
+  (`contracts/events/iam.*`, `contracts/http/dutch.*`, `contracts/fixtures/ums.*`, and
+  `contracts/registry.yaml`, which names `owner: iam`). All were deleted in one commit, `36e2973`.
+  Every check in this file is a working-tree check; none of them can make the goal true as
+  published. This is not fixable from inside a task claim: it needs the engine maintainer's
+  decision, and the remediation rewrites a public remote, which a worker is not permitted to push.
+  Decision: `decisions/published-history-001.md` (status: proposed, awaiting the owner, full
+  27-path enumeration). Until it is accepted and executed, the goal is met in the tree and not in
+  the history.
 
 ## Rework after review (event 740, changes requested)
 
@@ -174,12 +179,12 @@ difference between the two is this file):
 The reviewer confirmed the five event-1461 findings closed and found four things this round:
 
 1. **The goal is not met as published.** Every check above is a working-tree check. The repository
-   is public (`Hritvik/loom`, `private: false`) and `origin/main` reaches `a68c436`, so the program
-   map and the Linear runbook this task removed are still served from their historical raw paths;
-   they name the programs, ownership and workspace. Recorded under "Limits" above, with
-   `decisions/published-history-001.md` proposing the remediation. **Not executed here:** it
-   rewrites a public remote and needs the owner's decision, so a worker cannot do it and cannot
-   accept the limit in the owner's place.
+   is public (`Hritvik/loom`, `private: false`) and `origin/main` reaches `a68c436`, so the 27 paths
+   this task removed — the program map, the Linear runbook, and 25 `iam`/`ums`/`dutch` contract
+   paths — are still served from their historical raw paths; they name the programs, ownership and
+   workspace. Recorded under "Limits" above, with `decisions/published-history-001.md` proposing
+   the remediation. **Not executed here:** it rewrites a public remote and needs the owner's
+   decision, so a worker cannot do it and cannot accept the limit in the owner's place.
 2. The top Verification and Limits blocks still carried round-1 numbers (132 tests, and a sweep
    claimed to return only the `WORK_CONTENT_HOME` example). Rewritten as "Verification (current
    tree)" with the sweep and the 221-test count re-run, and a note saying which tree the old
@@ -197,9 +202,46 @@ Verification at the commit named in the review request:
   `docs/adr/0001-state-leaves-git.md:53` (the accepted limit above) and this file.
 - `git grep -n -I -i -E "(^|[^A-Za-z0-9_-])(cal|chat|dutch-ref|herald|jarvis|midas|modelswitch|myfinance|myfitnessguide|superapp|teach|uds|uds-client)([^A-Za-z0-9_-]|$)"`
   over the tracked tree returns only the English word "chat" (`AGENT-GUIDE.md:3`, `README.md:372`,
-  `engine.py:1460`) and this file's account of the fixture change.
-- `curl -s -o /dev/null -w '%{http_code}'` against the two historical raw paths still returns
-  `200` — the exposure is live, not merely theoretical.
+  `engine.py:1460`) and this file, which records the `gym-tracker` / `MyFitnessGuide` docstring
+  example and the `chat/W-1` → `gamma/W-1` fixture change.
+- `curl -s -o /dev/null -w '%{http_code}'` against six of the 27 historical raw paths, including
+  `contracts/registry.yaml`, an `iam` event schema, the `dutch` HTTP contract and the two
+  documentation files, still returns `200` — the exposure is live, not merely theoretical.
 - `python3 validate_work.py` — PASS.
 - `python3 -m unittest discover -s tests` — 221 tests, all pass.
 
+## Seventh rework after review of `2919804` (event 1598, changes requested)
+
+The reviewer confirmed all four event-1556 items done as claimed and raised one blocking finding
+plus one minor:
+
+1. **The history record understated the exposure.** It named the two documentation files; the
+   removal commit `36e2973` deleted 27 tracked paths in one commit — those two plus 25 under
+   `contracts/` (`registry.yaml`, `registry.schema.json`, 7 event schemas, 4 HTTP contracts, 12
+   fixtures). The contract paths carry the identifiers in the paths themselves
+   (`contracts/events/iam.*`, `contracts/http/dutch.*`, `contracts/fixtures/ums.*`) and
+   `contracts/registry.yaml` at `a68c436` names `owner: iam` and a note that `UMS` and `Dutch` must
+   re-pin. Verified with `git show --diff-filter=D --name-only 36e2973`, which prints exactly 27
+   paths. Both the "Limits" bullet and `decisions/published-history-001.md` now enumerate all 27,
+   say they were deleted in the same commit, say plainly that the contract paths carry `iam`/`ums`/
+   `dutch`, and Option A now names all 27 rather than "the removed paths".
+2. **Minor:** the sixth-rework program-id sweep bullet said the sweep matches only "this file's
+   account of the fixture change". It also matches this file's `gym-tracker` / `MyFitnessGuide`
+   docstring entry. Corrected to name both.
+
+Verification at the commit named in the review request:
+
+- `git show --diff-filter=D --name-only --format= 36e2973 | wc -l` — `27`; two under
+  `capabilities/work/`, 25 under `contracts/`.
+- `curl -s -o /dev/null -w '%{http_code}'` for `contracts/registry.yaml`, an `iam` event schema,
+  `contracts/http/dutch.profile-state.v1/v1/openapi.yaml`, a `ums` status fixture,
+  `capabilities/work/linear-sync.md` and the program map at `a68c436` — all `200`. The other 21
+  were not fetched individually; they are the remainder of the tracked set at `a68c436`.
+- `git show a68c436:contracts/registry.yaml` — `owner: iam`, with the `UMS`/`Dutch` re-pin note.
+- `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
+  over the tracked tree returns `README.md:24`, `docs/adopting.md:8` (the public clone URL),
+  `docs/adr/0001-state-leaves-git.md:53` (the accepted limit above), this file, and
+  `decisions/published-history-001.md` — the last is new in this round and unavoidable: the
+  decision cannot ask the owner to purge 27 paths without naming them.
+- `python3 validate_work.py` — PASS.
+- `python3 -m unittest discover -s tests` — 221 tests, all pass.
