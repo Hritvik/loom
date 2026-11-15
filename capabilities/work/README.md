@@ -11,7 +11,7 @@ reconciliation**.
 | `work-home.yaml` | Marks this directory as the authoritative coordination home |
 | `store.py` | Storage: the SQLite backend, the interface, and the legacy file importer |
 | `~/.local/state/loom/work.db` | Live state: boards, tasks, edges, claims and the hash-chained events |
-| `loom` | The single CLI: every engine verb, plus `tick`, `workers`, `schedule`, `linear` and `logs`; policy in `~/.config/loom/loom.json` |
+| `loom` | The single CLI: every engine verb, plus `tick`, `workers`, `schedule`, `deploy`, `linear` and `logs`; policy in `~/.config/loom/loom.json` |
 | `engine.py` | The engine verbs and the policy pass, imported by `loom`; not a separate command |
 | `AGENT-GUIDE.md` | The briefing to point a product agent at: the loop, the enforced rules, discovery and escalation |
 | `validate_work.py` | Schema, drift, dependency, lease, epoch, review, event-chain and checkpoint verification |
@@ -93,7 +93,11 @@ receipt already exists, and the event is appended to the audit log like any othe
 ./loom workers                  # running, with pid, branch and worktree
 ./loom workers stop <task>
 ./loom schedule status          # label, plist, interval, job state and the last log lines
+./loom schedule install --restart   # write both plists for the current engine, then start
 ./loom schedule start|stop
+./loom deploy status            # development head, released head, what the schedule runs
+./loom deploy promote           # copy the committed tree into the release the scheduler runs
+./loom deploy rollback
 ./loom linear sync --all --apply --if-changed
 ./loom logs <task>
 ```
@@ -103,6 +107,18 @@ receipt already exists, and the event is appended to the audit log like any othe
 The launchd job runs `loom tick --apply --quiet` every **120 seconds**. An idle pass is ~0.5s and
 prints nothing; a pass that claims, reviews, records or escalates prints its report. `schedule status`
 shows the interval alongside the label and plist, so the cadence is visible rather than implied.
+
+### Development is not deployment
+
+The scheduler runs a **promoted release**, not the development checkout. `loom deploy promote`
+archives the committed tree at `HEAD` into `~/.local/state/loom/engine/` and records the commit and a
+tree digest in `engine.release`; `~/.local/state/loom/engine.prev/` keeps the previous one for
+`rollback`. Promotion refuses an uncommitted tree, so what runs is always a commit.
+
+That matters because the engine coordinates every board: a commit to `capabilities/work` must not
+change behaviour on the next 120s pass. The loop is edit → test → commit → promote → restart, and
+`loom deploy status` says `STALE` whenever development is ahead of the release. `loom schedule
+install` writes both plists against the promoted tree, so the path is never hand-edited.
 
 ## Running unattended
 

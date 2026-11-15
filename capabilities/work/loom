@@ -15,11 +15,15 @@ need to know about: `tick`, `workers`, `schedule`, `linear` and `logs`.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import hashlib
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 WORK = Path(__file__).resolve().parent
@@ -51,7 +55,7 @@ DEFAULTS = {
 }
 
 GLOBAL_FLAGS = {"--root", "--agent", "--now", "--store", "--db"}
-FRONT_DOOR = {"tick", "workers", "schedule", "linear", "logs", "integration-plan"}
+FRONT_DOOR = {"tick", "workers", "schedule", "linear", "logs", "integration-plan", "deploy"}
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -74,6 +78,172 @@ def state_home() -> Path:
     home = Path.home() / ".local/state/loom"
     home.mkdir(parents=True, exist_ok=True)
     return home
+
+
+def engine_dir() -> Path:
+    """The promoted release tree, or this checkout when nothing is promoted."""
+    override = os.environ.get("LOOM_ENGINE")
+    if override:
+        return Path(override).expanduser()
+    return state_home() / "engine"
+
+
+def engine_prev() -> Path:
+    return engine_dir().with_name(engine_dir().name + ".prev")
+
+
+def release_file() -> Path:
+    return engine_dir().with_name("engine.release")
+
+
+def repo_root() -> Path:
+    return WORK.parents[1]
+
+
+def running_root() -> Path:
+    """The tree the launchd jobs actually execute: the release if one exists."""
+    if (engine_dir() / "capabilities/work/loom").is_file():
+        return engine_dir()
+    return repo_root()
+
+
+def read_release() -> dict:
+    try:
+        return json.loads(release_file().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_release(data: dict) -> None:
+    release_file().parent.mkdir(parents=True, exist_ok=True)
+    tmp = release_file().with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, release_file())
+
+
+def git_text(repo: Path, *args: str) -> str:
+    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def cmd_deploy(args: argparse.Namespace, config: dict) -> int:
+    if args.action == "path":
+        print(running_root())
+        return 0
+    repo = Path(args.repo).expanduser() if getattr(args, "repo", None) else repo_root()
+    if args.action == "status":
+        released = read_release().get("current") or {}
+        dev = git_text(repo, "rev-parse", "HEAD")
+        dirty = git_text(repo, "status", "--porcelain")
+        plist = plist_path(config["schedule"].get("tick_label", DEFAULTS["schedule"]["tick_label"]))
+        scheduled = ""
+        if plist.is_file():
+            try:
+                arguments = plistlib.loads(plist.read_bytes()).get("ProgramArguments") or []
+                scheduled = arguments[1] if len(arguments) > 1 else ""
+            except Exception:
+                scheduled = ""
+        print(f"development: {repo}")
+        print(f"  head:      {dev or 'not a git repository'}"
+              f"{' (dirty: ' + str(len(dirty.splitlines())) + ' file(s))' if dirty else ''}")
+        print(f"release:    {engine_dir()}")
+        print(f"  head:      {released.get('commit', 'none')}")
+        if released:
+            print(f"  promoted:  {released.get('promoted_at')}")
+        print(f"  tree:      {'present' if (engine_dir() / 'capabilities/work/loom').is_file() else 'absent'}")
+        print(f"schedule:   {scheduled or 'unknown'}")
+        pinned = bool(scheduled) and str(engine_dir()) in scheduled
+        if not released:
+            print("verdict:    UNPINNED — the scheduler runs the development checkout")
+        elif dev and released.get("commit") != dev:
+            print("verdict:    STALE — development is ahead of the release; promote when reviewed")
+        elif not pinned:
+            print("verdict:    UNPINNED — a release exists but the schedule still points at development")
+        else:
+            print("verdict:    PINNED — the scheduler runs the promoted release")
+        return 0
+    if args.action == "promote":
+        if not (repo / ".git").exists():
+            print(f"{repo} is not a git repository; promote from the development checkout",
+                  file=sys.stderr)
+            return 2
+        dirty = git_text(repo, "status", "--porcelain")
+        if dirty:
+            print(f"refusing to promote: {len(dirty.splitlines())} uncommitted change(s) in {repo}",
+                  file=sys.stderr)
+            return 2
+        commit = git_text(repo, "rev-parse", args.ref or "HEAD")
+        if not commit:
+            print(f"cannot resolve {args.ref or 'HEAD'} in {repo}", file=sys.stderr)
+            return 2
+        current = (read_release().get("current") or {}).get("commit")
+        if commit == current and (engine_dir() / "capabilities/work/loom").is_file():
+            print(f"{commit[:12]} is already the release")
+            return 0
+        staging = Path(tempfile.mkdtemp(prefix="loom-release-"))
+        try:
+            archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=tar", commit],
+                                     capture_output=True)
+            if archive.returncode != 0:
+                print(f"git archive failed: {archive.stderr.decode(errors='replace').strip()}",
+                      file=sys.stderr)
+                return 2
+            extract = subprocess.run(["tar", "-x", "-C", str(staging)], input=archive.stdout)
+            if extract.returncode != 0:
+                print("could not extract the release archive", file=sys.stderr)
+                return 2
+            if not (staging / "capabilities/work/loom").is_file():
+                print("the archive does not contain capabilities/work/loom", file=sys.stderr)
+                return 2
+            if engine_dir().exists():
+                if engine_prev().exists():
+                    shutil.rmtree(engine_prev())
+                engine_dir().rename(engine_prev())
+            engine_dir().parent.mkdir(parents=True, exist_ok=True)
+            staging.rename(engine_dir())
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+        write_release({
+            "current": {
+                "commit": commit,
+                "promoted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "tree": tree_digest(engine_dir()),
+            },
+            "previous": read_release().get("current"),
+        })
+        print(f"promoted {commit[:12]} to {engine_dir()}")
+        print("restart the jobs to run it: loom schedule install --restart")
+        return 0
+    if args.action == "rollback":
+        if not engine_prev().exists():
+            print("no previous release to roll back to", file=sys.stderr)
+            return 2
+        retired = engine_dir().with_name("engine.retired")
+        if retired.exists():
+            shutil.rmtree(retired)
+        if engine_dir().exists():
+            engine_dir().rename(retired)
+        engine_prev().rename(engine_dir())
+        if retired.exists():
+            retired.rename(engine_prev())
+        data = read_release()
+        data["current"], data["previous"] = data.get("previous"), data.get("current")
+        write_release(data)
+        print(f"rolled back to {(data.get('current') or {}).get('commit', 'previous')[:12]}")
+        print("restart the jobs: loom schedule install --restart")
+        return 0
+    print(f"unknown release action {args.action}", file=sys.stderr)
+    return 2
 
 
 def split_globals(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -264,6 +434,47 @@ def cmd_schedule(args: argparse.Namespace, config: dict) -> int:
     linear_label = config["schedule"].get("linear_label", DEFAULTS["schedule"]["linear_label"])
     labels = [tick_label, linear_label]
     uid = os.getuid()
+    if args.action == "install":
+        root = running_root()
+        scripts = root / "capabilities/work"
+        wrapper = Path.home() / ".config/loom/run-linear-sync.sh"
+        wrapper.parent.mkdir(parents=True, exist_ok=True)
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "# One scheduled pass of the Linear projection. Idempotent: a re-run changes nothing.\n"
+            "set -e\n"
+            'export LINEAR_API_KEY="$(cat "$HOME/.config/loom/linear.key")"\n'
+            f'exec {sys.executable} "{scripts}/linear_sync.py" \\\n'
+            '  --config "$HOME/.config/loom/linear-portfolio.json" --all --apply --if-changed\n')
+        wrapper.chmod(0o755)
+        tick_plist = plist_path(tick_label)
+        linear_plist = plist_path(linear_label)
+        tick_plist.parent.mkdir(parents=True, exist_ok=True)
+        tick_plist.write_bytes(plistlib.dumps({
+            "Label": tick_label,
+            "ProgramArguments": [sys.executable, str(scripts / "loom"), "tick", "--apply", "--quiet"],
+            "StartInterval": config["schedule"].get("tick_interval", 120),
+            "RunAtLoad": True,
+            "StandardOutPath": str(state_home() / "tick.log"),
+            "StandardErrorPath": str(state_home() / "tick.log"),
+            "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        }))
+        linear_plist.write_bytes(plistlib.dumps({
+            "Label": linear_label,
+            "ProgramArguments": ["/bin/sh", str(wrapper)],
+            "StartInterval": config["schedule"].get("linear_interval", 300),
+            "RunAtLoad": True,
+            "StandardOutPath": str(state_home() / "linear-sync.log"),
+            "StandardErrorPath": str(state_home() / "linear-sync.log"),
+            "EnvironmentVariables": {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"},
+        }))
+        print(f"engine:  {root}")
+        print(f"wrote:   {tick_plist}")
+        print(f"wrote:   {linear_plist}")
+        print(f"wrote:   {wrapper}")
+        if args.restart:
+            return cmd_schedule(argparse.Namespace(action="start"), config)
+        return 0
     if args.action == "start":
         started = 0
         for label in labels:
@@ -367,8 +578,18 @@ def front_parser() -> argparse.ArgumentParser:
     workers.set_defaults(func=cmd_workers)
 
     schedule = sub.add_parser("schedule", help="the launchd job")
-    schedule.add_argument("action", choices=["status", "start", "stop"], default="status", nargs="?")
+    schedule.add_argument("action", choices=["status", "install", "start", "stop"],
+                          default="status", nargs="?")
+    schedule.add_argument("--restart", action="store_true",
+                          help="with install: bootstrap the jobs after writing the plists")
     schedule.set_defaults(func=cmd_schedule)
+
+    deploy = sub.add_parser("deploy", help="the pinned engine the scheduler runs")
+    deploy.add_argument("action", choices=["status", "promote", "rollback", "path"],
+                        default="status", nargs="?")
+    deploy.add_argument("--ref", default="HEAD", help="commit or tag to promote (default HEAD)")
+    deploy.add_argument("--repo", help="development checkout to deploy from")
+    deploy.set_defaults(func=cmd_deploy)
 
     linear = sub.add_parser("linear", help="the Linear projection")
     linear.add_argument("action", nargs="?", choices=["sync"], default="sync")
@@ -394,7 +615,8 @@ def usage() -> str:
         "unattended:\n"
         "  tick      one policy pass (--apply, --quiet); limits come from loom.json\n"
         "  workers   running workers; `workers stop <task>`\n"
-        "  schedule  status | start | stop\n"
+        "  schedule  status | install [--restart] | start | stop\n"
+        "  deploy    status | promote [--ref] | rollback | path\n"
         "  linear    sync [--all] [--apply]\n"
         "  logs      <task> [--lines N]\n\n"
         "Every engine verb accepts --root, --db, --agent and --now before the verb.\n"
