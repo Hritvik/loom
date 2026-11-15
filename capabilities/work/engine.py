@@ -794,10 +794,76 @@ def cmd_graph(args, store: Store) -> int:
     return 0
 
 
+def task_attempts(store: Store, task_id: str) -> list[dict]:
+    """Every attempt of a task, oldest first: the run history, not just the current one."""
+    views = attempt_views([record for _, record in store.read_events()])
+    items = [item for item in views.values() if item.get("task") == task_id]
+    return sorted(items, key=lambda item: (attempt_number(item.get("attempt")),
+                                           item.get("opened") or 0))
+
+
+def attempt_payload(item: dict) -> dict:
+    """The public shape of one attempt: identity, placement, outcome, and whether it is running."""
+    return {
+        "attempt": item.get("attempt"),
+        "task": item.get("task"),
+        "role": item.get("role") or "implementer",
+        "agent": item.get("agent"),
+        "state": item.get("state"),
+        "live": attempt_is_live(item),
+        "epoch": item.get("epoch"),
+        "revision": item.get("revision"),
+        "question": item.get("question"),
+        "source": item.get("source"),
+        "base": item.get("base"),
+        "pid": item.get("pid"),
+        "worktree": item.get("worktree"),
+        "branch": item.get("branch"),
+        "opened": item.get("opened_at"),
+        "closed": item.get("closed_at"),
+        "reaped": bool(item.get("reaped")),
+        "reason": item.get("reason"),
+    }
+
+
+def cmd_attempts(args, store: Store) -> int:
+    """List agent runs by identity: what each started from, where it ran and how it ended."""
+    views = attempt_views([record for _, record in store.read_events()])
+    items = [item for item in views.values()
+             if (not args.task or item.get("task") == args.task)
+             and (not args.live or attempt_is_live(item))]
+    items.sort(key=lambda item: (str(item.get("task") or ""), attempt_number(item.get("attempt")),
+                                 item.get("opened") or 0))
+    payload = [attempt_payload(item) for item in items]
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return 0
+    if not payload:
+        print("no attempts" + (f" for {args.task}" if args.task else ""))
+        return 0
+    starred = False
+    for item in payload:
+        state = item["state"] or "?"
+        if item["live"] and item["state"] in ATTEMPT_TERMINAL:
+            state += "*"
+            starred = True
+        print(f"{item['attempt']:<26} {state:<11} {item['role']:<12} "
+              f"{(item['agent'] or '-'):<24} pid {str(item['pid'] or '-'):<7} r{item['revision']}")
+        if item["worktree"]:
+            print(f"    worktree {item['worktree']}"
+                  + (f"  branch {item['branch']}" if item["branch"] else ""))
+        if item.get("reason"):
+            print(f"    {item['reason']}")
+    if starred:
+        print("\n* closed, but its process is still running and still holds a slot.")
+    return 0
+
+
 def cmd_show(args, store: Store) -> int:
     registry = store.load()
     task = find_task(registry, args.task)
     receipt = integration_receipt(task_history(store, task))
+    attempts = task_attempts(store, task["id"])
     if args.json:
         payload = dict(task)
         if receipt:
@@ -806,9 +872,16 @@ def cmd_show(args, store: Store) -> int:
                 "tip": receipt.get("integration_tip"),
                 "event": receipt.get("seq"),
             }
+        if attempts:
+            payload["attempts"] = [attempt_payload(item) for item in attempts]
         print(json.dumps(payload, indent=2, default=str))
     else:
         print(summarize(task, registry))
+        if attempts:
+            current = attempts[-1]
+            print(f"  attempt:  {current['attempt']}  [{current.get('state')}]"
+                  + (f" pid {current['pid']}" if current.get("pid") else "")
+                  + (f"  {current['worktree']}" if current.get("worktree") else ""))
         if receipt:
             print(f"  integrated: {receipt.get('integrated_source')[:12]}"
                   f" (event {receipt.get('seq')})")
@@ -852,11 +925,18 @@ def cmd_claim(args, store: Store) -> int:
         "heartbeat": iso(now),
     }
     bump(task, "claimed", now)
-    store.commit(event="claim", task=task["id"], agent=agent, status="claimed",
-                       revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
-                       base_revision=args.revision, epoch=epoch, now=args.now)
+    # The attempt is allocated inside the claim's transaction: a claim without a run and a run
+    # without a claim are the two halves of the drift that let a relaunch shadow a live worker.
+    attempt = next_attempt_id([record for _, record in store.read_events()], task["id"])
+    with store.transaction():
+        store.commit(event="claim", task=task["id"], agent=agent, status="claimed",
+                     revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
+                     base_revision=args.revision, epoch=epoch, now=args.now)
+        store.append_event(event="attempt", attempt=attempt, task=task["id"], agent=agent,
+                           role=task_role(task), state="starting", epoch=epoch,
+                           revision=task["revision"], now=args.now)
     print(f"claimed {task['id']} at revision {task['revision']} until "
-          f"{task['claim']['lease_expires']} epoch {epoch}")
+          f"{task['claim']['lease_expires']} epoch {epoch} attempt {attempt}")
     return 0
 
 
@@ -944,13 +1024,20 @@ def cmd_takeover(args, store: Store) -> int:
         "heartbeat": iso(now),
     }
     bump(task, "claimed", now)
-    store.commit(event="takeover", task=task["id"], agent=agent, status="claimed",
-                       revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
-                       previous_agent=previous_agent, previous_epoch=previous_epoch,
-                       epoch=epoch, lock_delay=args.lock_delay, reason=args.reason, now=args.now)
+    attempt = next_attempt_id([record for _, record in store.read_events()], task["id"])
+    with store.transaction():
+        store.commit(event="takeover", task=task["id"], agent=agent, status="claimed",
+                     revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
+                     previous_agent=previous_agent, previous_epoch=previous_epoch,
+                     epoch=epoch, lock_delay=args.lock_delay, reason=args.reason, now=args.now)
+        # A takeover is a new run of the same task under a new epoch. It gets its own attempt, so
+        # the run it displaced keeps its record and its checkout.
+        store.append_event(event="attempt", attempt=attempt, task=task["id"], agent=agent,
+                           role=task_role(task), state="starting", epoch=epoch,
+                           revision=task["revision"], now=args.now)
     print(
         f"took over {task['id']} from {previous_agent} at revision {task['revision']} "
-        f"until {task['claim']['lease_expires']} epoch {epoch}"
+        f"until {task['claim']['lease_expires']} epoch {epoch} attempt {attempt}"
     )
     return 0
 
@@ -1447,6 +1534,7 @@ WORKER_BRIEF = """You are a worker for one task in the portfolio work registry.
 
 Task: {task}
 Revision when claimed: {revision}
+Your attempt: {attempt}   (one run; it owns this checkout and ends with this session)
 Your fencing epoch: {epoch}
 Your identity: {agent}
 Your checkout: {repo}   (an isolated git worktree)
@@ -1509,17 +1597,154 @@ Do this:
 """
 
 
-def launches(store: Store) -> list[dict]:
-    """Launch events, newest last."""
-    return [record for _, record in store.read_events() if record.get("event") == "launch"]
+ATTEMPT_TERMINAL = {"done", "failed", "superseded"}
+# A claim opens an attempt; the spawn attaches its process a moment later. An attempt still
+# `starting` after this window never ran, so it is a ghost of a pass that died between the claim
+# and the exec. The grace is generous because a failed spawn may be retried by the next pass.
+ATTEMPT_START_GRACE = "10m"
 
 
-def launch_state(store: Store, task_id: str) -> dict:
-    """The latest launch for a task, and how many have failed."""
-    history = [item for item in launches(store)
-               if item.get("task") == task_id and item.get("state") != "superseded"]
-    failed = sum(1 for item in history if item.get("state") == "failed")
-    return {"latest": history[-1] if history else {}, "failed": failed}
+def attempt_number(attempt_id) -> int:
+    """The ordinal inside `demo/W-1#a3`, so attempts of one task sort by identity.
+
+    A launch from before attempts existed is folded as `<task>#legacy<seq>`; it has no ordinal and
+    sorts before the numbered runs of the same task.
+    """
+    tail = str(attempt_id or "").partition("#")[2]
+    if not tail.startswith("a") or not tail[1:].isdigit():
+        return 0
+    return int(tail[1:])
+
+
+def attempt_suffix(attempt_id) -> str:
+    """`demo/W-1#a3` -> `a3`: the part of the identity that names the checkout and the branch."""
+    text = str(attempt_id or "")
+    return text.split("#", 1)[1] if "#" in text else ""
+
+
+def next_attempt_id(records: list[dict], task_id: str) -> str:
+    """The next free attempt identity for a task.
+
+    Read from the log inside the claim's own transaction, so the identity is allocated by the
+    same write that grants the claim and cannot be handed out twice.
+    """
+    numbers = [attempt_number(record.get("attempt")) for record in records
+               if record.get("event") == "attempt" and record.get("task") == task_id]
+    return f"{task_id}#a{max(numbers, default=0) + 1}"
+
+
+def attempt_views(records: list[dict]) -> dict[str, dict]:
+    """One view per agent run, folded from `attempt` events and the `launch` that attaches it.
+
+    An attempt is one agent run: the claim opens it in `starting`, the spawn attaches the process
+    by writing a `launch` carrying the attempt id, and the reaper closes it once. The identity is
+    stable, so capacity, reconciliation, the worker list and the review launch all name the same
+    run instead of inventing a key each.
+
+    A `launch` written before attempts existed is folded as an attempt of its own, so a worker
+    started by an older engine still holds its slot and is still closed by the same reaper.
+    """
+    views: dict[str, dict] = {}
+    legacy: dict[int, str] = {}
+
+    def view(attempt_id: str) -> dict:
+        return views.setdefault(attempt_id, {
+            "attempt": attempt_id, "state": "starting", "launches": [],
+            "opened": None, "closed": None,
+        })
+
+    for record in records:
+        event = record.get("event")
+        if event == "attempt" and record.get("attempt"):
+            item = view(str(record["attempt"]))
+        elif event == "launch" and record.get("task"):
+            closes = record.get("closes")
+            if closes is not None:
+                attempt_id = record.get("attempt") or legacy.get(int(closes))
+                if attempt_id is None:
+                    continue  # a closure for an attempt this log no longer contains
+            else:
+                attempt_id = record.get("attempt") or f"{record['task']}#legacy{record['seq']}"
+                legacy.setdefault(int(record["seq"]), attempt_id)
+            item = view(str(attempt_id))
+            item["launches"].append(record)
+        else:
+            continue
+        sequence = int(record.get("seq") or 0)
+        item["last_seq"] = sequence
+        if item.get("opened") is None:
+            item["opened"] = sequence
+            item["opened_at"] = record.get("ts")
+        for key in ("task", "agent", "role", "epoch", "revision", "question", "source", "base",
+                    "worktree", "branch", "pid", "started_at"):
+            if record.get(key) not in (None, ""):
+                item[key] = record[key]
+        if record.get("reaped"):
+            item["reaped"] = True
+        if record.get("reason"):
+            item["reason"] = record["reason"]
+        if record.get("state") in ATTEMPT_TERMINAL:
+            item["state"] = record["state"]
+            if item.get("closed") is None:
+                item["closed"] = sequence
+                item["closed_at"] = record.get("ts")
+    for item in views.values():
+        if item.get("closed") is None:
+            # No closure yet: the run is live once a process is attached, an intent before that.
+            item["state"] = "running" if item["launches"] else "starting"
+    return views
+
+
+def attempt_is_live(item: dict) -> bool:
+    """The attempt's own process is still running: identity, not bookkeeping."""
+    return any(launch_is_live(launch) for launch in item.get("launches") or [])
+
+
+def live_attempts(views: dict[str, dict]) -> list[dict]:
+    """Every attempt whose process is observed, one slot per process."""
+    live, seen = [], set()
+    for item in sorted(views.values(), key=lambda entry: entry.get("last_seq") or 0):
+        if not attempt_is_live(item):
+            continue
+        pid = item.get("pid")
+        if pid in seen:
+            continue  # one process is one slot even if two records claimed it
+        seen.add(pid)
+        live.append(item)
+    return live
+
+
+def newest_attempt(store: Store, task_id: str, role: str | None = None) -> dict:
+    """The attempt a caller just opened, read back from the log under the store lock."""
+    views = attempt_views([record for _, record in store.read_events()])
+    items = [item for item in views.values()
+             if item.get("task") == task_id and (role is None or item.get("role") == role)]
+    return max(items, key=lambda item: item.get("last_seq") or 0) if items else {}
+
+
+def previous_branch(views: dict[str, dict], task_id: str, role: str, attempt_id) -> str | None:
+    """The branch the attempt before this one left behind, so a relaunch starts where it stopped."""
+    prior = [item for item in views.values()
+             if item.get("task") == task_id and (item.get("role") or "implementer") == role
+             and item.get("branch") and attempt_number(item.get("attempt")) < attempt_number(attempt_id)]
+    if not prior:
+        return None
+    return max(prior, key=lambda item: attempt_number(item.get("attempt")))["branch"]
+
+
+def trailing_failures(views: dict[str, dict], task_id: str, role: str) -> int:
+    """Failures since the last successful or replaced attempt of this role."""
+    history = sorted((item for item in views.values()
+                      if item.get("task") == task_id
+                      and (item.get("role") or "implementer") == role),
+                     key=lambda item: item.get("last_seq") or 0)
+    count = 0
+    for item in reversed(history):
+        if item.get("state") == "failed":
+            count += 1
+        elif item.get("state") in {"done", "superseded"}:
+            break
+    return count
 
 
 def pid_alive(pid: int) -> bool:
@@ -1572,84 +1797,91 @@ def launch_is_live(launch: dict) -> bool:
     return abs((started - expected_at).total_seconds()) <= 120
 
 
-def trailing_failures(store: Store, task_id: str, role: str) -> int:
-    """Failures since the last successful/superseded attempt of this role."""
-    history = [record for _, record in store.read_events()
-               if record.get("event") == "launch" and record.get("task") == task_id
-               and record.get("role") == role]
-    count = 0
-    for record in reversed(history):
-        if record.get("state") == "failed":
-            count += 1
-        elif record.get("state") in {"done", "superseded"}:
-            break
-    return count
-
-
 def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[str]:
-    """Close every pending launch that is gone or superseded, then escalate the latest failure."""
+    """Close every attempt that is gone or replaced, then escalate the latest failure.
+
+    Closing is done once per attempt and by identity, so a relaunch never rewrites what the run
+    before it recorded. The exception is a legacy `launch` without an attempt id: it is folded as
+    an attempt of its own and closed the same way.
+    """
     problems = []
     records = [record for _, record in store.read_events()]
     answers = {(record.get("task"), record.get("in_reply_to")): record.get("seq")
                for record in records if record.get("event") == "answer"}
-    launches = [record for record in records
-                if record.get("event") == "launch" and record.get("task")]
-    def key(record):
-        return (record.get("task"), record.get("role"), record.get("question"))
+    views = attempt_views(records)
+    grace = parse_duration(ATTEMPT_START_GRACE)
+
+    def key(item):
+        return (item.get("task"), item.get("role") or "implementer", item.get("question"))
+
     last_seq: dict[tuple, int] = {}
-    terminal_after: dict[tuple, int] = {}
-    closed = {launch.get("closes") for launch in launches if launch.get("closes") is not None}
-    for launch in launches:
-        if launch.get("closes") is not None:
-            continue  # closure events are not attempts
-        last_seq[key(launch)] = max(last_seq.get(key(launch), 0), int(launch.get("seq") or 0))
-        if launch.get("state") in {"done", "failed", "superseded"}:
-            terminal_after[key(launch)] = max(
-                terminal_after.get(key(launch), 0), int(launch.get("seq") or 0))
+    for item in views.values():
+        last_seq[key(item)] = max(last_seq.get(key(item), 0), item.get("last_seq") or 0)
+
     by_id = {task["id"]: task for task in registry["tasks"]}
     with store.transaction():
-        for launch in launches:
-            if launch.get("state") != "pending":
+        for item in sorted(views.values(), key=lambda entry: entry.get("opened") or 0):
+            if item["state"] in ATTEMPT_TERMINAL:
                 continue
-            sequence = int(launch.get("seq") or 0)
-            if sequence in closed:
-                continue
-            if sequence < terminal_after.get(key(launch), 0):
-                # A legacy closure (written before `closes` existed) already accounts for this.
-                continue
-            task = by_id.get(launch["task"])
+            task = by_id.get(item.get("task"))
+            sequence = item.get("last_seq") or 0
+            reason = None
+            reaped = False
             if task is None:
                 state, reason = "superseded", "the task left the registry"
-            else:
-                superseded = sequence < last_seq.get(key(launch), 0)
-                if superseded:
-                    state, reason = "superseded", "a later launch of this role replaced this attempt"
-                elif launch_is_live(launch):
+            elif sequence < last_seq.get(key(item), 0):
+                state, reason = "superseded", "a later attempt of this role replaced this attempt"
+            elif item["state"] == "starting":
+                # The claim opened the attempt; the spawn attaches the process. With neither a
+                # process nor a task that moved, there is nothing to account for: reap the ghost.
+                # The claim itself is left alone — a claim is authority, not a run.
+                opened = item.get("opened_at")
+                try:
+                    age = now - parse_time(opened)
+                except (TypeError, ValueError):
+                    age = grace + dt.timedelta(seconds=1)
+                if age <= grace:
                     continue
-                elif launch.get("role") == "reviewer":
-                    answered = answers.get((task["id"], launch.get("question")), -1) > sequence
-                    state, reason = ("done" if answered else "failed"), None
-                else:
-                    launch_revision = launch.get("revision")
-                    advanced = (task.get("revision", 0)
-                                > (int(launch_revision) if launch_revision is not None else -1)
-                                or task.get("status") in {"green", "reviewed", "integrated",
-                                                          "accepted", "done"})
-                    state, reason = ("done" if advanced else "failed"), None
-            store.append_event(event="launch", task=launch["task"],
-                               agent=launch.get("agent") or WORKER_IDENTITY,
-                               state=state, pid=launch.get("pid"), role=launch.get("role"),
-                               revision=launch.get("revision"),
-                               question=launch.get("question"), closes=sequence,
-                               **({"reason": reason} if reason else {}), now=iso(now))
-
-        # Only the latest attempt of a role can requeue or block the task.
-        for task in registry["tasks"]:
-            state = launch_state(store, task["id"])
-            latest = state["latest"]
-            if latest.get("state") != "failed" or latest.get("role") == "reviewer":
+                state, reason = "failed", "no launch attached"
+                reaped = True
+            elif attempt_is_live(item):
                 continue
-            failures = trailing_failures(store, task["id"], latest.get("role") or "implementer")
+            elif item.get("role") == "reviewer":
+                answered = answers.get((task["id"], item.get("question")), -1) > (item.get("opened") or 0)
+                state = "done" if answered else "failed"
+            else:
+                started_from = item.get("revision")
+                advanced = (task.get("revision", 0)
+                            > (int(started_from) if started_from is not None else -1)
+                            or task.get("status") in {"green", "reviewed", "integrated",
+                                                      "accepted", "done"})
+                state = "done" if advanced else "failed"
+            store.append_event(event="attempt", attempt=item["attempt"], task=item.get("task"),
+                               agent=item.get("agent") or WORKER_IDENTITY,
+                               role=item.get("role"), state=state, revision=item.get("revision"),
+                               question=item.get("question"), pid=item.get("pid"),
+                               **({"reason": reason} if reason else {}),
+                               **({"reaped": True} if reaped else {}), now=iso(now))
+
+        # The closures above change the fold; read it back before deciding anything from it.
+        views = attempt_views([record for _, record in store.read_events()])
+        # Only the latest attempt of a role can requeue or block the task, and only one that
+        # actually ran: an attempt with no process never carried the work, and the pass that
+        # failed to spawn it already gave its claim back.
+        latest_by_task: dict[str, dict] = {}
+        for item in views.values():
+            if item.get("role") == "reviewer" or not item.get("task"):
+                continue
+            current = latest_by_task.get(item["task"])
+            if current is None or (item.get("last_seq") or 0) > (current.get("last_seq") or 0):
+                latest_by_task[item["task"]] = item
+        for task in registry["tasks"]:
+            latest = latest_by_task.get(task["id"]) or {}
+            # A reaped `starting` attempt never ran: it is the claim's echo, not a worker that
+            # failed, so it cannot requeue or block the task. A spawn that failed does.
+            if latest.get("state") != "failed" or latest.get("reaped"):
+                continue
+            failures = trailing_failures(views, task["id"], latest.get("role") or "implementer")
             if failures >= 2:
                 problems.append(f"{task['id']}: two worker launches failed; needs a human")
                 if task.get("status") in {"claimed", "red", "green"}:
@@ -1673,22 +1905,35 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
     return problems
 
 
-def worker_worktree(repo: Path, task_id: str) -> tuple[Path, str | None]:
-    """An isolated checkout for one task, or the repository itself when it is not a git repo."""
+def worker_worktree(repo: Path, task_id: str, attempt=None,
+                    base_ref: str | None = None) -> tuple[Path, str | None]:
+    """An isolated checkout for one attempt, or the repository itself when it is not a git repo.
+
+    The attempt owns the checkout: its identity names the path and the branch, so a relaunch gets
+    a new one instead of sharing the directory the previous run is still using. A relaunch starts
+    from the previous attempt's branch when that branch exists, so the work already committed
+    there is not thrown away.
+    """
     probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
                            capture_output=True, text=True)
     if probe.returncode != 0:
         return repo, None
     slug = task_id.replace("/", "-").lower()
-    branch = f"loom/{slug}"
+    suffix = f"-{attempt_suffix(attempt)}" if attempt_suffix(attempt) else ""
+    branch = f"loom/{slug}{suffix}"
     base = Path(os.environ.get("LOOM_WORKTREES")
                 or Path.home() / ".local/state/loom/worktrees").expanduser()
     base.mkdir(parents=True, exist_ok=True)
-    path = base / slug
+    path = base / f"{slug}{suffix}"
     if path.exists():
         return path, branch
+    if base_ref and subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"],
+            capture_output=True).returncode != 0:
+        base_ref = None  # the branch a failed spawn never created: start from HEAD instead
+    start = base_ref or "HEAD"
     added = subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch,
-                            str(path), "HEAD"], capture_output=True, text=True)
+                            str(path), start], capture_output=True, text=True)
     if added.returncode != 0:
         existing = subprocess.run(["git", "-C", str(repo), "worktree", "add", str(path), branch],
                                   capture_output=True, text=True)
@@ -1721,14 +1966,16 @@ def worker_environment(args) -> dict:
     return env
 
 
-def spawn_worker(args, task: dict, role: str, work_home: Path) -> tuple[int | None, Path, str | None]:
-    """Start a headless agent for one task and return its pid, worktree and branch."""
+def spawn_worker(args, task: dict, role: str, work_home: Path, attempt: str,
+                 base_ref: str | None = None) -> tuple[int | None, Path, str | None]:
+    """Start a headless agent for one attempt and return its pid, worktree and branch."""
     repo = Path(str(task.get("owner_repo") or ".")).expanduser()
-    tree, branch = worker_worktree(repo, task["id"])
+    tree, branch = worker_worktree(repo, task["id"], attempt, base_ref)
     evidence = task.get("evidence") or f"evidence/{task['id'].split('/')[-1]}.md"
     epoch = claim_epoch(task)
     brief = WORKER_BRIEF.format(
         task=task["id"], revision=task.get("revision", 0), agent=WORKER_IDENTITY,
+        attempt=attempt,
         epoch=epoch if epoch is not None else "none (legacy claim)",
         epoch_flag=f" --epoch {epoch}" if epoch is not None else "",
         repo=tree, work=work_home, branch=branch or "(no branch: not a git repository)",
@@ -1802,14 +2049,14 @@ def open_review_requests(store: Store, registry: dict, reviewer_identity: str,
     records = [record for _, record in store.read_events()]
     by_id = {task["id"]: task for task in registry["tasks"]}
     answered = {record.get("in_reply_to") for record in records if record.get("event") == "answer"}
-    latest_launch: dict[str, dict] = {}
+    views = attempt_views(records)
+    # A request is being reviewed when a reviewer attempt for that request still has its process.
+    reviewing = {(item.get("task"), item.get("question")) for item in views.values()
+                 if item.get("role") == "reviewer" and attempt_is_live(item)}
     failures: dict[tuple[str, int], int] = {}
-    for record in records:
-        if record.get("event") != "launch" or not record.get("task"):
-            continue
-        latest_launch[record["task"]] = record
-        if record.get("role") == "reviewer" and record.get("state") == "failed":
-            key = (record["task"], record.get("question"))
+    for item in views.values():
+        if item.get("role") == "reviewer" and item.get("state") == "failed":
+            key = (item.get("task"), item.get("question"))
             failures[key] = failures.get(key, 0) + 1
     open_requests, stalled = [], []
     seen: set[tuple[str, int]] = set()
@@ -1827,9 +2074,7 @@ def open_review_requests(store: Store, registry: dict, reviewer_identity: str,
         seen.add(key)
         if record.get("seq") in answered or record.get("to") != reviewer_identity:
             continue
-        launch = latest_launch.get(task["id"])
-        if (launch and launch.get("role") == "reviewer" and launch.get("state") == "pending"
-                and launch.get("question") == record.get("seq") and launch_is_live(launch)):
+        if (task["id"], record.get("seq")) in reviewing:
             continue
         entry = {
             "task": task["id"], "revision": task["revision"], "question": record["seq"],
@@ -2660,51 +2905,29 @@ def cmd_tick(args, store: Store) -> int:
             })
 
     records = [record for _, record in store.read_events()]
-    latest_launch: dict[str, dict] = {}
-    for record in records:
-        if record.get("event") == "launch" and record.get("task"):
-            latest_launch[record["task"]] = record
-    # Concurrency is the number of live processes, not the number of claims. A claim is authority;
-    # a live launch is an agent actually running. Deriving capacity from claims let a released or
-    # regressed claim free a slot while its worker kept running, and a green task's claim shrink
-    # the pool while its review was pending.
-    # A launch closed as done or failed can still have a live process, and a relaunch writes a
-    # newer record for the same task, shadowing the older one. Keying on the latest record per
-    # task therefore loses orphans: after an over-launch, the original worker keeps running while
-    # capacity reads only the dead replacement. Consider every recent launch, deduplicated by pid,
-    # so two live processes for one task occupy two slots. The window bounds the ps calls; a
-    # worker cannot outlive its lease by more than a few hours.
-    window = dt.timedelta(hours=6)
-    by_pid: dict[int, dict] = {}
-    for record in records:
-        if record.get("event") != "launch" or not record.get("pid"):
-            continue
-        try:
-            age = now - parse_time(record.get("ts"))
-        except (TypeError, ValueError):
-            age = dt.timedelta(0)
-        if age > window:
-            continue
-        by_pid[int(record["pid"])] = record
-    live_launches = [record for record in by_pid.values() if launch_is_live(record)]
+    views = attempt_views(records)
+    # Concurrency is the number of live attempts, not the number of claims. A claim is authority;
+    # an attempt with a live process is an agent actually running. Capacity, reconcile, the worker
+    # list and the review launch all read this one fold, so they cannot disagree about a run.
+    # A closed attempt whose process is still running keeps its slot until the process exits.
+    live = live_attempts(views)
     active = {role: 0 for role in ROLES}
-    for record in live_launches:
-        role = record.get("role") or "implementer"
+    for item in live:
+        role = item.get("role") or "implementer"
         active[role] = active.get(role, 0) + 1
-    live_reviewers = [record for record in live_launches if record.get("role") == "reviewer"]
+    live_reviewers = [item for item in live if item.get("role") == "reviewer"]
     stuck_after = parse_duration(args.stuck_after)
     stuck = []
-    for record in latest_launch.values():
-        if record.get("state") != "pending" or not launch_is_live(record):
-            continue
+    for item in live:
         try:
-            started = parse_time(record.get("ts"))
+            started = parse_time(item.get("started_at") or item.get("opened_at") or item.get("ts"))
         except (TypeError, ValueError):
             continue
         age = (now - started).total_seconds()
         if age > stuck_after.total_seconds():
-            stuck.append({"task": record["task"], "role": record.get("role"),
-                          "pid": record.get("pid"), "age_minutes": int(age // 60)})
+            stuck.append({"task": item.get("task"), "role": item.get("role"),
+                          "pid": item.get("pid"), "attempt": item.get("attempt"),
+                          "age_minutes": int(age // 60)})
     review_requests, stalled_reviews = open_review_requests(
         store, registry, args.reviewer_identity, args.max_review_attempts)
     review_slots = max(0, limits["reviewer"] - len(live_reviewers))
@@ -2763,8 +2986,15 @@ def cmd_tick(args, store: Store) -> int:
                 problems.append(f"{item['task']}: {exc}")
                 continue
             task = find_task(store.load(), item["task"])
+            attempt = newest_attempt(store, item["task"], item["role"])
+            attempt_id = attempt.get("attempt")
+            if not attempt_id:
+                problems.append(f"{item['task']}: claim recorded no attempt; refusing to spawn")
+                continue
             try:
-                pid, tree, branch = spawn_worker(args, task, item["role"], work_home)
+                pid, tree, branch = spawn_worker(
+                    args, task, item["role"], work_home, attempt_id,
+                    previous_branch(views, item["task"], item["role"], attempt_id))
             except (WorkError, OSError) as exc:
                 # The claim was taken before the spawn. Leaving it behind would hold a slot
                 # with no worker until the lease expires, so give it back and record the failure.
@@ -2777,37 +3007,44 @@ def cmd_tick(args, store: Store) -> int:
                     cmd_release(release_args, store)
                 except WorkError as release_error:
                     problems.append(f"{item['task']}: claim left in place: {release_error}")
-                store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
-                                   role=item["role"], state="failed", pid=None,
-                                   revision=task.get("revision", 0), now=args.now)
+                store.append_event(event="attempt", attempt=attempt_id, task=item["task"],
+                                   agent=WORKER_IDENTITY, role=item["role"], state="failed",
+                                   revision=task.get("revision", 0),
+                                   reason=f"launch failed: {exc}", now=args.now)
                 continue
             started = process_start(pid)
-            store.append_event(event="launch", task=item["task"], agent=WORKER_IDENTITY,
-                               role=item["role"], state="pending", pid=pid,
+            store.append_event(event="launch", attempt=attempt_id, task=item["task"],
+                               agent=WORKER_IDENTITY, role=item["role"], pid=pid,
                                revision=task.get("revision", 0),
                                started_at=iso(started) if started else None,
                                worktree=str(tree), branch=branch, now=args.now)
-            launched.append({"task": item["task"], "role": item["role"], "pid": pid,
-                             "worktree": str(tree), "branch": branch})
+            launched.append({"task": item["task"], "attempt": attempt_id, "role": item["role"],
+                             "pid": pid, "worktree": str(tree), "branch": branch})
         for item in review_chosen:
             task = find_task(store.load(), item["task"])
+            attempt_id = next_attempt_id([record for _, record in store.read_events()],
+                                         item["task"])
+            store.append_event(event="attempt", attempt=attempt_id, task=item["task"],
+                               agent=args.reviewer_identity, role="reviewer", state="starting",
+                               revision=item["revision"], question=item["question"],
+                               source=item["source"], base=item.get("base"), now=args.now)
             try:
                 pid, tree = spawn_reviewer(args, task, item, work_home)
             except (WorkError, OSError) as exc:
                 problems.append(f"{item['task']} review: {exc}")
-                store.append_event(event="launch", task=item["task"],
-                                   agent=args.reviewer_identity, role="reviewer",
-                                   state="failed", pid=None, revision=item["revision"],
-                                   question=item["question"], source=item["source"],
+                store.append_event(event="attempt", attempt=attempt_id, task=item["task"],
+                                   agent=args.reviewer_identity, role="reviewer", state="failed",
+                                   revision=item["revision"], question=item["question"],
+                                   source=item["source"], reason=f"launch failed: {exc}",
                                    now=args.now)
                 continue
             started = process_start(pid)
-            store.append_event(event="launch", task=item["task"], agent=args.reviewer_identity,
-                               role="reviewer", state="pending", pid=pid,
+            store.append_event(event="launch", attempt=attempt_id, task=item["task"],
+                               agent=args.reviewer_identity, role="reviewer", pid=pid,
                                revision=item["revision"], worktree=str(tree), branch=None,
                                started_at=iso(started) if started else None,
                                source=item["source"], question=item["question"], now=args.now)
-            launched_reviews.append({"task": item["task"], "pid": pid,
+            launched_reviews.append({"task": item["task"], "attempt": attempt_id, "pid": pid,
                                      "question": item["question"], "source": item["source"],
                                      "worktree": str(tree)})
 
@@ -2821,6 +3058,8 @@ def cmd_tick(args, store: Store) -> int:
         with decisions.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({
                 "ts": iso(now), "active": active, "limits": limits,
+                "attempts": {item["attempt"]: (item.get("role") or "implementer")
+                             for item in live},
                 "launched": [item["task"] for item in launched],
                 "held": {item["task"]: item.get("reason") for item in held},
                 "reviews": [item["task"] for item in launched_reviews],
@@ -2829,6 +3068,7 @@ def cmd_tick(args, store: Store) -> int:
 
     if args.json:
         print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
+                          "liveAttempts": [attempt_payload(item) for item in live],
                           "held": held, "expired": expired, "launched": launched,
                           "review": review_chosen, "reviewHeld": review_held,
                           "reviewStalled": stalled_reviews, "reviewLaunched": launched_reviews,
@@ -2861,7 +3101,8 @@ def cmd_tick(args, store: Store) -> int:
     print(f"Tick preview — {iso(now)}")
     print("  capacity: " + "  ".join(
         f"{role} {active[role]}/{limits[role]}" for role in ROLES)
-        + f"  reviewers live {len(live_reviewers)}/{limits['reviewer']}")
+        + f"  reviewers live {len(live_reviewers)}/{limits['reviewer']}"
+        f"  attempts live {len(live)}")
     print()
     if chosen:
         print("Would claim and launch:")
@@ -2974,18 +3215,20 @@ def cmd_tick(args, store: Store) -> int:
         print("\nPlanned prerequisites:")
         print("  " + ", ".join(planned_roots))
     if stuck:
-        print(f"\nStuck launches (running longer than {args.stuck_after}):")
+        print(f"\nStuck attempts (running longer than {args.stuck_after}):")
         for item in stuck:
             print(f"  {item['task']:<22} {item.get('role') or '?':<11} pid {item.get('pid')} "
-                  f"{item['age_minutes']}m")
+                  f"{item['age_minutes']}m  {item.get('attempt') or ''}")
     if expired:
         print("\nExpired leases to release or take over:")
         for item in expired:
             print(f"  {item['task']:<22} {item['agent']}  expired {item['expired']}")
     for item in launched:
-        print(f"  launched {item['task']} ({item['role']}) pid {item['pid']}")
+        print(f"  launched {item['task']} ({item['role']}) pid {item['pid']} "
+              f"attempt {item['attempt']}")
     for item in launched_reviews:
-        print(f"  launched review of {item['task']} pid {item['pid']}")
+        print(f"  launched review of {item['task']} pid {item['pid']} "
+              f"attempt {item['attempt']}")
     for problem in problems:
         print(f"ESCALATE {problem}")
     if not args.apply:
@@ -3542,9 +3785,9 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
     by_id = {task["id"]: task for task in registry.get("tasks", [])}
     last: dict[str, dict] = {}
     for _, record in records:
-        # Only an event that asserts a status is the last word on a task's state. Launches and
-        # attempts carry a pid or a run state instead; counting them reported every task touched by
-        # a running worker as hand-edited, which blocked the Linear mirror for hours.
+        # Only an event that asserts a status is the last word on a task's state. Process and run
+        # records carry a revision but no status, so counting them reported every task touched by a
+        # running worker as hand-edited, which blocked the Linear mirror.
         if record.get("task") and record.get("status") is not None:
             last[record["task"]] = record
     for task_id, record in last.items():
@@ -3578,7 +3821,7 @@ def require_agent(args) -> str:
 
 
 ENGINE_COMMANDS = {
-    "create", "list", "show", "claim", "renew", "release", "takeover", "transition",
+    "create", "list", "show", "attempts", "claim", "renew", "release", "takeover", "transition",
     "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
     "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
     "init", "integration-plan",
@@ -3632,6 +3875,13 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("task")
     show.add_argument("--json", action="store_true")
     show.set_defaults(func=cmd_show)
+
+    attempts = sub.add_parser(
+        "attempts", help="list agent runs: identity, placement and outcome", parents=[common])
+    attempts.add_argument("task", nargs="?", help="one task's run history")
+    attempts.add_argument("--live", action="store_true", help="only attempts with a live process")
+    attempts.add_argument("--json", action="store_true")
+    attempts.set_defaults(func=cmd_attempts)
 
     claim = sub.add_parser("claim", help="claim a ready task with a lease", parents=[common])
     claim.add_argument("task")

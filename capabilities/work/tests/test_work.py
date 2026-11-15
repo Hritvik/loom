@@ -260,6 +260,17 @@ class WorkCLITest(unittest.TestCase):
 
     # -- claim / renew / release -----------------------------------------
 
+    def test_a_claim_opens_its_attempt_in_the_same_write(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        self.assertEqual([event.get("event") for event in self.ws.events()
+                          if event.get("task") == "demo/W-1"], ["claim", "attempt"])
+
+        # A refused claim writes nothing, so there is no attempt without a claim either.
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-b",
+                    "--now", T0, expect=2)
+        self.assertEqual([event.get("event") for event in self.ws.events()
+                          if event.get("task") == "demo/W-1"], ["claim", "attempt"])
+
     def test_claim_renew_release_with_cas(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "30m",
                     "--agent", "agent-a", "--now", T0)
@@ -306,12 +317,23 @@ class WorkCLITest(unittest.TestCase):
                   if event.get("event") == "launch" and event.get("role") == "reviewer"][-1]
         self.assertEqual(launch["question"], int(request))
 
+    def attempt_events(self, task=None):
+        """Attempt records: the run identity, its placement and the reaper's closure."""
+        return [event for event in self.ws.events()
+                if event.get("event") == "attempt"
+                and (task is None or event.get("task") == task)]
+
+    def attempts(self, task=None, live=False):
+        args = ["attempts", "--json"] + ([task] if task else []) + (["--live"] if live else [])
+        return json.loads(self.invoke(*args).stdout)
+
     def test_a_launch_that_renewed_then_died_is_failed_and_requeued(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "opencode/loom-worker",
                     "--now", T0)
         store = self.ws.store()
         try:
             with store.lock():
+                # A legacy launch from an older engine: no attempt id, closed by the same reaper.
                 store.append_event(event="launch", task="demo/W-1",
                                    agent="opencode/loom-worker", role="implementer",
                                    state="pending", pid=999999, revision=1, now=T0)
@@ -321,9 +343,9 @@ class WorkCLITest(unittest.TestCase):
                     "--now", "2030-01-01T10:01:00Z")
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                     "--worker-command", "/usr/bin/true", "--now", "2030-01-01T10:02:00Z")
-        launches = [event for event in self.ws.events()
-                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
-        self.assertEqual(launches[-1].get("state"), "failed")
+        closures = [event for event in self.attempt_events("demo/W-1")
+                    if event.get("state") in {"done", "failed", "superseded"}]
+        self.assertEqual(closures[-1].get("state"), "failed")
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "ready")
 
     def test_takeover_requires_expiry_and_reason(self):
@@ -350,11 +372,16 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(record["claim"]["agent"], "agent-b")
         self.assertEqual(record["revision"], 2)
         self.assertEqual(record["claim"]["epoch"], 2)
-        last = self.ws.events()[-1]
-        self.assertEqual(last["event"], "takeover")
-        self.assertEqual(last["previous_agent"], "agent-a")
-        self.assertEqual(last["previous_epoch"], 1)
-        self.assertEqual(last["reason"], "agent-a went silent")
+        takeover = next(event for event in reversed(self.ws.events())
+                        if event.get("event") == "takeover")
+        self.assertEqual(takeover["previous_agent"], "agent-a")
+        self.assertEqual(takeover["previous_epoch"], 1)
+        self.assertEqual(takeover["reason"], "agent-a went silent")
+        # A takeover is a new run: the run it displaced keeps its identity and its record.
+        attempts = self.attempts("demo/W-1")
+        self.assertEqual([item["attempt"] for item in attempts], ["demo/W-1#a1", "demo/W-1#a2"])
+        self.assertEqual([item["agent"] for item in attempts], ["agent-a", "agent-b"])
+        self.assertEqual([item["epoch"] for item in attempts], [1, 2])
 
     # -- fencing ----------------------------------------------------------
 
@@ -1274,8 +1301,12 @@ class WorkCLITest(unittest.TestCase):
 
         launch = next(event for event in self.ws.events() if event.get("event") == "launch")
         self.assertEqual(launch["task"], "demo/W-1")
-        self.assertEqual(launch["state"], "pending")
         self.assertIsInstance(launch["pid"], int)
+        self.assertEqual(launch["attempt"], "demo/W-1#a1")
+        attempt = self.attempts("demo/W-1")[0]
+        self.assertEqual(attempt["attempt"], launch["attempt"])
+        self.assertEqual(attempt["state"], "running")
+        self.assertEqual(attempt["pid"], launch["pid"])
 
     def test_tick_apply_is_idempotent_while_the_lease_lives(self):
         for _ in range(2):
@@ -1293,9 +1324,10 @@ class WorkCLITest(unittest.TestCase):
         # pretend the worker died and its lease expired
         self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
                     "--agent", "opencode/loom-worker", "--now", "2030-01-01T12:00:00Z")
-        failed = [event for event in self.ws.events()
-                  if event.get("event") == "launch" and event.get("state") == "failed"]
+        failed = [event for event in self.attempt_events()
+                  if event.get("state") == "failed"]
         self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["attempt"], launch["attempt"])
         self.assertEqual(failed[0]["pid"], launch["pid"])
 
     def test_tick_gives_the_worker_a_worktree_and_a_jdk(self):
@@ -1310,8 +1342,9 @@ class WorkCLITest(unittest.TestCase):
                     "--agent", "opencode/loom-worker", "--now", T0)
         launch = next(event for event in self.ws.events() if event.get("event") == "launch")
         self.assertIn("worktrees", launch["worktree"])
-        self.assertEqual(launch["branch"], "loom/demo-w-1")
+        self.assertEqual(launch["branch"], "loom/demo-w-1-a1")
         self.assertTrue(Path(launch["worktree"]).is_dir())
+        self.assertTrue(Path(launch["worktree"]).name.endswith("-a1"))
 
         worktrees = subprocess.run(["git", "-C", str(repo), "worktree", "list"],
                                    capture_output=True, text=True).stdout
@@ -1323,6 +1356,103 @@ class WorkCLITest(unittest.TestCase):
         launch = next(event for event in self.ws.events() if event.get("event") == "launch")
         self.assertIsNone(launch["branch"])
         self.assertEqual(Path(launch["worktree"]), self.ws.repo)
+
+    def test_the_worker_brief_names_its_attempt(self):
+        capture = self.ws.root / "capture-worker.sh"
+        capture.write_text("#!/bin/sh\nprintf '%s' \"$1\" > " + str(self.ws.root / "brief.txt") + "\n")
+        capture.chmod(0o755)
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", str(capture), "--now", T0)
+        brief_file = self.ws.root / "brief.txt"
+        deadline = time.time() + 5
+        while not brief_file.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(brief_file.exists(), "the worker brief was never written")
+        brief = brief_file.read_text()
+        self.assertIn("Your attempt: demo/W-1#a1", brief)
+
+    def test_a_relaunch_gets_its_own_worktree_and_leaves_the_prior_attempt(self):
+        repo = self.ws.repo
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "README.md").write_text("fixture\n")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@t.invalid",
+                        "commit", "-qm", "fixture"], check=True)
+
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        # the worker died and its lease expired; the next pass starts the task again
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true",
+                    "--now", "2030-01-01T12:00:00Z")
+
+        attempts = self.attempts("demo/W-1")
+        self.assertEqual([item["attempt"] for item in attempts], ["demo/W-1#a1", "demo/W-1#a2"])
+        # Two runs of one task never share a checkout or a branch.
+        self.assertEqual(len({item["worktree"] for item in attempts}), 2, attempts)
+        self.assertEqual([item["branch"] for item in attempts],
+                         ["loom/demo-w-1-a1", "loom/demo-w-1-a2"])
+        first, second = attempts
+        self.assertEqual(first["state"], "failed")
+        self.assertEqual(second["state"], "running")
+        launch = next(event for event in self.ws.events()
+                      if event.get("event") == "launch"
+                      and event.get("attempt") == "demo/W-1#a1")
+        # The dead run keeps its own process record: the relaunch did not rewrite it.
+        self.assertEqual(first["pid"], launch["pid"])
+        self.assertTrue(Path(first["worktree"]).is_dir())
+        self.assertTrue(Path(second["worktree"]).is_dir())
+        shown = json.loads(self.invoke("show", "demo/W-1", "--json").stdout)
+        self.assertEqual([item["attempt"] for item in shown["attempts"]],
+                         ["demo/W-1#a1", "demo/W-1#a2"])
+
+    def test_capacity_equals_the_observed_live_attempts(self):
+        self.invoke("create", "--agent", "agent-a", "--now", T0,
+                    "--id", "demo/W-5", "--board", "demo.board", "--title", "Second ready",
+                    "--status", "ready", "--write-path", "src/five")
+        self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0)
+        for _ in range(2):
+            preview = json.loads(self.invoke(
+                "tick", "--apply", "--json", "--max-implementer", "2", "--max-reviewer", "0",
+                "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0).stdout)
+            live = self.attempts(live=True)
+            self.assertEqual(preview["active"]["implementer"], len(live), live)
+            self.assertEqual(len(live), 2, live)
+
+    def test_an_attempt_left_starting_with_no_launch_is_reaped_as_failed(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", "4h",
+                    "--agent", "agent-a", "--now", T0)
+        # The claim opened the run, but nothing attached a process to it.
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--now", "2030-01-01T10:05:00Z")
+        self.assertEqual([item["state"] for item in self.attempts("demo/W-1")], ["starting"])
+
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--now", "2030-01-01T10:11:00Z")
+        attempt = self.attempts("demo/W-1")[0]
+        self.assertEqual(attempt["state"], "failed")
+        self.assertEqual(attempt["reason"], "no launch attached")
+        self.assertTrue(attempt["reaped"])
+        # The ghost is closed; the claim it came with is authority, and it is left alone.
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "claimed")
+
+    def test_repeated_spawn_failures_are_distinct_attempts(self):
+        # A spawn that fails is a worker failure, not a ghost: it is not `reaped`, and each pass
+        # that retries it opens a new attempt with its own identity.
+        for _ in range(2):
+            self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                        "--no-integrate", "--worker-command", "/nonexistent/agent",
+                        "--now", T0)
+        attempts = self.attempts("demo/W-1")
+        self.assertEqual([item["attempt"] for item in attempts], ["demo/W-1#a1", "demo/W-1#a2"])
+        self.assertTrue(all(item["state"] == "failed" for item in attempts), attempts)
+        self.assertFalse(any(item["reaped"] for item in attempts), attempts)
+        self.assertIn("launch failed", attempts[0]["reason"])
+        third = self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                            "--no-integrate", "--worker-command", "/nonexistent/agent",
+                            "--now", T0).stdout
+        self.assertIn("two worker launches failed; needs a human", third)
 
     def test_a_launch_that_produced_work_is_marked_done_not_failed(self):
         self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
@@ -1336,8 +1466,8 @@ class WorkCLITest(unittest.TestCase):
 
         self.invoke("tick", "--apply", "--max-implementer", "1", "--worker-command", "/usr/bin/true",
                     "--agent", "opencode/loom-worker", "--now", "2030-01-01T12:00:00Z")
-        final = [event for event in self.ws.events()
-                 if event.get("event") == "launch" and event.get("pid") == launch["pid"]][-1]
+        final = [event for event in self.attempt_events()
+                 if event.get("attempt") == launch["attempt"]][-1]
         self.assertEqual(final["state"], "done")
         self.assertNotEqual(self.ws.task_record("demo/W-1")["status"], "blocked")
 
@@ -1364,7 +1494,11 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(launch["question"], int(request))
         self.assertEqual(launch["source"], source)
         self.assertEqual(launch["agent"], "opencode/reviewer-agent")
-        self.assertEqual(launch["state"], "pending")
+        attempt = next(item for item in self.attempts("demo/W-1")
+                       if item["attempt"] == launch["attempt"])
+        self.assertEqual(attempt["role"], "reviewer")
+        self.assertEqual(attempt["state"], "running")
+        self.assertEqual(attempt["question"], int(request))
         tree = self.ws.root / "reviews" / f"demo-w-1-{int(request)}"
         self.assertTrue(tree.exists())
         head = subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True).strip()
@@ -1469,9 +1603,10 @@ class WorkCLITest(unittest.TestCase):
         self.approve_review(request, reviewer="opencode/reviewer-agent")
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                     "--worker-command", "/usr/bin/true", "--now", T0)
-        launches = [event for event in self.ws.events()
-                    if event.get("event") == "launch" and event.get("role") == "reviewer"]
-        self.assertEqual(launches[-1]["state"], "done")
+        closures = [event for event in self.attempt_events("demo/W-1")
+                    if event.get("role") == "reviewer"
+                    and event.get("state") in {"done", "failed", "superseded"}]
+        self.assertEqual(closures[-1]["state"], "done")
 
     def test_a_review_request_stops_after_repeated_launch_failures(self):
         self.mark_green()
@@ -1545,9 +1680,9 @@ class WorkCLITest(unittest.TestCase):
             store.close()
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                     "--worker-command", "/usr/bin/true", "--now", T0)
-        launches = [event for event in self.ws.events()
-                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
-        self.assertEqual([event.get("state") for event in launches][-2:], ["superseded", "failed"])
+        closures = [event.get("state") for event in self.attempt_events("demo/W-1")
+                    if event.get("state") in {"done", "failed", "superseded"}]
+        self.assertEqual(closures[-2:], ["superseded", "failed"])
 
     def test_reconcile_closes_a_pending_launch_with_a_reused_pid(self):
         store = self.ws.store()
@@ -1562,9 +1697,9 @@ class WorkCLITest(unittest.TestCase):
             store.close()
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                     "--worker-command", "/usr/bin/true", "--now", T0)
-        launches = [event for event in self.ws.events()
-                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
-        self.assertEqual(launches[-1].get("state"), "failed")
+        closures = [event for event in self.attempt_events("demo/W-1")
+                    if event.get("state") in {"done", "failed", "superseded"}]
+        self.assertEqual(closures[-1].get("state"), "failed")
 
     def test_reconcile_keeps_a_launch_it_cannot_prove_is_reused(self):
         store = self.ws.store()
@@ -1577,9 +1712,11 @@ class WorkCLITest(unittest.TestCase):
             store.close()
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                     "--worker-command", "/usr/bin/true", "--now", T0)
-        launches = [event for event in self.ws.events()
-                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
-        self.assertEqual(launches[-1].get("state"), "pending")
+        closures = [event for event in self.attempt_events("demo/W-1")
+                    if event.get("state") in {"done", "failed", "superseded"}]
+        self.assertEqual(closures, [])
+        self.assertEqual([item["state"] for item in self.attempts("demo/W-1", live=True)],
+                         ["running"])
 
     def changes_requested_task(self, agent="agent-a", ttl="30m"):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--ttl", ttl,
@@ -1678,12 +1815,14 @@ class WorkCLITest(unittest.TestCase):
             store.close()
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                     "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
-        launches = [event for event in self.ws.events()
-                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
-        implementer = [event for event in launches if event.get("role") == "implementer"][-1]
-        reviewer = [event for event in launches if event.get("role") == "reviewer"][-1]
-        self.assertEqual(implementer.get("state"), "done")
-        self.assertEqual(reviewer.get("state"), "pending")
+        closures = [event for event in self.attempt_events("demo/W-1")
+                    if event.get("state") in {"done", "failed", "superseded"}]
+        implementer = next(event for event in reversed(closures)
+                           if event.get("role") == "implementer")
+        self.assertEqual(implementer["state"], "done")
+        reviewer = next(item for item in self.attempts("demo/W-1", live=True)
+                        if item["role"] == "reviewer")
+        self.assertEqual(reviewer["state"], "running")
 
     def test_tick_integrates_an_on_main_review_with_opt_in(self):
         self.mark_green("--evidence", "evidence/W-1.md")
@@ -1767,7 +1906,7 @@ class WorkCLITest(unittest.TestCase):
             store.close()
         result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
                              "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
-        self.assertIn("Stuck launches", result.stdout)
+        self.assertIn("Stuck attempts", result.stdout)
         self.assertIn("demo/W-1", result.stdout)
 
     def test_tick_reports_paths_diverged(self):
@@ -1836,18 +1975,21 @@ class WorkCLITest(unittest.TestCase):
                         "--id", f"demo/W-{index}", "--board", "demo.board",
                         "--title", f"Ready {name}", "--status", "ready",
                         "--write-path", f"src/{name}")
-        passes = []
+        passes, capacities = [], []
         for _ in range(3):
-            self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
-                        "--no-integrate", "--worker-command", "sh -c 'sleep 60'",
-                        "--now", T0)
-            passes.append(len([event for event in self.ws.events()
-                               if event.get("event") == "launch"
-                               and event.get("role") == "implementer"
-                               and event.get("state") == "pending"]))
-        self.assertEqual(passes[0], 2, passes)
-        self.assertEqual(passes[1], 2, passes)
-        self.assertEqual(passes[2], 2, passes)
+            preview = self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                                  "--no-integrate", "--worker-command", "sh -c 'sleep 60'",
+                                  "--now", T0).stdout
+            capacities.append(next(line for line in preview.splitlines()
+                                   if "capacity:" in line).strip())
+            passes.append(len(self.attempts(live=True)))
+        # Two live attempts every pass, and the number the pool believes is the number running.
+        # The first pass prints the capacity it observed before claiming; later passes read the
+        # two attempts the previous passes left running.
+        self.assertEqual(passes, [2, 2, 2], passes)
+        self.assertEqual(capacities[1], capacities[2], capacities)
+        self.assertIn("implementer 2/2", capacities[1], capacities)
+        self.assertIn("attempts live 2", capacities[1], capacities)
 
     def test_a_closed_launch_still_holds_its_slot_while_the_process_runs(self):
         import datetime as dt

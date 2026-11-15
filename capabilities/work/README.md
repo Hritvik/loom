@@ -40,7 +40,8 @@ identical on all three surfaces.
 | `migrate` | Copy a file work home into SQLite, verifying the event chain |
 | `export` | Render the store as YAML or JSON, replacing diffable state in git |
 | `show` | One task with dependencies, claim, evidence and review |
-| `claim` | Take a lease with compare-and-swap on revision; prints the fencing epoch |
+| `attempts` | Every agent run for a task: identity, worktree, process and outcome; `--live` for the running ones |
+| `claim` | Take a lease with compare-and-swap on revision; prints the fencing epoch and the attempt |
 | `renew` | Heartbeat and extend a live lease (presents the epoch) |
 | `release` | Return a claimed task to the ready pool with a reason (presents the epoch) |
 | `takeover` | Take over an expired lease after the lock-delay, with a recorded reason |
@@ -124,9 +125,10 @@ install` writes both plists against the promoted tree, so the path is never hand
 
 One `tick` pass does these phases in order:
 
-1. **Reconcile** launches whose process is gone. A launch that advanced the task is `done`; one that
-   did not is `failed`, and two consecutive failures block the task for a human. A reviewer launch is
-   `done` when it recorded a verdict.
+1. **Reconcile** attempts whose process is gone. An attempt that advanced the task is `done`; one
+   that did not is `failed`, and two consecutive failures block the task for a human. A reviewer
+   attempt is `done` when it recorded a verdict. An attempt left `starting` with no launch is
+   reaped as `failed`; it never ran, so it never requeues.
 2. **Record** `reviewed` for every green task whose latest review request carries an approval. The
    coordinator acts; the reviewer of record is the agent that answered.
 3. **Re-issue** a review request when a green task has no current request (a drifted revision or a
@@ -140,7 +142,8 @@ One `tick` pass does these phases in order:
    records a receipt, it does not merge. Everything else is reported as `merge-needed`,
    `paths-diverged`, `dependency-blocked` or `receipt-missing`.
 6. **Launch implementers** for claimable tasks, ranked by transitive downstream weight, up to the
-   `implementer` limit. Each runs in `~/.local/state/loom/worktrees/<slug>` on `loom/<slug>`.
+   `implementer` limit. Each attempt runs in `~/.local/state/loom/worktrees/<slug>-a<N>` on
+   `loom/<slug>-a<N>`; a relaunch branches from the attempt before it.
 7. **Launch reviewers** for open requests addressed to `opencode/reviewer-agent`, up to the
    `reviewer` limit. Each runs in a detached checkout under `~/.local/state/loom/reviews/<slug>`.
 

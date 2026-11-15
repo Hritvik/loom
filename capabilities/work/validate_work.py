@@ -667,14 +667,12 @@ def main(argv: list[str] | None = None) -> int:
                     "event log head does not match the external checkpoint "
                     "(rewrite, or a commit that did not reach the checkpoint)")
         last_by_task: dict[str, dict] = {}
-        seen_any: dict[str, dict] = {}
         for _, record in records:
             if not record.get("task"):
                 continue
-            seen_any[record["task"]] = record
             # Only an event that asserts a status can be the last word on a task's state. Launches
-            # and attempts are process audit: they carry a pid or a state, never a status. Treating
-            # them as state assertions made a legitimately running worker look like a hand edit.
+            # and attempts are process audit: they carry a pid or a run state, never a status.
+            # Treating them as state assertions made a legitimately running worker look hand-edited.
             if record.get("status") is not None:
                 last_by_task[record["task"]] = record
         for task_id, record in last_by_task.items():

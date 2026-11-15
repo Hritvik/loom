@@ -393,7 +393,7 @@ def cmd_plan(argv: list[str], globals_: list[str], config: dict) -> int:
 # --------------------------------------------------------------------------
 
 
-def pending_launches(config: dict) -> list[dict]:
+def live_attempts(config: dict) -> list[dict]:
     from store import make_store
 
     store = make_store(WORK, "sqlite", os.environ.get("WORK_DB") or config["db"])
@@ -401,11 +401,8 @@ def pending_launches(config: dict) -> list[dict]:
         records = [record for _, record in store.read_events()]
     finally:
         store.close()
-    latest: dict[str, dict] = {}
-    for record in records:
-        if record.get("event") == "launch" and record.get("task"):
-            latest[record["task"]] = record
-    return [record for record in latest.values() if record.get("state") == "pending"]
+    views = engine.attempt_views(records)
+    return engine.live_attempts(views)
 
 
 def pid_alive(pid) -> bool:
@@ -417,22 +414,21 @@ def pid_alive(pid) -> bool:
 
 
 def cmd_workers(args: argparse.Namespace, config: dict) -> int:
-    launches = pending_launches(config)
-    running = [item for item in launches if engine.launch_is_live(item)]
+    running = live_attempts(config)
     if args.action == "stop":
         target = next((item for item in running if item.get("task") == args.task), None)
         if target is None:
             print(f"no running worker for {args.task}", file=sys.stderr)
             return 2
         os.kill(int(target["pid"]), 15)
-        print(f"sent SIGTERM to {args.task} (pid {target['pid']})")
+        print(f"sent SIGTERM to {args.task} (pid {target['pid']}, attempt {target['attempt']})")
         return 0
     if not running:
         print("no workers running")
         return 0
     for item in running:
         print(f"{item['task']:<24} {item.get('role', ''):<12} pid {item['pid']:<8} "
-              f"{item.get('branch') or '(no branch)'}")
+              f"{item.get('attempt') or '-':<24} {item.get('branch') or '(no branch)'}")
         if item.get("worktree"):
             print(f"    worktree {item['worktree']}")
     return 0

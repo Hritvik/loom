@@ -276,7 +276,10 @@ class A2AFacadeTest(unittest.TestCase):
 
         history = self.rpc("GetTask", {"id": "demo/W-1", "historyLength": 5})["result"]["history"]
         self.assertTrue(history)
-        self.assertIn("claim", history[-1]["parts"][0]["text"])
+        texts = [item["parts"][0]["text"] for item in history]
+        self.assertTrue(any(text.startswith("claim") for text in texts), texts)
+        # The claim opens the run, so the newest record names the attempt it granted.
+        self.assertEqual(history[-1]["metadata"]["attempt"], "demo/W-1#a1")
 
         verified = run("--root", str(self.ws.root), "events", "--verify")
         self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)

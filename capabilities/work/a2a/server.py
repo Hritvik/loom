@@ -262,11 +262,13 @@ def task_to_a2a(home: WorkHome, task: dict, history_length: int = 0,
 
 def event_to_message(task_id: str, event: dict) -> dict:
     summary = event.get("event", "event")
-    detail = event.get("status") or event.get("previous_status") or ""
+    detail = event.get("status") or event.get("previous_status") or event.get("state") or ""
     text = f"{summary} {detail} at revision {event.get('revision', '?')} by {event.get('agent', 'unknown')}"
     if event.get("reason"):
         text += f": {event['reason']}"
     metadata = {"event": summary, "seq": event.get("seq")}
+    if event.get("attempt"):
+        metadata["attempt"] = event["attempt"]
     if event.get("review_source"):
         metadata.update(reviewSource=event["review_source"], revision=event["revision"],
                         reviewBase=event.get("review_base"),

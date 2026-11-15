@@ -105,6 +105,38 @@ Rules enforced by the CLI:
 - Default lease is 30 minutes; heartbeat with `renew` before expiry.
 - One file lock serialises mutations, so concurrent processes cannot interleave writes.
 
+## Attempts
+
+One agent run is one attempt. The claim opens it in the same transaction that grants the lease:
+
+```json
+{"seq":3,"ts":"2026-10-31T10:00:00Z","event":"attempt","attempt":"alpha/W-1#a2","task":"alpha/W-1","agent":"opencode/loom-worker","role":"implementer","state":"starting","epoch":7,"revision":42,"prev":"<sha256 of previous line>"}
+```
+
+- The identity is `<task>#a<N>`, allocated inside the claim's own write and never reused. A
+  takeover allocates the next one.
+- The spawn attaches the process by appending a `launch` that carries the same attempt id and the
+  pid, its start time, the worktree and the branch. An attempt with a launch is `running`; before
+  that it is `starting`.
+- The reaper closes each attempt once, as `done`, `failed` or `superseded`, with a reason when it
+  has one. A `starting` attempt with no launch after ten minutes is reaped as `failed`
+  (`no launch attached`): the pass that granted the claim died before it spawned. The claim is
+  left alone — a claim is authority, a run is work.
+- A relaunch, takeover or retry allocates a new attempt. The previous one keeps its identity, its
+  process record and its checkout, and `loom attempts <task>` still lists it.
+- Each attempt owns a checkout and a branch (`worktrees/<slug>-a<N>` on `loom/<slug>-a<N>`), so two
+  runs of one task cannot write into one directory. A relaunch starts from the previous attempt's
+  branch when that branch exists, so committed work is not thrown away.
+- Capacity is the number of attempts whose recorded process is still running, one slot per process.
+  A closed attempt that is still winding down keeps its slot until the process exits. `tick`,
+  `workers` and the reconciler read the same fold, so they cannot disagree about a run.
+- `attempt` and `launch` events carry a revision but no task status. They are process and run
+  audit, not state transitions, so the terminal-event check ignores them.
+
+A `launch` written before attempts existed carries no attempt id. It is folded as an attempt of its
+own (`<task>#legacy<seq>`) and closed by the same reaper, so a worker started by an older engine
+keeps its slot across the upgrade.
+
 ## Review protocol
 
 An implementer submits green work by asking a reviewer; the ask is an audit event, not a mutation:
@@ -142,9 +174,10 @@ Every mutation appends one hash-chained row to the `events` table:
 ```
 
 `seq` is contiguous, `prev` chains each record to its predecessor, and the terminal event for every
-task must match the registry's revision, status and claim owner. `loom events --verify` checks the
-chain; `validate_work.py` additionally cross-checks it against registry state, so a hand edit or an
-interrupted write is detected rather than trusted.
+task must match the registry's revision, status and claim owner. `attempt` and `launch` records are
+excluded from that check: they are process and run audit, not state transitions. `loom events
+--verify` checks the chain; `validate_work.py` additionally cross-checks it against registry state,
+so a hand edit or an interrupted write is detected rather than trusted.
 
 A mutation writes the registry and its event in **one transaction**; a crash cannot leave one
 without the other. The chain head is also written to `work.db.head`, outside the database.

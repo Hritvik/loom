@@ -110,6 +110,11 @@ holder. If the lease is taken over, the epoch increments and your writes are ref
 retry with the new epoch. A lease that has expired is no authority either — renew before it runs
 out, and if it has already run out, use `blocked` or `release` rather than asserting `red`/`green`.
 
+`claim` also opens an **attempt** — one run, named `<task>#a<N>` — in the same transaction. It
+owns the checkout and branch (`worktrees/<slug>-a<N>` on `loom/<slug>-a<N>`), and it is closed once
+as `done`, `failed` or `superseded`. `./loom attempts <id>` lists a task's runs oldest first, with
+the worktree and the process each one used; `./loom show <id>` prints the current one.
+
 Review is a separate identity (`opencode/reviewer-agent`) and a separate process. You submit; it
 answers; the coordinator records `reviewed`. Never answer a review request for work you implemented
 or held a claim on, and never approve on trust.

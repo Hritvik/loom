@@ -233,7 +233,9 @@ class MCPTest(unittest.TestCase):
         self.assertIsNone(released["claim"])
 
         events = self.structured("work_get", {"task": "demo/W-1"})["recentEvents"]
-        self.assertEqual([event["event"] for event in events], ["claim", "renew", "release"])
+        # The claim opens an attempt in the same transaction: the run is part of the record.
+        self.assertEqual([event["event"] for event in events],
+                         ["claim", "attempt", "renew", "release"])
 
     def review_source(self):
         git = ["git", "-C", str(self.ws.repo)]
