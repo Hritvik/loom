@@ -78,6 +78,8 @@ class Workspace:
         os.environ["LOOM_REVIEWS"] = str(self.root / "reviews")
         self._previous_roots = os.environ.get("LOOM_TICK_ROOTS")
         os.environ["LOOM_TICK_ROOTS"] = str(self.root / "tick.roots")
+        self._previous_decisions = os.environ.get("LOOM_TICK_DECISIONS")
+        os.environ["LOOM_TICK_DECISIONS"] = str(self.root / "tick.decisions.jsonl")
         self.repo = self.root / "repo"
         (self.repo / "docs").mkdir(parents=True)
 
@@ -171,6 +173,10 @@ class Workspace:
         return json.loads((self.repo / "docs" / "board.json").read_text())
 
     def close(self):
+        if self._previous_decisions is None:
+            os.environ.pop("LOOM_TICK_DECISIONS", None)
+        else:
+            os.environ["LOOM_TICK_DECISIONS"] = self._previous_decisions
         if self._previous_db is None:
             os.environ.pop("WORK_DB", None)
         else:
@@ -1884,14 +1890,9 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("capacity: implementer 2/4", preview)
 
     def test_an_applying_pass_records_its_decision(self):
-        decisions = self.ws.root / "decisions.jsonl"
-        os.environ["LOOM_TICK_DECISIONS"] = str(decisions)
-        try:
-            self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
-                        "--no-integrate", "--worker-command", "sh -c 'sleep 30'", "--now", T0)
-        finally:
-            os.environ.pop("LOOM_TICK_DECISIONS", None)
-        record = json.loads(decisions.read_text().splitlines()[-1])
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "sh -c 'sleep 30'", "--now", T0)
+        record = json.loads((self.ws.root / "tick.decisions.jsonl").read_text().splitlines()[-1])
         self.assertEqual(record["limits"]["implementer"], 1)
         self.assertEqual(len(record["launched"]), 1)
 
