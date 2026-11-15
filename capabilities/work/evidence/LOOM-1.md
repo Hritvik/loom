@@ -1,7 +1,7 @@
 # Evidence — LOOM-1 remove portfolio content from the public engine
 
 Repository: `~/repositories/loom`
-Status: green, submitted for independent review (round 5)
+Status: green, submitted for independent review (round 6)
 
 > Redacted by LOOM-4. The commands below once quoted this portfolio's program names, a personal
 > handle and two private repository slugs. Those are now guarded by
@@ -21,7 +21,7 @@ Status: green, submitted for independent review (round 5)
 - `PROTOCOL.md`: the service-ownership list is genericised.
 - `docs/artifacts.md` added: the seven artefact kinds, their homes, creation and promotion path.
 
-## Verification
+## Verification (current tree)
 
 - A case-insensitive grep for the portfolio's program names, a personal handle and its private
   repository slugs over the engine's markdown returns only the example value of
@@ -29,11 +29,23 @@ Status: green, submitted for independent review (round 5)
 - `python3 -m unittest discover -s tests` — 132 tests, all pass.
 - `python3 validate_work.py` — PASS; contracts are skipped unless `--contracts` is given.
 
+Earlier drafts of this block said 132 tests and that the sweep returned only the `WORK_CONTENT_HOME`
+example. Both were true of the round-1 tree and neither was true afterwards; they are corrected
+here rather than annotated, because this block is the summary a reviewer reads first.
+
 ## Limits
 
 - `docs/adr/0001-state-leaves-git.md` still describes this portfolio's split decision. It is an
   example of an ADR more than an engine decision; it should move to the content repository once a
   generic ADR template exists.
+- **The published history still serves the removed material.** The repository is public and
+  `origin/main` reaches the earlier commits, so the two files this task deleted remain downloadable
+  from the raw file service at their historical paths, and they name this portfolio's programs,
+  ownership and workspace. Every check in this file is a working-tree check; none of them can make
+  the goal true as published. This is not fixable from inside a task claim: it needs the engine
+  maintainer's decision, and the remediation rewrites a public remote, which a worker is not
+  permitted to push. Decision: `decisions/published-history-001.md` (status: proposed, awaiting the
+  owner). Until it is accepted and executed, the goal is met in the tree and not in the history.
 
 ## Rework after review (event 740, changes requested)
 
@@ -116,10 +128,12 @@ Verification at the commit named in the review request:
 - `python3 -m unittest discover -s tests` — 140 tests, all pass.
 
 Correction (round 5): this block was not true of the commit it claimed to describe. At
-`38dbdf3997b6` the same sweep also matched `engine.py:2429`, `engine.py:2445`,
-`test_linear_client.py:105` and `test_work.py:1397`, the clone URL is `README.md:24`, and the
-suite ran **215** tests, not 140. The numbers had been carried forward from an earlier tree. The
-block below is the one that was actually re-run, and it names the tree it was run on.
+`38dbdf3997b6` the same sweep also matched `engine.py:2426`, `engine.py:2442`,
+`test_linear_client.py:105` and `test_work.py:1391`, the clone URL is `README.md:24`, and the
+suite ran **215** tests, not 140. The numbers had been carried forward from an earlier tree. (The
+`2429`/`2445`/`1397` first printed here were themselves off by three; the positions above are from
+`git grep` on `38dbdf3997b6`.) The block below is the one that was actually re-run, and it names the
+tree it was run on.
 
 ## Fifth rework after retrospective delta review (event 1461, changes requested)
 
@@ -143,7 +157,7 @@ Verification, run on `90b01e22092c` (the parent of the commit that carries this 
 difference between the two is this file):
 
 - `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
-  returns exactly four hits, all accounted for:
+  returns hits in four files, all accounted for:
   - `README.md:24` and `docs/adopting.md:8` — the engine's own clone URL. This portfolio is not
     mentioned; it is the public repository address.
   - `docs/adr/0001-state-leaves-git.md:53` — the accepted limit recorded under "Limits" above.
@@ -154,4 +168,38 @@ difference between the two is this file):
 - `python3 -m unittest discover -s tests` — 221 tests, all pass, at HEAD `8168ddc` plus this
   rework. The count differs from the 215 in the review note because six engine commits landed after
   `38dbdf3`.
+
+## Sixth rework after review of `d551f93` (event 1556, changes requested)
+
+The reviewer confirmed the five event-1461 findings closed and found four things this round:
+
+1. **The goal is not met as published.** Every check above is a working-tree check. The repository
+   is public (`Hritvik/loom`, `private: false`) and `origin/main` reaches `a68c436`, so the program
+   map and the Linear runbook this task removed are still served from their historical raw paths;
+   they name the programs, ownership and workspace. Recorded under "Limits" above, with
+   `decisions/published-history-001.md` proposing the remediation. **Not executed here:** it
+   rewrites a public remote and needs the owner's decision, so a worker cannot do it and cannot
+   accept the limit in the owner's place.
+2. The top Verification and Limits blocks still carried round-1 numbers (132 tests, and a sweep
+   claimed to return only the `WORK_CONTENT_HOME` example). Rewritten as "Verification (current
+   tree)" with the sweep and the 221-test count re-run, and a note saying which tree the old
+   numbers belonged to.
+3. The round-5 correction reprinted three positions three lines late. `git grep` on
+   `38dbdf3997b6` puts the leaks at `engine.py:2426`, `engine.py:2442`, `test_linear_client.py:105`
+   and `test_work.py:1391`; fixed, with the source of the numbers stated.
+4. `tests/test_linear_projection.py` used `chat/W-1`, and `chat` is one of this portfolio's program
+   ids. Now `gamma/W-1`; `alpha` and `gamma` are neutral.
+
+Verification at the commit named in the review request:
+
+- `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
+  returns hits in four files: `README.md:24`, `docs/adopting.md:8` (the public clone URL),
+  `docs/adr/0001-state-leaves-git.md:53` (the accepted limit above) and this file.
+- `git grep -n -I -i -E "(^|[^A-Za-z0-9_-])(cal|chat|dutch-ref|herald|jarvis|midas|modelswitch|myfinance|myfitnessguide|superapp|teach|uds|uds-client)([^A-Za-z0-9_-]|$)"`
+  over the tracked tree returns only the English word "chat" (`AGENT-GUIDE.md:3`, `README.md:372`,
+  `engine.py:1460`) and this file's account of the fixture change.
+- `curl -s -o /dev/null -w '%{http_code}'` against the two historical raw paths still returns
+  `200` — the exposure is live, not merely theoretical.
+- `python3 validate_work.py` — PASS.
+- `python3 -m unittest discover -s tests` — 221 tests, all pass.
 
