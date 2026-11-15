@@ -1951,6 +1951,21 @@ class WorkCLITest(unittest.TestCase):
         result = validate(self.ws.root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_verify_registry_events_ignores_process_audit(self):
+        from engine import verify_registry_events
+
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="attempt", task="demo/W-1", agent="agent-a",
+                                   state="running", attempt="demo/W-1#a1", revision=1, now=T0)
+            registry = store.load()
+            errors = verify_registry_events(registry, store.read_events())
+        finally:
+            store.close()
+        self.assertEqual(errors, [])
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",

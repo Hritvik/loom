@@ -3542,7 +3542,10 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
     by_id = {task["id"]: task for task in registry.get("tasks", [])}
     last: dict[str, dict] = {}
     for _, record in records:
-        if record.get("task") and record.get("event") != "launch":
+        # Only an event that asserts a status is the last word on a task's state. Launches and
+        # attempts carry a pid or a run state instead; counting them reported every task touched by
+        # a running worker as hand-edited, which blocked the Linear mirror for hours.
+        if record.get("task") and record.get("status") is not None:
             last[record["task"]] = record
     for task_id, record in last.items():
         task = by_id.get(task_id)
