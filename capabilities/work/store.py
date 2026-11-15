@@ -251,9 +251,11 @@ class _TrackedLock:
 
 
 class FileStore(Store):
-    """`registry.yaml` plus `events.ndjson` in a work home. Legacy importer; not atomic.
+    """`registry.yaml` plus `events.ndjson` in a work home. Read-only legacy importer.
 
-    Writes exist only for migration fixtures; the runtime default is SQLite (`make_store`).
+    SQLite is the only writable backend. This class exists so `loom migrate` can read a home written
+    by an older release; it deliberately has no write path, because the file backend cannot write
+    state and its event together and was never atomic.
     """
 
     def __init__(self, root: Path):
@@ -283,27 +285,8 @@ class FileStore(Store):
         return data
 
     def save(self) -> None:
-        self._require_lock()
-        self.registry["updated"] = iso(parse_now(None))[:10]
-        body = yaml.safe_dump(
-            self.registry,
-            sort_keys=False,
-            default_flow_style=False,
-            allow_unicode=True,
-            width=100,
-        )
-        mode = (self.registry_path.stat().st_mode & 0o777) if self.registry_path.exists() else 0o644
-        fd, tmp = tempfile.mkstemp(dir=str(self.root), prefix=".registry.", suffix=".yaml")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(REGISTRY_HEADER)
-                handle.write(body)
-            os.chmod(tmp, mode)
-            os.replace(tmp, self.registry_path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        raise WorkError(
+            "the file backend is read-only; import a pre-SQLite home with `loom migrate`")
 
     def lock(self):
         return _TrackedLock(self, _FileLock(self.lock_path))
@@ -324,14 +307,8 @@ class FileStore(Store):
         return records
 
     def append_event(self, **fields) -> dict:
-        self._require_lock()
-        records = self.read_events()
-        seq = len(records) + 1
-        prev = hashlib.sha256(records[-1][0]).hexdigest() if records else ZERO_HASH
-        event = {"seq": seq, "ts": iso(parse_now(fields.pop("now", None))), **fields, "prev": prev}
-        with self.events_path.open("ab") as handle:
-            handle.write(event_bytes(event) + b"\n")
-        return event
+        raise WorkError(
+            "the file backend is read-only; import a pre-SQLite home with `loom migrate`")
 
 
 class SqliteStore(Store):

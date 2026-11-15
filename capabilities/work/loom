@@ -127,11 +127,19 @@ def git_text(repo: Path, *args: str) -> str:
 
 
 def tree_digest(root: Path) -> str:
+    """A digest of the released source, immune to what running it leaves behind.
+
+    `__pycache__` appears the first time the release executes, so including it made the recorded
+    digest false within minutes of promoting. The digest is only useful if it can be re-verified.
+    """
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
-        if path.is_file():
-            digest.update(str(path.relative_to(root)).encode())
-            digest.update(path.read_bytes())
+        if not path.is_file():
+            continue
+        if path.suffix == ".pyc" or "__pycache__" in path.parts:
+            continue
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
     return digest.hexdigest()
 
 
@@ -159,7 +167,14 @@ def cmd_deploy(args: argparse.Namespace, config: dict) -> int:
         print(f"  head:      {released.get('commit', 'none')}")
         if released:
             print(f"  promoted:  {released.get('promoted_at')}")
-        print(f"  tree:      {'present' if (engine_dir() / 'capabilities/work/loom').is_file() else 'absent'}")
+        present = (engine_dir() / "capabilities/work/loom").is_file()
+        print(f"  tree:      {'present' if present else 'absent'}")
+        intact = True
+        if present and released.get("tree"):
+            actual = tree_digest(engine_dir())
+            intact = actual == released["tree"]
+            print(f"  digest:    {'verified' if intact else 'MISMATCH'} "
+                  f"(recorded {released['tree'][:12]}, tree {actual[:12]})")
         print(f"schedule:   {scheduled or 'unknown'}")
         pinned = bool(scheduled) and str(engine_dir()) in scheduled
         if not released:
@@ -168,8 +183,11 @@ def cmd_deploy(args: argparse.Namespace, config: dict) -> int:
             print("verdict:    STALE — development is ahead of the release; promote when reviewed")
         elif not pinned:
             print("verdict:    UNPINNED — a release exists but the schedule still points at development")
+        elif not intact:
+            print("verdict:    DRIFTED — the release tree no longer matches its recorded digest; "
+                  "promote again")
         else:
-            print("verdict:    PINNED — the scheduler runs the promoted release")
+            print("verdict:    PINNED — the scheduler runs the promoted release, digest verified")
         return 0
     if args.action == "promote":
         if not (repo / ".git").exists():

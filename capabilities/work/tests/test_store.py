@@ -9,6 +9,7 @@ Run: python3 -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -21,7 +22,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_work import T0, Workspace, run  # noqa: E402
 
-from store import (FileStore, SqliteStore, WorkError, event_bytes, make_store)  # noqa: E402
+import yaml  # noqa: E402
+
+from store import (  # noqa: E402
+    REGISTRY_HEADER,
+    ZERO_HASH,
+    FileStore,
+    SqliteStore,
+    WorkError,
+    event_bytes,
+    make_store,
+)
 
 
 def normalised(value):
@@ -30,15 +41,26 @@ def normalised(value):
 
 
 def legacy_home(root: Path, registry: dict, events: int = 1) -> FileStore:
-    """A pre-SQLite work home: registry.yaml plus a hash-chained events.ndjson."""
+    """A pre-SQLite work home: registry.yaml plus a hash-chained events.ndjson.
+
+    Written directly. `FileStore` is read-only by design, so a fixture cannot use it to
+    manufacture the state `loom migrate` is meant to import.
+    """
     root.mkdir(parents=True, exist_ok=True)
+    body = yaml.safe_dump(normalised(registry), sort_keys=False, default_flow_style=False,
+                          allow_unicode=True, width=100)
+    (root / "registry.yaml").write_text(REGISTRY_HEADER + body, encoding="utf-8")
+    lines, previous = [], ZERO_HASH
+    for index in range(events):
+        event = {"seq": index + 1, "ts": T0, "event": "note", "agent": "agent-a",
+                 "task": "demo/W-1", "revision": 0, "status": "ready", "prev": previous}
+        raw = event_bytes(event)
+        previous = hashlib.sha256(raw).hexdigest()
+        lines.append(raw)
+    if lines:
+        (root / "events.ndjson").write_bytes(b"\n".join(lines) + b"\n")
     store = FileStore(root)
-    store.registry = normalised(registry)
-    with store.lock():
-        store.save()
-        for index in range(events):
-            store.append_event(event="note", agent="agent-a", task="demo/W-1",
-                               revision=0, status="ready", now=T0)
+    store.load()
     return store
 
 

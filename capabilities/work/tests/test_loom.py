@@ -139,6 +139,18 @@ class DeployTest(unittest.TestCase):
         copied = self.home / ".local/state/loom/engine/capabilities/work/loom"
         self.assertEqual(copied.read_text(), "#!/usr/bin/env python3\n")
 
+    def test_status_re_verifies_the_release_digest(self):
+        self.deploy("promote")
+        self.run_loom("schedule", "install")
+        verified = self.deploy("status")
+        self.assertIn("digest:    verified", verified.stdout)
+        self.assertIn("PINNED", verified.stdout)
+        target = self.home / ".local/state/loom/engine/capabilities/work/loom"
+        target.write_text("#!/usr/bin/env python3\n# altered after promotion\n")
+        drifted = self.deploy("status")
+        self.assertIn("MISMATCH", drifted.stdout)
+        self.assertIn("DRIFTED", drifted.stdout)
+
     def test_install_points_the_schedule_at_the_release(self):
         self.deploy("promote")
         installed = self.run_loom("schedule", "install")

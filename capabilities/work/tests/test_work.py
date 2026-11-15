@@ -1907,6 +1907,39 @@ class WorkCLITest(unittest.TestCase):
         reasons = [item.get("reason", "") for item in preview["held"]]
         self.assertTrue(any("write path reserved" in reason for reason in reasons), reasons)
 
+    def test_quiet_prints_once_per_distinct_root_set(self):
+        self.invoke("transition", "demo/W-1", "--revision", "0", "--to", "blocked",
+                    "--needs", "human", "--reason", "owner decision", "--agent", "agent-a",
+                    "--now", T0)
+        first = self.invoke("tick", "--quiet", "--now", T0)
+        self.assertIn("Blocked on a human", first.stdout)
+        second = self.invoke("tick", "--quiet", "--now", T0)
+        self.assertEqual(second.stdout.strip(), "", second.stdout)
+        self.invoke("transition", "demo/W-2", "--revision", "0", "--to", "blocked",
+                    "--needs", "human", "--reason", "second decision", "--agent", "agent-a",
+                    "--now", T0)
+        third = self.invoke("tick", "--quiet", "--now", T0)
+        self.assertIn("Blocked on a human", third.stdout)
+
+    def test_two_concurrent_ticks_do_not_double_launch(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        def pass_once(index):
+            return run("--root", str(self.ws.root), "tick", "--apply", "--max-implementer", "1",
+                       "--max-reviewer", "0", "--no-integrate",
+                       "--worker-command", "sh -c 'sleep 20'", "--now", T0)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(pass_once, range(2)))
+        self.assertTrue(all(result.returncode == 0 for result in results),
+                        [result.stderr for result in results])
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("role") == "implementer"
+                    and event.get("state") == "pending"]
+        self.assertEqual(len(launches), 1, launches)
+        claims = [event for event in self.ws.events() if event.get("event") == "claim"]
+        self.assertEqual(len(claims), 1, claims)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
