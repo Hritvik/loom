@@ -33,7 +33,7 @@ python3 mcp/server.py \
 | `work_renew` | write | Heartbeat and extend the lease (presents the epoch) |
 | `work_release` | write | Return to the pool with a reason (presents the epoch) |
 | `work_takeover` | write | Take over an expired lease after the lock-delay, with a reason |
-| `work_transition` | write | red/green/reviewed/integrated/accepted, blocked/rejected |
+| `work_transition` | write | red/green/reviewed/integrated/accepted, blocked/rejected; `needs: human\|agent` |
 | `work_inbox` | read | Unanswered questions addressed to the agent |
 | `work_search` | read | Find tasks by text instead of namespace |
 | `work_dependents` | read | Who is blocked on a task, directly and transitively |

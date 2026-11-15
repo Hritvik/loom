@@ -28,7 +28,9 @@ python3 -m unittest discover -s capabilities/work/tests
 ```
 
 State lives in SQLite at `~/.local/state/loom/work.db`, outside this repository. Point the CLI
-elsewhere with `--db` or `WORK_DB`.
+elsewhere with `--db` or `WORK_DB`. A fresh database is created with `loom init --id <board>
+--repo <path> --path <board-file> --agent <you>`; it writes the registry and genesis event
+atomically.
 
 ## Use
 
@@ -46,8 +48,9 @@ Agents working in a product repository should read
 ## Running unattended
 
 `loom tick --apply` is one policy pass: reconcile launches whose process is gone, record reviews
-that were approved but never applied, then fill the implementer and reviewer slots from the ranked
-queue. An implementer runs in its own git worktree; a reviewer runs in a detached checkout at the
+that were approved but never applied, re-issue a current review request when one is missing, requeue
+changes-requested work, optionally record integration for already-merged reviewed work, then fill
+the implementer and reviewer slots from the ranked queue. An implementer runs in its own git worktree; a reviewer runs in a detached checkout at the
 exact commit under review. Every launch is an event carrying its pid, role and revision.
 
 The launchd job runs it every **120 seconds** with `--quiet`, so an idle pass prints nothing.

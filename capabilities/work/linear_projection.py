@@ -101,6 +101,10 @@ def _lane(
         return "rejected", None, None
     if state == "green":
         return _review_state(task, history, implementer)
+    if state == "released":
+        return "released", None, None
+    if state == "in-progress":
+        return "implementing", implementer or "implementer", None
     if active:
         return "implementing", implementer or "implementer", None
     if state == "ready" and not blockers:
@@ -132,6 +136,7 @@ def _focus_ids(tasks: dict, dependencies: dict, focus: str | None) -> set[str]:
 
 def project_cards(
     registry: dict, events: list[dict], now: dt.datetime, focus: str | None = None,
+    humans: set[str] | None = None,
 ) -> list[dict]:
     """Return sanitized cards for the board or a focus task and all hard prerequisites."""
     tasks = {task["id"]: task for task in registry["tasks"]}
@@ -162,8 +167,12 @@ def project_cards(
         lane, next_actor, reviewer = _lane(task, history[task_id], implementer, task_id in active, blockers)
         program = task.get("program") or task_id.partition("/")[0]
         dependents = _WORK["transitive_dependents"](reverse, task_id)
+        needs_human = (next_actor in (set(humans or ()) | {"human"})
+                       or task.get("blocked_needs") == "human")
         if lane == "integrated":
             priority = 0
+        elif needs_human:
+            priority = 1
         elif len(dependents) >= 6:
             priority = 1
         elif len(dependents) >= 3:
@@ -172,7 +181,6 @@ def project_cards(
             priority = 3
         else:
             priority = 4
-        needs_human = next_actor in {"human", "hritvik"} or task.get("blocked_needs") == "human"
         cards.append({
             "id": task_id, "title": task.get("title") or task_id,
             "lane": lane, "program": program, "owner": program,

@@ -8,7 +8,7 @@ artifact_roots:
   evidence: evidence
 
 artifacts:
-  cli: task
+  cli: loom
   store: store.py
   schema: schemas/task.schema.json
   validator: validate_work.py

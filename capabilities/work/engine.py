@@ -85,6 +85,7 @@ DURATION_PATTERN = re.compile(r"^(\d+)([smhd])$")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from store import (  # noqa: E402 — sibling module, resolved from the script directory
     REGISTRY_HEADER,
+    REGISTRY_KIND,
     ZERO_HASH,
     FileStore,
     SqliteStore,
@@ -878,7 +879,7 @@ def cmd_renew(args, store: Store) -> int:
         )
     task["claim"]["lease_expires"] = iso(now + ttl)
     task["claim"]["heartbeat"] = iso(now)
-    bump(task, task["status"], now)
+    task["updated_at"] = iso(now)
     store.commit(event="renew", task=task["id"], agent=agent, status=task["status"],
                        revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
                        epoch=claim_epoch(task), now=args.now)
@@ -1241,7 +1242,8 @@ def cmd_events(args, store: Store) -> int:
             last_raw, last_record = records_all[-1]
             head = hashlib.sha256(last_raw).hexdigest()
             if checkpoint is None:
-                notes.append("no external audit checkpoint yet; it is written on the next mutation")
+                checkpoint_errors.append(
+                    "missing external audit checkpoint; run `events --verify --reanchor`")
             elif checkpoint != (last_record.get("seq"), head):
                 checkpoint_errors.append(
                     f"event log head {last_record.get('seq')}:{head[:12]} does not match the "
@@ -1253,7 +1255,7 @@ def cmd_events(args, store: Store) -> int:
             if chain_errors:
                 errors = chain_errors + ["refusing to re-anchor while the chain does not verify"]
             else:
-                store.reanchor()
+                store.reanchor(allow_rewind=args.allow_rewind)
                 notes.append("re-anchored the external checkpoint at "
                              f"{records_all[-1][1]['seq'] if records_all else 0}")
         else:
@@ -1473,6 +1475,9 @@ Do this:
 
 REVIEWER_IDENTITY = "opencode/reviewer-agent"
 REVIEW_COORDINATOR = "opencode/loom-coordinator"
+HUMAN_IDENTITIES = {"human", "owner"}
+KNOWN_AGENTS = {"opencode/reviewer-agent", "opencode/reviewer", "opencode/loom-worker",
+                "opencode/loom-coordinator", "codex-agent"}
 MAX_REVIEW_ATTEMPTS = 2
 
 REVIEWER_BRIEF = """You are an independent reviewer for one task in the portfolio work registry.
@@ -1564,6 +1569,20 @@ def launch_is_live(launch: dict) -> bool:
     return abs((started - expected_at).total_seconds()) <= 120
 
 
+def trailing_failures(store: Store, task_id: str, role: str) -> int:
+    """Failures since the last successful/superseded attempt of this role."""
+    history = [record for _, record in store.read_events()
+               if record.get("event") == "launch" and record.get("task") == task_id
+               and record.get("role") == role]
+    count = 0
+    for record in reversed(history):
+        if record.get("state") == "failed":
+            count += 1
+        elif record.get("state") in {"done", "superseded"}:
+            break
+    return count
+
+
 def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[str]:
     """Close every pending launch that is gone or superseded, then escalate the latest failure."""
     problems = []
@@ -1572,14 +1591,18 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
                for record in records if record.get("event") == "answer"}
     launches = [record for record in records
                 if record.get("event") == "launch" and record.get("task")]
-    last_seq: dict[str, int] = {}
-    terminal_after: dict[str, int] = {}
+    def key(record):
+        return (record.get("task"), record.get("role"), record.get("question"))
+    last_seq: dict[tuple, int] = {}
+    terminal_after: dict[tuple, int] = {}
     closed = {launch.get("closes") for launch in launches if launch.get("closes") is not None}
     for launch in launches:
-        last_seq[launch["task"]] = int(launch.get("seq") or 0)
+        if launch.get("closes") is not None:
+            continue  # closure events are not attempts
+        last_seq[key(launch)] = max(last_seq.get(key(launch), 0), int(launch.get("seq") or 0))
         if launch.get("state") in {"done", "failed", "superseded"}:
-            terminal_after[launch["task"]] = max(
-                terminal_after.get(launch["task"], 0), int(launch.get("seq") or 0))
+            terminal_after[key(launch)] = max(
+                terminal_after.get(key(launch), 0), int(launch.get("seq") or 0))
     by_id = {task["id"]: task for task in registry["tasks"]}
     with store.transaction():
         for launch in launches:
@@ -1588,20 +1611,20 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
             sequence = int(launch.get("seq") or 0)
             if sequence in closed:
                 continue
-            if sequence < terminal_after.get(launch["task"], 0):
+            if sequence < terminal_after.get(key(launch), 0):
                 # A legacy closure (written before `closes` existed) already accounts for this.
                 continue
             task = by_id.get(launch["task"])
             if task is None:
                 state, reason = "superseded", "the task left the registry"
             else:
-                superseded = int(launch.get("seq") or 0) < last_seq.get(launch["task"], 0)
+                superseded = sequence < last_seq.get(key(launch), 0)
                 if superseded:
-                    state, reason = "superseded", "a later launch replaced this attempt"
+                    state, reason = "superseded", "a later launch of this role replaced this attempt"
                 elif launch_is_live(launch):
                     continue
                 elif launch.get("role") == "reviewer":
-                    answered = answers.get((task["id"], launch.get("question")), -1) > int(launch.get("seq") or 0)
+                    answered = answers.get((task["id"], launch.get("question")), -1) > sequence
                     state, reason = ("done" if answered else "failed"), None
                 else:
                     launch_revision = launch.get("revision")
@@ -1617,29 +1640,33 @@ def reconcile_launches(store: Store, registry: dict, now: dt.datetime) -> list[s
                                question=launch.get("question"), closes=sequence,
                                **({"reason": reason} if reason else {}), now=iso(now))
 
-        # Only the latest attempt can requeue or block the task. Superseded attempts are history.
-        failed_by_role: dict[tuple[str, str], int] = {}
-        for _, record in store.read_events():
-            if record.get("event") == "launch" and record.get("state") == "failed":
-                key = (record.get("task"), record.get("role"))
-                failed_by_role[key] = failed_by_role.get(key, 0) + 1
+        # Only the latest attempt of a role can requeue or block the task.
         for task in registry["tasks"]:
             state = launch_state(store, task["id"])
             latest = state["latest"]
             if latest.get("state") != "failed" or latest.get("role") == "reviewer":
                 continue
-            failures = failed_by_role.get((task["id"], latest.get("role")), 0)
+            failures = trailing_failures(store, task["id"], latest.get("role") or "implementer")
             if failures >= 2:
                 problems.append(f"{task['id']}: two worker launches failed; needs a human")
                 if task.get("status") in {"claimed", "red", "green"}:
+                    previous = task.get("status")
                     task["claim"] = None
-                    task["status"] = "blocked"
                     task["blocked_needs"] = "human"
-                    task["updated_at"] = iso(now)
+                    bump(task, "blocked", now)
+                    store.append_event(
+                        event="transition", task=task["id"], agent=WORKER_IDENTITY,
+                        status="blocked", previous_status=previous,
+                        revision=task["revision"],
+                        reason="two worker launches failed", now=iso(now))
             elif task.get("status") in {"claimed", "red"}:
+                previous = task.get("status")
                 task["claim"] = None
-                task["status"] = "ready"
-                task["updated_at"] = iso(now)
+                bump(task, "ready", now)
+                store.append_event(
+                    event="transition", task=task["id"], agent=WORKER_IDENTITY,
+                    status="ready", previous_status=previous, revision=task["revision"],
+                    reason="launch failed; requeued", now=iso(now))
     return problems
 
 
@@ -1714,13 +1741,15 @@ def spawn_worker(args, task: dict, role: str, work_home: Path) -> tuple[int | No
     return process.pid, tree, branch
 
 
-def review_worktree(repo: Path, task_id: str, source: str) -> Path:
-    """A detached checkout of the exact commit under review, separate from the worker's branch."""
+def review_worktree(repo: Path, task_id: str, source: str, question=None) -> Path:
+    """A detached checkout of the exact commit under review, one per request."""
     probe = subprocess.run(["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
                            capture_output=True, text=True)
     if probe.returncode != 0:
         return repo
     slug = task_id.replace("/", "-").lower()
+    if question is not None:
+        slug = f"{slug}-{question}"
     base = Path(os.environ.get("LOOM_REVIEWS")
                 or Path.home() / ".local/state/loom/reviews").expanduser()
     base.mkdir(parents=True, exist_ok=True)
@@ -1729,7 +1758,13 @@ def review_worktree(repo: Path, task_id: str, source: str) -> Path:
         added = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach",
                                 str(path), source], capture_output=True, text=True)
         if added.returncode != 0:
-            raise WorkError(f"cannot create a review worktree for {task_id}: {added.stderr.strip()}")
+            subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True)
+            retry = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach",
+                                    str(path), source], capture_output=True, text=True)
+            if retry.returncode != 0:
+                raise WorkError(
+                    f"cannot create a review worktree for {task_id}: "
+                    f"{retry.stderr.strip() or added.stderr.strip()}")
     else:
         moved = subprocess.run(["git", "-C", str(path), "checkout", "-q", "--detach", source],
                                capture_output=True, text=True)
@@ -1742,7 +1777,7 @@ def review_worktree(repo: Path, task_id: str, source: str) -> Path:
 def spawn_reviewer(args, task: dict, item: dict, work_home: Path) -> tuple[int, Path]:
     """Start an independent reviewer on one open request, in a detached checkout."""
     repo = Path(str(task.get("owner_repo") or ".")).expanduser()
-    tree = review_worktree(repo, task["id"], item["source"])
+    tree = review_worktree(repo, task["id"], item["source"], item["question"])
     brief = REVIEWER_BRIEF.format(
         task=task["id"], revision=item["revision"], question=item["question"],
         source=item["source"], base=item.get("base") or "(none: diff from the empty tree)",
@@ -1791,7 +1826,7 @@ def open_review_requests(store: Store, registry: dict, reviewer_identity: str,
             continue
         launch = latest_launch.get(task["id"])
         if (launch and launch.get("role") == "reviewer" and launch.get("state") == "pending"
-                and launch.get("question") == record.get("seq") and pid_alive(launch.get("pid"))):
+                and launch.get("question") == record.get("seq") and launch_is_live(launch)):
             continue
         entry = {
             "task": task["id"], "revision": task["revision"], "question": record["seq"],
@@ -1820,6 +1855,14 @@ def sweep_approved_reviews(store: Store, now: dt.datetime, agent: str,
             continue
         history = task_history(store, task)
         request = latest_review_request(task, history)
+        if not request:
+            request = next((
+                event for event in reversed(history)
+                if event.get("event") == "ask" and event.get("review_source")
+                and any(answer.get("event") == "answer"
+                        and answer.get("in_reply_to") == event.get("seq")
+                        and answer.get("decision") == "changes requested"
+                        for answer in history)), {})
         if not request:
             continue
         answer = next((event for event in history if event.get("event") == "answer"
@@ -1916,6 +1959,188 @@ def apply_rework(store: Store, items: list[dict], args) -> tuple[list[dict], lis
     return queued, held
 
 
+def review_request_sweep(store: Store, registry: dict, now: dt.datetime, args) -> tuple[list[dict], list[dict]]:
+    """Find green tasks without a current review request and decide whether to re-ask."""
+    humans = HUMAN_IDENTITIES | set(args.humans or ())
+    known = KNOWN_AGENTS | set(args.known_agents or ())
+    reviewer = args.reviewer_identity
+    records = [record for _, record in store.read_events()]
+    live_reviewer_tasks = {
+        record.get("task") for record in records
+        if record.get("event") == "launch" and record.get("role") == "reviewer"
+        and record.get("state") == "pending" and launch_is_live(record)
+    }
+    reask, blocked = [], []
+    for task in registry["tasks"]:
+        if task.get("status") != "green":
+            continue
+        history = [record for record in records if record.get("task") == task["id"]]
+        current = latest_review_request(task, history)
+        answer = next((record for record in history if record.get("event") == "answer"
+                       and record.get("in_reply_to") == current.get("seq")), {}) if current else {}
+        if current and answer:
+            continue  # approval or changes-requested is handled by the other phases
+        if current and current.get("to") == reviewer:
+            continue  # healthy at the current revision
+        if current:
+            stale = current
+        else:
+            stale = next((record for record in reversed(history)
+                          if record.get("event") == "ask" and record.get("review_source")), None)
+            if stale is None:
+                blocked.append({"task": task["id"], "action": "never_submitted"})
+                continue
+            stale_answer = next((record for record in history if record.get("event") == "answer"
+                                 and record.get("in_reply_to") == stale.get("seq")), {})
+            if stale_answer.get("decision") == "changes requested":
+                blocked.append({"task": task["id"], "action": "rework",
+                                "request": stale.get("seq"), "answer": stale_answer.get("seq")})
+                continue
+            # A source from an older revision is not the work of the current revision.
+            # Re-asking it would let the reviewer approve the wrong commit.
+            blocked.append({"task": task["id"], "action": "resubmit_required",
+                            "request": stale.get("seq")})
+            continue
+        addressee = stale.get("to")
+        if addressee in humans:
+            blocked.append({"task": task["id"], "action": "human", "to": addressee,
+                            "request": stale.get("seq")})
+            continue
+        if addressee not in known:
+            blocked.append({"task": task["id"], "action": "unknown", "to": addressee,
+                            "request": stale.get("seq")})
+            continue
+        if task["id"] in live_reviewer_tasks:
+            blocked.append({"task": task["id"], "action": "reviewer_live"})
+            continue
+        green_evidence = next((record.get("evidence") for record in reversed(history)
+                               if record.get("event") == "transition"
+                               and record.get("status") == "green" and record.get("evidence")), None)
+        source = stale.get("review_source")
+        evidence = stale.get("review_evidence") or green_evidence or task.get("evidence")
+        if not source or not evidence:
+            blocked.append({"task": task["id"], "action": "review_unavailable",
+                            "request": stale.get("seq")})
+            continue
+        reask.append({"task": task["id"], "revision": task.get("revision", 0),
+                      "source": source, "evidence": evidence, "base": stale.get("review_base"),
+                      "from": stale.get("seq"), "addressee": addressee})
+    return reask, blocked
+
+
+def apply_review_sweep(store: Store, items: list[dict], args) -> tuple[list[dict], list[dict]]:
+    reissued, blocked = [], []
+    for item in items:
+        ask_args = argparse.Namespace(
+            task=item["task"], to=args.reviewer_identity,
+            question=f"Review request re-issued for {item['task']} at {item['source'][:12]}",
+            review_source=item["source"], review_base=item.get("base"),
+            review_evidence=item["evidence"], needed_by=None,
+            agent=args.coordinator, now=args.now)
+        try:
+            cmd_ask(ask_args, store)
+            reissued.append({**item, "action": "reissued"})
+        except WorkError as exc:
+            blocked.append({**item, "action": "error", "reason": str(exc)})
+    return reissued, blocked
+
+
+def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], list[dict]]:
+    """Classify reviewed tasks: auto-integrable, merge-needed, paths-diverged, receipt-missing."""
+    queue, blocked = [], []
+    index = dependents_index(registry)
+    for task in registry["tasks"]:
+        if task.get("status") != "reviewed":
+            continue
+        review = task.get("review") or {}
+        if not (review.get("decision") == "approve" and review.get("source")
+                and review.get("answer") and review.get("evidence")):
+            blocked.append({"task": task["id"], "action": "receipt_missing"})
+            continue
+        satisfied, unmet = dependencies_met(registry, task)
+        if not satisfied:
+            blocked.append({"task": task["id"], "action": "dependency_blocked",
+                            "reason": ", ".join(unmet)})
+            continue
+        try:
+            board = find_board(registry, task["board"])
+            ref = board.get("integration_ref", "refs/heads/main")
+            repo = Path(str(task.get("owner_repo") or ".")).expanduser()
+            ancestor = subprocess.run(
+                ["git", "-C", str(repo), "merge-base", "--is-ancestor", review["source"], ref],
+                capture_output=True, text=True, timeout=30)
+            if ancestor.returncode != 0:
+                blocked.append({"task": task["id"], "action": "merge_needed", "ref": ref})
+                continue
+            require_reviewed_source(task, review["source"], ref)
+        except (WorkError, OSError, subprocess.SubprocessError) as exc:
+            message = str(exc)
+            action = "paths_diverged" if ("differ" in message or "paths" in message) else "integration_blocked"
+            blocked.append({"task": task["id"], "action": action, "reason": message})
+            continue
+        queue.append({"task": task["id"], "revision": task.get("revision", 0),
+                      "source": review["source"], "evidence": review["evidence"],
+                      "ref": ref})
+    queue.sort(key=lambda item: (-len(transitive_dependents(index, item["task"])), item["task"]))
+    return queue, blocked
+
+
+def apply_integration(store: Store, queue: list[dict], args) -> tuple[list[dict], list[dict]]:
+    integrated, blocked = [], []
+    limit = max(1, int(getattr(args, "max_integrate", 1) or 1))
+    for item in queue[:limit]:
+        task = find_task(store.load(), item["task"])
+        review = task.get("review") or {}
+        transition_args = argparse.Namespace(
+            task=item["task"], revision=task.get("revision", 0), to="integrated",
+            epoch=claim_epoch(task), reviewer=None, decision=None, review_answer=None,
+            evidence=review.get("evidence"), integrated_source=review.get("source"),
+            severity=None, reason=None, needs=None, agent=args.coordinator, now=args.now)
+        try:
+            cmd_transition(transition_args, store)
+            integrated.append({**item, "action": "integrated"})
+        except WorkError as exc:
+            message = str(exc)
+            action = "paths_diverged" if ("differ" in message or "paths" in message) else "integration_blocked"
+            blocked.append({**item, "action": action, "reason": message})
+    return integrated, blocked
+
+
+def roots_path() -> Path:
+    return Path(os.environ.get("LOOM_TICK_ROOTS")
+                or Path.home() / ".local/state/loom/tick.roots")
+
+
+def roots_signature(expired, review_blocked, integration_blocked, reviewed,
+                    rework_held, stalled_reviews, human_blocked, planned_roots) -> str:
+    payload = {
+        "expired": sorted(f"{item['task']}:{item.get('expired')}" for item in expired),
+        "human_blocked": sorted(human_blocked),
+        "planned_roots": sorted(planned_roots),
+        "review": sorted(f"{item['task']}:{item['action']}:{item.get('to', '')}"
+                         for item in review_blocked),
+        "integration": sorted(f"{item['task']}:{item['action']}"
+                              for item in integration_blocked),
+        "reviewed": sorted(str(item.get("task")) for item in reviewed),
+        "rework": sorted(item["task"] for item in rework_held),
+        "stalled": sorted(item["task"] for item in stalled_reviews),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def read_roots() -> str | None:
+    try:
+        return roots_path().read_text().strip()
+    except OSError:
+        return None
+
+
+def write_roots(signature: str) -> None:
+    path = roots_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(signature + "\n")
+
+
 def cmd_tick(args, store: Store) -> int:
     """One policy pass: what would be claimed, launched or reviewed, and what is stale."""
     now = parse_now(args.now)
@@ -1924,6 +2149,15 @@ def cmd_tick(args, store: Store) -> int:
         problems = reconcile_launches(store, store.load(), now)
     reviewed = sweep_approved_reviews(store, now, args.coordinator, dry_run=not args.apply)
     registry = store.load()
+    review_reask, review_blocked = review_request_sweep(store, registry, now, args)
+    review_reissued = []
+    if args.apply and review_reask:
+        review_reissued, review_errors = apply_review_sweep(store, review_reask, args)
+        review_blocked.extend(review_errors)
+        if review_reissued:
+            registry = store.load()
+    elif not args.apply:
+        review_reissued = review_reask
     rework_items = changes_requested_tasks(store, registry, now)
     rework_queued, rework_held = [], []
     if args.apply and rework_items:
@@ -1932,6 +2166,23 @@ def cmd_tick(args, store: Store) -> int:
             registry = store.load()
     elif not args.apply:
         rework_held = rework_items
+    integration_queue, integration_blocked = plan_integration(store, registry, args)
+    integrated = []
+    if args.apply and not getattr(args, "no_integrate", False) and integration_queue:
+        integrated, integration_errors = apply_integration(store, integration_queue, args)
+        integration_blocked.extend(integration_errors)
+        if integrated:
+            registry = store.load()
+    by_id = {task["id"]: task for task in registry["tasks"]}
+    blocked_tasks = [task for task in registry["tasks"] if task.get("status") == "blocked"]
+    human_blocked = [task["id"] for task in blocked_tasks
+                     if (task.get("blocked_needs") or "agent") == "human"]
+    agent_blocked = [task["id"] for task in blocked_tasks
+                     if (task.get("blocked_needs") or "agent") != "human"]
+    planned_roots = sorted({
+        dep for task in registry["tasks"] if task.get("status") == "ready"
+        for dep in task_edges(registry, task["id"])
+        if by_id.get(dep, {}).get("status") in {"planned", "draft"}})
     index = dependents_index(registry)
     limits = {
         "implementer": args.max_implementer,
@@ -1962,7 +2213,7 @@ def cmd_tick(args, store: Store) -> int:
     live_reviewers = [
         record for record in latest_launch.values()
         if record.get("role") == "reviewer" and record.get("state") == "pending"
-        and pid_alive(record.get("pid"))
+        and launch_is_live(record)
     ]
     review_requests, stalled_reviews = open_review_requests(
         store, registry, args.reviewer_identity, args.max_review_attempts)
@@ -2064,13 +2315,28 @@ def cmd_tick(args, store: Store) -> int:
                           "reviewStalled": stalled_reviews, "reviewLaunched": launched_reviews,
                           "reviewed": reviewed, "rework": rework_items,
                           "reworkQueued": rework_queued, "reworkHeld": rework_held,
+                          "reviewReask": review_reask, "reviewReissued": review_reissued,
+                          "reviewBlocked": review_blocked, "integrationQueue": integration_queue,
+                          "integrated": integrated, "integrationBlocked": integration_blocked,
                           "problems": problems}, indent=2))
         return 0
     activity = bool(chosen or review_chosen or reviewed or stalled_reviews
                     or launched or launched_reviews or problems
-                    or rework_queued or rework_held)
-    if args.quiet and not activity:
-        return 0
+                    or rework_queued or rework_held or review_reissued or integrated)
+    signature = roots_signature(expired, review_blocked, integration_blocked, reviewed,
+                                rework_held, stalled_reviews, human_blocked, planned_roots)
+    has_roots = bool(expired or review_blocked or integration_blocked or reviewed
+                     or rework_held or stalled_reviews or human_blocked or planned_roots)
+    if args.quiet:
+        if not activity:
+            if not has_roots:
+                write_roots("")
+                return 0
+            if read_roots() == signature:
+                return 0
+            write_roots(signature)
+        else:
+            write_roots(signature)
     print(f"Tick preview — {iso(now)}")
     print("  capacity: " + "  ".join(
         f"{role} {active[role]}/{limits[role]}" for role in ROLES)
@@ -2105,6 +2371,36 @@ def cmd_tick(args, store: Store) -> int:
         print("\nReview stalled (attempts exhausted; needs a human):")
         for item in stalled_reviews:
             print(f"  {item['task']:<22} request {item['question']}  {item['source'][:12]}")
+    if review_reissued:
+        heading = ("Would re-issue review:" if not args.apply else "Review re-issued:")
+        print(f"\n{heading}")
+        for item in review_reissued:
+            print(f"  {item['task']:<22} request {item['from']} -> {item['source'][:12]}")
+    if integration_queue:
+        heading = ("Would integrate:" if not args.apply else "Integrated:")
+        print(f"\n{heading}")
+        limit = max(1, int(getattr(args, "max_integrate", 1) or 1))
+        for item in integration_queue[:limit]:
+            print(f"  {item['task']:<22} {item['source'][:12]} -> {item['ref']}")
+        if len(integration_queue) > limit:
+            print(f"  (+{len(integration_queue) - limit} more)")
+    if integrated:
+        for item in integrated:
+            print(f"  integrated {item['task']} ({item['source'][:12]})")
+    if integration_blocked:
+        print("\nIntegration needs attention:")
+        grouped: dict[str, list[str]] = {}
+        for item in integration_blocked:
+            grouped.setdefault(item["action"], []).append(item["task"])
+        for action, tasks in sorted(grouped.items()):
+            shown = ", ".join(tasks[:4])
+            more = f" (+{len(tasks) - 4} more)" if len(tasks) > 4 else ""
+            print(f"  {action:<18} {shown}{more}")
+    if review_blocked:
+        print("\nReview needs attention:")
+        for item in review_blocked:
+            detail = item.get("to") or item.get("reason") or ""
+            print(f"  {item['task']:<22} {item['action']:<18} {detail}")
     if rework_queued:
         print("\nRework queued (changes requested):")
         for item in rework_queued:
@@ -2126,6 +2422,15 @@ def cmd_tick(args, store: Store) -> int:
                 print(f"  {item['task']:<22} ERROR {item['error']}")
             else:
                 print(f"  {item['task']:<22} by {item['reviewer']} (answer {item['answer']})")
+    if human_blocked:
+        print("\nBlocked on a human:")
+        print("  " + ", ".join(human_blocked))
+    if agent_blocked:
+        print("\nBlocked on an agent:")
+        print("  " + ", ".join(agent_blocked))
+    if planned_roots:
+        print("\nPlanned prerequisites:")
+        print("  " + ", ".join(planned_roots))
     if expired:
         print("\nExpired leases to release or take over:")
         for item in expired:
@@ -2208,6 +2513,9 @@ def cmd_migrate(args, store: Store) -> int:
         raise WorkError("source event chain does not verify; refusing to migrate")
 
     target_path = Path(args.to).expanduser()
+    source_db = getattr(store, "db_path", None)
+    if source_db is not None and target_path.resolve() == Path(str(source_db)).resolve():
+        raise WorkError("--to must be a different database than --db; migrate writes a new target")
     target = SqliteStore(source_root, target_path)
     try:
         with target.lock():
@@ -2260,6 +2568,27 @@ def cmd_export(args, store: Store) -> int:
         print(f"wrote {out} ({len(text.splitlines())} lines)")
     else:
         print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
+def cmd_init(args, store: Store) -> int:
+    """Create an empty registry with its first board and a genesis event."""
+    agent = require_agent(args)
+    if store.has_registry():
+        raise WorkError("a registry already exists at this database; init is for an empty store")
+    repo = Path(args.repo).expanduser().resolve()
+    board = {"id": args.id, "kind": args.kind, "role": "provider",
+             "repo": str(repo), "path": args.path}
+    store.registry = {
+        "kind": REGISTRY_KIND, "version": 1, "updated": iso(parse_now(args.now))[:10],
+        "boards": [board], "tasks": [], "edges": [], "claims": [],
+    }
+    body = yaml.safe_dump(store.registry, sort_keys=False, default_flow_style=False,
+                          allow_unicode=True, width=100).encode("utf-8")
+    digest = hashlib.sha256(body).hexdigest()
+    event = store.commit(event="genesis", agent=agent, registry_sha256=digest,
+                         tasks=0, now=args.now)
+    print(f"initialized {args.id} at {repo}/{args.path} (genesis event {event['seq']})")
     return 0
 
 
@@ -2699,6 +3028,7 @@ ENGINE_COMMANDS = {
     "create", "list", "show", "claim", "renew", "release", "takeover", "transition",
     "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
     "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
+    "init",
 }
 
 
@@ -2817,7 +3147,16 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--verify", action="store_true")
     events.add_argument("--reanchor", action="store_true",
                         help="after a verified chain, rewrite the external checkpoint")
+    events.add_argument("--allow-rewind", action="store_true",
+                        help="allow reanchor to lower the head after an intentional truncation")
     events.set_defaults(func=cmd_events)
+
+    init = sub.add_parser("init", help="create an empty registry and first board", parents=[common])
+    init.add_argument("--id", required=True, help="board id, e.g. alpha.program")
+    init.add_argument("--repo", required=True, help="repository root the board lives in")
+    init.add_argument("--path", required=True, help="board file inside that repository")
+    init.add_argument("--kind", choices=["board", "program"], default="board")
+    init.set_defaults(func=cmd_init)
 
     genesis = sub.add_parser("genesis", help="write the single genesis event (bootstrap)", parents=[common])
     genesis.set_defaults(func=cmd_genesis)
@@ -2882,8 +3221,16 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--max-integrator", type=int, default=1)
     tick.add_argument("--reviewer-identity", default=REVIEWER_IDENTITY,
                       help="agent that reviews open requests (never a human address)")
+    tick.add_argument("--human", action="append", dest="humans",
+                      help="human identity; repeatable (default: human, owner)")
+    tick.add_argument("--known-agent", action="append", dest="known_agents",
+                      help="known agent identity; repeatable")
     tick.add_argument("--max-review-attempts", type=int, default=MAX_REVIEW_ATTEMPTS,
                       help="launch attempts per review request before it is reported as stalled")
+    tick.add_argument("--max-integrate", type=int, default=1,
+                      help="auto-integrations per pass (default 1)")
+    tick.add_argument("--no-integrate", action="store_true",
+                      help="do not auto-integrate reviewed tasks")
     tick.add_argument("--coordinator", default=REVIEW_COORDINATOR,
                       help="acting agent that records `reviewed` from an approval")
     tick.add_argument("--json", action="store_true")

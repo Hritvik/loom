@@ -3,7 +3,13 @@
 # Install: git config core.hooksPath .githooks
 # Point at the engine with WORK_COORDINATION_HOME or: git config --global coordination.home <path>
 home="${WORK_COORDINATION_HOME:-$(git config --get coordination.home)}"
-[ -n "$home" ] || exit 0
+if [ -z "$home" ]; then
+  echo "coordination guard: set WORK_COORDINATION_HOME or: git config --global coordination.home <loom checkout>" >&2
+  exit 1
+fi
 central="$home/capabilities/work/hooks/pre-commit"
-[ -f "$central" ] || exit 0
+if [ ! -f "$central" ]; then
+  echo "coordination guard: no hook implementation at $central" >&2
+  exit 1
+fi
 exec python3 "$central" "$@"

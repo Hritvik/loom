@@ -363,7 +363,9 @@ def main(argv: list[str] | None = None) -> int:
     if not store.has_registry():
         print(f"FAIL: no registry in {store.describe()}", file=sys.stderr)
         return 1
-    registry, stored_events = store.snapshot()
+    with store.lock():
+        registry, stored_events = store.snapshot()
+        checkpoint = store.checkpoint() if hasattr(store, "checkpoint") else None
 
     schema = json.loads((root / "schemas/task.schema.json").read_text(encoding="utf-8"))
 
@@ -653,8 +655,10 @@ def main(argv: list[str] | None = None) -> int:
                     errors.append(f"event log: invalid JSON ({exc})")
         errors.extend(verify_event_chain(records))
         warnings.extend(event_chain_warnings(records))
-        checkpoint = store.checkpoint() if hasattr(store, "checkpoint") else None
-        if records and checkpoint is not None:
+        if records and checkpoint is None:
+            errors.append(
+                "event log has no external checkpoint; run `loom events --verify --reanchor`")
+        elif records and checkpoint is not None:
             import hashlib
             last_raw, last_record = records[-1]
             head = hashlib.sha256(last_raw).hexdigest()
@@ -684,6 +688,32 @@ def main(argv: list[str] | None = None) -> int:
             if claim.get("agent") and record.get("event") in {"claim", "renew", "takeover"}:
                 if record.get("agent") != claim.get("agent"):
                     errors.append(f"{task_id}: event log claim agent does not match registry claim")
+                if (record.get("lease_expires")
+                        and record.get("lease_expires") != claim.get("lease_expires")):
+                    errors.append(
+                        f"{task_id}: event lease_expires does not match the registry claim")
+                if (record.get("epoch") is not None
+                        and record.get("epoch") != task.get("epoch")):
+                    errors.append(f"{task_id}: event epoch does not match the registry epoch")
+            review = task.get("review")
+            if review and task.get("status") in {"reviewed", "integrated", "accepted", "done"}:
+                review_event = next((
+                    item for _, item in reversed(records)
+                    if item.get("task") == task_id and item.get("event") == "transition"
+                    and item.get("status") == "reviewed"), None)
+                if review_event is None:
+                    errors.append(f"{task_id}: review receipt has no reviewed transition event")
+                else:
+                    expected = {
+                        "reviewer": review_event.get("reviewer"),
+                        "decision": review_event.get("decision"),
+                        "source": review_event.get("review_source"),
+                        "answer": review_event.get("review_answer"),
+                    }
+                    actual = {key: review.get(key) for key in expected}
+                    if actual != expected:
+                        errors.append(
+                            f"{task_id}: review receipt does not match the reviewed transition")
         claimants: dict[str, set[str]] = {}
         for _, record in records:
             if record.get("event") in {"claim", "renew", "takeover"} and record.get("task"):
@@ -712,7 +742,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(unproven)} pre-migration integrations are proven by evidence only"
                 f" (accepted by decisions/integration-receipts-001.md): {preview}")
     else:
-        warnings.append("events.ndjson missing; run `./loom genesis --agent <id>`")
+        warnings.append("no event log; create the registry with `loom init` or write `genesis`")
 
     programs = sum(1 for entry in boards.values() if entry["kind"] == "program")
     steward_counts = cross_check_capabilities(root, args.capabilities, errors, warnings)

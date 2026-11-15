@@ -29,6 +29,7 @@ identical on all three surfaces.
 
 | Command | Purpose |
 |---|---|
+| `init` | Create an empty registry and its first board |
 | `create` | Author a central task on a registered board |
 | `list` | Filter by board, state, readiness or ownership; `--ready` ranks by downstream work |
 | `search` | Find tasks by text without knowing the namespace |
@@ -105,20 +106,33 @@ shows the interval alongside the label and plist, so the cadence is visible rath
 
 ## Running unattended
 
-One `tick` pass does four things in order:
+One `tick` pass does these phases in order:
 
 1. **Reconcile** launches whose process is gone. A launch that advanced the task is `done`; one that
-   did not is `failed`, and two failures block the task for a human. A reviewer launch is `done` when
-   it recorded a verdict, because a changes-requested answer leaves the task green.
+   did not is `failed`, and two consecutive failures block the task for a human. A reviewer launch is
+   `done` when it recorded a verdict.
 2. **Record** `reviewed` for every green task whose latest review request carries an approval. The
    coordinator acts; the reviewer of record is the agent that answered.
-3. **Launch implementers** for claimable tasks, ranked by transitive downstream weight, up to the
+3. **Re-issue** a review request when a green task has no current request (a drifted revision or a
+   known-agent addressee that is not the configured reviewer). A source from an older revision is
+   reported `resubmit_required`, never re-asked: the coordinator must not attach an old commit to new
+   work.
+4. **Requeue** changes-requested work: release the scheduler worker’s claim, or take over an expired
+   claim, so a new implementer can pick it up.
+5. **Integrate** reviewed work only when enabled (`auto_integrate` or `--integrate`). The approved
+   commit must already be an ancestor of the board’s integration ref and its paths unchanged; this
+   records a receipt, it does not merge. Everything else is reported as `merge-needed`,
+   `paths-diverged`, `dependency-blocked` or `receipt-missing`.
+6. **Launch implementers** for claimable tasks, ranked by transitive downstream weight, up to the
    `implementer` limit. Each runs in `~/.local/state/loom/worktrees/<slug>` on `loom/<slug>`.
-4. **Launch reviewers** for open requests addressed to `opencode/reviewer-agent`, up to the
+7. **Launch reviewers** for open requests addressed to `opencode/reviewer-agent`, up to the
    `reviewer` limit. Each runs in a detached checkout under `~/.local/state/loom/reviews/<slug>`.
 
-Capacity, TTL, worker command, reviewer identity and the attempt bound are in
-`~/.config/loom/loom.json`.
+The manual preview ends with the roots that are gating the queue (reviewed, human, agent, planned,
+green, expired). `--quiet` prints that report once per distinct root set, not every pass.
+
+Capacity, TTL, worker command, reviewer identity, humans, known agents and the integration opt-in
+are in `~/.config/loom/loom.json`.
 
 ## Storage
 
@@ -195,9 +209,10 @@ Present that epoch on every mutation you make as the holder. A takeover incremen
 whose lease was taken over is refused even if it re-reads the revision:
 
 ```bash
-./loom renew    alpha/W-1 --revision 1 --epoch 1 --ttl 45m
-./loom release  alpha/W-1 --revision 2 --epoch 1 --reason "handing back for review"
-./loom takeover alpha/W-1 --revision 3 --reason "lease expired; agent went silent"
+./loom renew    alpha/W-1 --revision 1 --epoch 1 --ttl 45m   # revision stays 1
+./loom release  alpha/W-1 --revision 1 --epoch 1 --reason "handing back for review"
+# takeover is a separate case: after the lease expires and the lock-delay passes
+./loom takeover alpha/W-1 --revision 2 --reason "lease expired; agent went silent"
 ```
 
 Authority is a *live* lease, not a recorded claim: once the lease expires, the holder can no longer
@@ -214,8 +229,9 @@ notice and stop before the task is re-granted. It records the previous agent, it
 ./loom transition alpha/W-1 --revision 1 --to red
 ./loom transition alpha/W-1 --revision 2 --to green
 ./loom transition alpha/W-1 --revision 3 --to reviewed \
-  --reviewer reviewer-7 --decision approve
-./loom transition alpha/W-1 --revision 4 --to integrated --evidence evidence/W-1.md
+  --epoch 1 --reviewer reviewer-7 --decision approve --review-answer <answer-event>
+./loom transition alpha/W-1 --revision 4 --to integrated \
+  --integrated-source <approved-commit> --evidence evidence/W-1.md
 ./loom transition alpha/W-1 --revision 5 --to accepted   --evidence evidence/W-1.md
 ```
 
@@ -254,7 +270,7 @@ note. The reviewer of record may never be the acting agent or an earlier claiman
    left for a human. A `changes requested` verdict leaves the task green for rework and is never
    auto-transitioned.
 
-Requests addressed to a human (for example `hritvik`) are never picked up by a reviewer worker.
+Requests addressed to a human (for example `<your-identity>`) are never picked up by a reviewer worker.
 The reviewer identity, attempt bound and coordinator are policy in `~/.config/loom/loom.json`.
 
 ## Create work centrally
@@ -297,9 +313,10 @@ python3 mcp/server.py --print-config opencode     # or claude / codex
 ```
 
 Tools: `work_status`, `work_list`, `work_get`, `work_claim`, `work_renew`, `work_release`,
-`work_transition`. `work_status` is described as the pre-planning entry point; mutations delegate
-to `./loom`, so the guarantees are identical. The server infers `repo` from the workspace path and
-`agent` as `<repo>-agent`, so one global registration works in every repository. See
+`work_takeover`, `work_transition`, `work_inbox`, `work_search`, `work_dependents`, `work_ask`,
+`work_answer`. `work_status` is the pre-planning entry point; mutations delegate to `./loom`, so
+the guarantees are identical. The server infers `repo` from the workspace path and `agent` from the
+task’s program namespace (`<program>-agent`), so one global registration works in every repository. See
 [`mcp/README.md`](mcp/README.md).
 
 ## Integration map (optional)
@@ -415,7 +432,7 @@ The board is organised for the questions a human actually asks:
 | Awaiting Integration | awaiting_integration |
 | Blocked | blocked |
 | Backlog | planned, draft |
-| Canceled | rejected |
+| Canceled | rejected, released |
 | Done | integrated, accepted, done |
 
 Each card carries one program label and `Needs Human` when the next actor is the human or the task
@@ -424,7 +441,7 @@ high, 1–2 medium, 0 low; Done cards stay No priority. The sync is idempotent: 
 nothing writes nothing.
 
 The launchd job runs `loom linear sync --all --apply --if-changed` every **300 seconds**.
-`~/.local/state/loom/linear.head` records the `(seq, hash)` last projected; an unchanged head exits
+`~/.local/state/loom/linear.head` records the `(scope, config hash) → (seq, hash)` last projected; an unchanged head exits
 without an API call. A rewritten database with the same event count still has a different hash, so
 it triggers a sync, and the chain/checkpoint verification then refuses to project it.
 `loom schedule start|stop` controls both jobs; `loom schedule status` shows both.

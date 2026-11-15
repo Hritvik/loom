@@ -166,10 +166,11 @@ class WorkHome:
     def run_cli(self, *args: str) -> str:
         import subprocess
 
-        result = subprocess.run(
-            [sys.executable, str(self.task_bin), "--root", str(self.root), *args],
-            capture_output=True, text=True,
-        )
+        command = [sys.executable, str(self.task_bin), "--root", str(self.root)]
+        if self.db:
+            command += ["--db", str(self.db)]
+        command += list(args)
+        result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             message = (result.stderr or result.stdout).strip()
             message = message.removeprefix("error:").strip()
@@ -458,7 +459,7 @@ class Dispatcher:
         task = self.home.find(str(task_id))
         action = extract_action(message)
         operation = str(action.get("action", "")).lower() if action else ""
-        if operation not in MESSAGE_ACTIONS and STATE_MAP.get(task.get("status")) in TERMINAL_STATES:
+        if operation not in MESSAGE_ACTIONS and task.get("status") in {"accepted", "done"}:
             raise RpcError(UNSUPPORTED_OPERATION,
                            f"{task['id']} is terminal ({task.get('status')}); start a new task")
         if not action:
@@ -498,7 +499,8 @@ class Dispatcher:
             args += ["--to", str(target)]
             for key, flag in (("evidence", "--evidence"), ("severity", "--severity"),
                               ("reason", "--reason"), ("reviewAnswer", "--review-answer"),
-                              ("integratedSource", "--integrated-source")):
+                              ("integratedSource", "--integrated-source"),
+                              ("needs", "--needs")):
                 if action.get(key):
                     args += [flag, str(action[key])]
             if target == "reviewed":
@@ -702,7 +704,7 @@ class WorkCoordinationServer(ThreadingHTTPServer):
     def agent_card(self) -> dict:
         return {
             "protocolVersion": A2A_VERSION,
-            "name": "Distracted Work Coordination",
+            "name": "Loom Work Coordination",
             "description": (
                 "Central coordination for a portfolio of repositories. Discover claimable tasks, "
                 "claim them with a lease, renew or release, take over expired leases, and move "

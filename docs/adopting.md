@@ -27,18 +27,17 @@ validate a contract registry; without it that check is skipped.
 ## 3. Register a board, then a task
 
 A board is configuration, not an event: it names a repository and the file that holds the packet
-detail. Seed one with the store, then use the CLI for everything else.
+detail. Create the registry and its first board with `loom init`, then use the CLI for everything
+else.
 
-```python
-import sys; sys.path.insert(0, "<loom>/capabilities/work")
-from store import make_store
-store = make_store("<loom>/capabilities/work", "sqlite", None)
-store.registry = {"kind": "work-coordination-registry", "version": 1, "updated": "2026-01-01",
-                  "boards": [{"id": "alpha.program", "kind": "program", "role": "provider",
-                              "repo": "~/repositories/alpha", "path": "docs/work-items.md"}],
-                  "tasks": [], "edges": [], "claims": []}
-store.save(); store.close()
+```bash
+cd ~/repositories/loom/capabilities/work
+./loom init --id alpha.program --kind program \
+  --repo ~/repositories/alpha --path docs/work-items.md --agent you/alpha-agent
 ```
+
+`loom init` writes the registry and the genesis event atomically. It refuses a database that
+already holds a registry; use `loom board add` for later boards.
 
 ```bash
 cd ~/repositories/loom/capabilities/work

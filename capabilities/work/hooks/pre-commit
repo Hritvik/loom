@@ -49,10 +49,20 @@ def repo_root() -> Path:
 
 
 def load_registry(path: Path | None = None) -> dict:
-    path = path or work_home() / "capabilities/work/registry.yaml"
-    if not path.is_file():
-        return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    """Read the central registry. The file backend is retired; the store is SQLite."""
+    if path is not None:
+        if not path.is_file():
+            return {}
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    work = work_home() / "capabilities/work"
+    sys.path.insert(0, str(work))
+    from store import make_store
+    db = os.environ.get("WORK_DB") or str(Path.home() / ".local/state/loom/work.db")
+    store = make_store(work, "sqlite", db)
+    try:
+        return store.load()
+    finally:
+        store.close()
 
 
 def _same_repo(task: dict, root: Path) -> bool:
@@ -155,7 +165,13 @@ def staged_paths(root: Path) -> list[str]:
 def main(argv: list[str]) -> int:
     root = repo_root()
     agent = commit_agent(Path(argv[1])) if len(argv) > 1 else None
-    problems = evaluate(staged_paths(root), agent, load_registry(), root)
+    try:
+        registry = load_registry()
+    except Exception as exc:
+        print(f"commit refused: the coordination registry is unreadable: {exc}", file=sys.stderr)
+        print("Set WORK_COORDINATION_HOME or fix WORK_DB; the guard fails closed.", file=sys.stderr)
+        return 1
+    problems = evaluate(staged_paths(root), agent, registry, root)
     if not problems:
         return 0
     print("commit refused: the staged set is not attributable to one claim\n", file=sys.stderr)

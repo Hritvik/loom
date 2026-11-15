@@ -64,9 +64,10 @@ class LinearSyncTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "linear.head"
             with patch.object(linear_sync, "HEAD_PATH", path):
-                self.assertIsNone(linear_sync.read_head())
-                linear_sync.write_head((3, "abc"))
-                self.assertEqual(linear_sync.read_head(), (3, "abc"))
+                self.assertIsNone(linear_sync.read_head("scope"))
+                linear_sync.write_head("scope", (3, "abc"))
+                self.assertEqual(linear_sync.read_head("scope"), (3, "abc"))
+                self.assertIsNone(linear_sync.read_head("other"))
 
     def test_labels_priority_and_human_flag_are_projected(self):
         self.config["labels"] = {"alpha": "alpha-label", "Needs Human": "human-label"}

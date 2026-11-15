@@ -129,7 +129,7 @@ class Store(abc.ABC):
         """The external chain head, where the backend keeps one."""
         return None
 
-    def reanchor(self) -> None:
+    def reanchor(self, allow_rewind: bool = False) -> None:
         """Re-write the external chain head after a verified audit."""
         self._require_lock()
 
@@ -392,17 +392,25 @@ class SqliteStore(Store):
         self.connection.execute("BEGIN IMMEDIATE")
         self._tx_depth = 1
         before = self._last_event
+        checkpoint_event = None
         try:
             yield self
             self._write_registry()
             self.connection.execute("COMMIT")
             if self._last_event is not before and self._last_event is not None:
-                self._write_checkpoint(self._last_event)
+                checkpoint_event = self._last_event
         except BaseException:
-            self.connection.execute("ROLLBACK")
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
             raise
         finally:
             self._tx_depth = 0
+        if checkpoint_event is not None:
+            try:
+                self._write_checkpoint(checkpoint_event)
+            except OSError as exc:
+                raise WorkError(
+                    f"mutation committed but the audit head could not be written: {exc}") from exc
 
     def load(self) -> dict:
         with self._read_transaction():
@@ -494,11 +502,16 @@ class SqliteStore(Store):
             event = self._append_event(**fields)
             self.connection.execute("COMMIT")
         except BaseException:
-            self.connection.execute("ROLLBACK")
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
             raise
         finally:
             self._tx_depth = 0
-        self._write_checkpoint(event)
+        try:
+            self._write_checkpoint(event)
+        except OSError as exc:
+            raise WorkError(
+                f"event committed but the audit head could not be written: {exc}") from exc
         return event
 
     def snapshot(self) -> tuple[dict, list[tuple[bytes, dict]]]:
@@ -515,11 +528,18 @@ class SqliteStore(Store):
         tmp.write_text(payload)
         os.replace(tmp, head)
 
-    def reanchor(self) -> None:
+    def reanchor(self, allow_rewind: bool = False) -> None:
         self._require_lock()
         records = self.read_events()
-        if records:
-            self._write_checkpoint(records[-1][1])
+        if not records:
+            return
+        current = self.checkpoint()
+        last = records[-1][1]
+        if (current and current[0] > int(last.get("seq") or 0) and not allow_rewind):
+            raise WorkError(
+                f"refusing to lower the audit head from {current[0]} to {last.get('seq')}; "
+                "pass --allow-rewind if the truncation is intentional")
+        self._write_checkpoint(last)
 
     def checkpoint(self) -> tuple[int, str] | None:
         head = Path(str(self.db_path) + ".head")

@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import os
+import sys
 import tempfile
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_work import Workspace  # noqa: E402
 
 WORK = Path(__file__).resolve().parents[1]
 
@@ -33,6 +38,34 @@ def task(task_id, repo, paths, agent, expires="2026-11-05T13:00:00Z", status="cl
         "write_paths": paths,
         "claim": {"agent": agent, "base_revision": 0, "lease_expires": expires},
     }
+
+
+class HookRegistryTest(unittest.TestCase):
+    def test_load_registry_reads_the_sqlite_store(self):
+        ws = Workspace()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                (home / "capabilities").mkdir()
+                (home / "capabilities" / "work").symlink_to(WORK, target_is_directory=True)
+                old_home = os.environ.get("WORK_COORDINATION_HOME")
+                old_db = os.environ.get("WORK_DB")
+                os.environ["WORK_COORDINATION_HOME"] = tmp
+                os.environ["WORK_DB"] = str(ws.db)
+                try:
+                    registry = hook.load_registry()
+                    self.assertEqual(len(registry["tasks"]), 4)
+                finally:
+                    if old_home is None:
+                        os.environ.pop("WORK_COORDINATION_HOME", None)
+                    else:
+                        os.environ["WORK_COORDINATION_HOME"] = old_home
+                    if old_db is None:
+                        os.environ.pop("WORK_DB", None)
+                    else:
+                        os.environ["WORK_DB"] = old_db
+        finally:
+            ws.close()
 
 
 class HookTest(unittest.TestCase):

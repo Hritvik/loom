@@ -286,8 +286,10 @@ class A2AFacadeTest(unittest.TestCase):
         again = self.rpc("CancelTask", {"id": "demo/W-1", "metadata": {"agent": "a2a/agent-1"}})
         self.assertEqual(again["error"]["code"], -32002)
 
+        # `released` is reopenable by the state machine, so it is not terminal;
+        # a direct claim still fails because only `ready` is claimable.
         terminal = self.send_action("demo/W-1", "claim", "a2a/agent-2", revision=2)
-        self.assertEqual(terminal["error"]["code"], -32004)
+        self.assertEqual(terminal["error"]["code"], -32602)
 
     def test_send_message_without_task_returns_guidance(self):
         result = self.rpc("SendMessage", {

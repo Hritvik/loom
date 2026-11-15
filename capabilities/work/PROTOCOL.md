@@ -93,6 +93,9 @@ Rules enforced by the CLI:
   catches a still-running worker even if it re-reads the revision. This matters because every
   worker shares the identity `opencode/loom-worker`, so a takeover cannot be detected by agent
   name alone.
+- **A renew is lease-only.** `renew` extends the lease and heartbeat; it does **not** advance the
+  work revision. The review request is bound to the green revision, so a heartbeat cannot invalidate
+  it. A dead worker is still `failed` and requeued.
 - **Authority is a live lease.** Once `lease_expires` passes, the holder cannot move the task to
   `red` or `green`; `renew` is refused too. Stopping (`blocked`, `release`) is still allowed.
 - **Lock-delay.** `takeover` refuses to re-grant until `lease_expires + lock-delay` (default 2m),
@@ -122,7 +125,12 @@ loom answer <id> --question <ask-seq> --decision "approve|changes requested" --n
 - The tick's reviewer side launches an independent reviewer per open request addressed to
   `opencode/reviewer-agent`, in a detached checkout at the source commit, bounded by
   `--max-review-attempts`. An approval is recorded as `reviewed` by the coordinator; a
-  changes-requested answer leaves the task green for rework.
+  changes-requested answer is requeued for rework.
+- The tick re-issues a request only for the current revision. A stale source from an older revision
+  is reported `resubmit_required`, never attached to new work.
+- Integration is a receipt, not a merge. It is recorded automatically only when enabled and only
+  when the approved source is already an ancestor of the board's integration ref and its paths are
+  unchanged; everything else is reported as merge-needed, paths-diverged or receipt-missing.
 - Requests addressed to a human are never answered by a worker.
 
 ## Event log
@@ -215,7 +223,7 @@ owns the verdict. See the [review pipeline](AGENT-GUIDE.md#independent-review-pi
 1. **Done** — central registry, namespaced IDs, validator, reconciliation decisions, reference-adapter
    scope, import of all existing boards (69 tasks).
 2. **Done** — task schema, `work/loom` CLI with CAS/lease/heartbeat/takeover, append-only event log,
-   board sync/import, reconcile, and a 12-test suite.
+   board sync/import, reconcile, and the test suite.
 3. **Done** — A2A v1.0 façade: Agent Card, `ListTasks`, `GetTask`, `SendMessage` actions and
    `CancelTask`, delegating mutations to the CLI.
 4. **Done** — MCP stdio server so agents discover the registry from their tool list before

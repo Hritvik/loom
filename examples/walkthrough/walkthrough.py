@@ -70,7 +70,8 @@ def seed() -> None:
         "tasks": [], "edges": [], "claims": [],
     }
     store.registry = registry
-    store.save()
+    with store.lock():
+        store.save()
     store.close()
 
 

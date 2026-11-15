@@ -222,14 +222,14 @@ class MCPTest(unittest.TestCase):
         renewed = self.structured("work_renew",
                                   {"task": "demo/W-1", "revision": 1, "ttl": "1h",
                                    "epoch": epoch})
-        self.assertEqual(renewed["revision"], 2)
+        self.assertEqual(renewed["revision"], 1)
         self.assertIsNotNone(renewed["claim"]["lease_expires"])
 
         released = self.structured("work_release",
-                                   {"task": "demo/W-1", "revision": 2, "reason": "handing back",
+                                   {"task": "demo/W-1", "revision": 1, "reason": "handing back",
                                     "epoch": epoch})
         self.assertEqual(released["status"], "ready")
-        self.assertEqual(released["revision"], 3)
+        self.assertEqual(released["revision"], 2)
         self.assertIsNone(released["claim"])
 
         events = self.structured("work_get", {"task": "demo/W-1"})["recentEvents"]
@@ -250,6 +250,27 @@ class MCPTest(unittest.TestCase):
         subprocess.run([*commit, "Review fixture"], check=True)
         source = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
         return base, source
+
+    def test_mutations_use_the_registry_database(self):
+        other = self.ws.root / "other.db"
+        previous = os.environ.get("WORK_DB")
+        os.environ["WORK_DB"] = str(other)
+        try:
+            registry = mcp.Registry(self.ws.root, "sqlite", str(self.ws.db))
+            result = mcp.handle_message({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_claim",
+                           "arguments": {"task": "demo/W-1", "revision": 0}},
+            }, registry, "mcp/agent", self.repo)
+            self.assertIn("result", result)
+            self.assertFalse(result["result"].get("isError"), result)
+            self.assertEqual(self.ws.task_record("demo/W-1")["claim"]["agent"], "mcp/agent")
+            self.assertFalse(other.exists())
+        finally:
+            if previous is None:
+                os.environ.pop("WORK_DB", None)
+            else:
+                os.environ["WORK_DB"] = previous
 
     def test_full_lifecycle_through_tools(self):
         claimed = self.structured("work_claim", {"task": "demo/W-1", "revision": 0})

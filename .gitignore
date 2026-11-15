@@ -69,4 +69,6 @@ PASSWORDS.md
 *.db
 *.db-shm
 *.db-wal
+*.db.lock
+*.db.head
 __pycache__/

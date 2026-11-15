@@ -39,9 +39,14 @@ DEFAULTS = {
         "reviewer_identity": "opencode/reviewer-agent",
         "review_attempts": 2,
         "coordinator": "opencode/loom-coordinator",
+        "humans": [],
+        "known_agents": ["opencode/reviewer-agent", "opencode/reviewer",
+                         "opencode/loom-worker", "opencode/loom-coordinator", "codex-agent"],
+        "max_integrate": 1,
+        "auto_integrate": False,
     },
     "linear": {"config": str(Path.home() / ".config/loom/linear-portfolio.json")},
-    "schedule": {"tick_label": "com.hritvik.loom-tick", "linear_label": "com.hritvik.loom-linear"},
+    "schedule": {"tick_label": "local.loom-tick", "linear_label": "local.loom-linear"},
 }
 
 GLOBAL_FLAGS = {"--root", "--agent", "--now", "--store", "--db"}
@@ -106,6 +111,12 @@ def tick_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reviewer-identity")
     parser.add_argument("--max-review-attempts", type=int)
     parser.add_argument("--coordinator")
+    parser.add_argument("--human", action="append", dest="humans")
+    parser.add_argument("--known-agent", action="append", dest="known_agents")
+    parser.add_argument("--max-integrate", type=int)
+    parser.add_argument("--integrate", action="store_true",
+                        help="record integration for already-merged reviewed work")
+    parser.add_argument("--no-integrate", action="store_true")
     parser.add_argument("--java-home")
     return parser
 
@@ -136,6 +147,16 @@ def build_tick_args(argv: list[str], globals_: list[str], config: dict) -> list[
                     else worker.get("review_attempts", DEFAULTS["worker"]["review_attempts"]))]
     command += ["--coordinator",
                 args.coordinator or worker.get("coordinator", DEFAULTS["worker"]["coordinator"])]
+    for human in (args.humans or worker.get("humans", DEFAULTS["worker"]["humans"])):
+        command += ["--human", human]
+    for agent in (args.known_agents or worker.get("known_agents",
+                                                  DEFAULTS["worker"]["known_agents"])):
+        command += ["--known-agent", agent]
+    command += ["--max-integrate",
+                str(args.max_integrate if args.max_integrate is not None
+                    else worker.get("max_integrate", DEFAULTS["worker"]["max_integrate"]))]
+    if args.no_integrate or (not args.integrate and not worker.get("auto_integrate", True)):
+        command.append("--no-integrate")
     for role in ("implementer", "reviewer", "integrator"):
         value = getattr(args, role)
         if value is None:
@@ -282,6 +303,7 @@ def cmd_linear(args: argparse.Namespace, config: dict) -> int:
         print(f"missing Linear API key at {key_file}", file=sys.stderr)
         return 2
     env = dict(os.environ)
+    env["WORK_DB"] = config["db"]
     env["LINEAR_API_KEY"] = key_file.read_text().strip()
     return subprocess.run(command, env=env).returncode
 

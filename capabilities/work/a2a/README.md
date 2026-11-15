@@ -21,7 +21,7 @@ The Agent Card declares `JSONRPC` / protocol `1.0`, `streaming: false`,
 | `ListTasks` | List central tasks; `contextId` is the program (`alpha`, `beta`, `gamma-ref`); filters `status`, `statusTimestampAfter`; `pageSize` 1–100 with opaque `pageToken`; `includeArtifacts`; `historyLength`. Each `Task.metadata` carries `claimable` and `blockedBy` |
 | `GetTask` | One task by registry id, with `metadata.revision`, claim, dependencies, write paths, evidence and review |
 | `SendMessage` | Mutating actions against an existing task, delegated to the `loom` CLI |
-| `CancelTask` | Moves a ready/claimed/red/green task to `released` (A2A `TASK_STATE_CANCELED`) with a reason |
+| `CancelTask` | Moves a ready/claimed/red/green task to `released` (A2A `TASK_STATE_CANCELED`) with a reason; a claimed task needs `metadata.epoch` |
 | anything else | `-32601`; streaming/extended card → `-32004`; push config → `-32003` |
 | `messages/list` | Extension (not in the A2A spec): unanswered questions for `metadata.agent`, optional `taskId` and `includeAnswered` |
 
@@ -54,7 +54,7 @@ The message carries one `data` part. Identity is `message.metadata.agent`, falli
 | `renew` | `revision`, `epoch` | `loom renew … --revision … --epoch … --ttl …` |
 | `release` | `revision`, `epoch`, `reason` | `loom release … --epoch …` |
 | `takeover` | `revision`, `reason`; optional `lockDelay` | `loom takeover … --lock-delay …` |
-| `transition` | `revision`, `epoch`, `to`; plus `evidence`, `reviewer`, `decision`, `reason` as required | `loom transition … --epoch …` |
+| `transition` | `revision`, `epoch`, `to`; plus `evidence`, `reviewer`, `decision`, `reason`, `needs` as required | `loom transition … --epoch …` |
 | `ask` | `to`, `question`; optional `neededBy` | `loom ask …` |
 | `answer` | `question` (seq), `decision`; optional `note` | `loom answer …` |
 

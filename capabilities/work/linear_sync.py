@@ -32,6 +32,7 @@ LANES = {
     "blocked": "Blocked",
     "planned": "Planned",
     "rejected": "Rejected",
+    "released": "Released",
 }
 
 
@@ -185,12 +186,15 @@ def mirror(client, config, destination, cards, *, apply):
         current = managed_slice(issue["description"]) if issue else None
         description_changed = current is None or (
             normalise_markdown(current) != normalise_markdown(managed))
-        label_ids = []
+        desired_labels = set()
         program_label = labels.get(card["program"])
         if program_label:
-            label_ids.append(program_label)
+            desired_labels.add(program_label)
         if card.get("needs_human") and needs_human_label:
-            label_ids.append(needs_human_label)
+            desired_labels.add(needs_human_label)
+        managed_labels = set(labels.values())
+        current_labels = set(issue.get("labelIds") or []) if issue else set()
+        label_ids = sorted((current_labels - managed_labels) | desired_labels)
         fields = {
             "title": f"[{task_id}] {card['title']}"[:250],
             "description": merge_description(issue.get("description") if issue else None, managed),
@@ -254,25 +258,53 @@ def load_config(path):
         for key, value in labels.items()
     ):
         raise SyncError("Linear labels must map names to label ids")
+    humans = config.get("humans", [])
+    if not isinstance(humans, list) or any(
+        not isinstance(value, str) or not value.strip() for value in humans
+    ):
+        raise SyncError("Linear humans must be a list of identities")
     config["labels"] = labels
+    config["humans"] = humans
     config["states"] = LANES | states
     return config
 
 
-def read_head():
+def marker_key(scope, config_path) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(scope or "all").encode("utf-8"))
+    if config_path:
+        path = Path(config_path)
+        digest.update(str(path.resolve()).encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            pass
+    return digest.hexdigest()
+
+
+def read_head(key):
     try:
-        seq, digest = HEAD_PATH.read_text().split()
+        data = json.loads(HEAD_PATH.read_text())
+        value = data.get(key)
+        if not value:
+            return None
+        seq, digest = value.split()
         return int(seq), digest
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return None
 
 
-def write_head(head) -> None:
+def write_head(key, head) -> None:
     if head is None:
         return
+    try:
+        data = json.loads(HEAD_PATH.read_text()) if HEAD_PATH.is_file() else {}
+    except (OSError, ValueError):
+        data = {}
+    data[key] = f"{head[0]} {head[1]}"
     HEAD_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(HEAD_PATH) + ".tmp")
-    tmp.write_text(f"{head[0]} {head[1]}\n")
+    tmp.write_text(json.dumps(data, sort_keys=True) + "\n")
     os.replace(tmp, HEAD_PATH)
 
 
@@ -285,7 +317,7 @@ def current_head():
         store.close()
 
 
-def snapshot(focus):
+def snapshot(focus, humans=()):
     from linear_projection import project_cards
 
     cli = runpy.run_path(str(WORK_HOME / "engine.py"))
@@ -301,7 +333,8 @@ def snapshot(focus):
                 raise SyncError(
                     "work registry audit head does not match the external checkpoint; "
                     "mirror left unchanged")
-    return project_cards(registry, [event for _, event in records], dt.datetime.now(dt.timezone.utc), focus)
+    return project_cards(registry, [event for _, event in records],
+                         dt.datetime.now(dt.timezone.utc), focus, humans)
 
 
 def sync_target(config_path, focus, apply):
@@ -318,7 +351,7 @@ def sync_target(config_path, focus, apply):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise SyncError("a Linear sync using this config is already running") from exc
-        cards = snapshot(focus)
+        cards = snapshot(focus, config.get("humans", ()))
         try:
             client = LinearClient(credential)
             destination = client.destination(config["team_id"], config["project_id"])
@@ -344,14 +377,15 @@ def main(argv=None):
         if not args.all and not args.focus:
             raise SyncError("pass --focus <work id> or --all")
         focus = None if args.all else args.focus
+        key = marker_key("all" if args.all else args.focus, args.config)
         head = current_head() if args.apply or args.if_changed else None
-        if args.if_changed and head is not None and read_head() == head:
+        if args.if_changed and head is not None and read_head(key) == head:
             print(json.dumps({"mode": "skipped", "reason": "registry head unchanged"}, indent=2))
             return 0
         if args.config:
             result = sync_target(args.config.expanduser().resolve(), focus, args.apply)
             if args.apply:
-                write_head(head)
+                write_head(key, head)
         else:
             result = {"mode": "local preview", "cards": ordered_cards(snapshot(focus))}
         print(json.dumps(result, indent=2, ensure_ascii=False))

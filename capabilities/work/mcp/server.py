@@ -295,11 +295,12 @@ def board_drift(registry: Registry, tasks: list[dict], boards: dict[str, dict]) 
 # --------------------------------------------------------------------------
 
 
-def run_cli(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        [sys.executable, str(LOOM_BIN), "--root", str(root), *args],
-        capture_output=True, text=True,
-    )
+def run_cli(root: Path, db=None, *args: str) -> str:
+    command = [sys.executable, str(LOOM_BIN), "--root", str(root)]
+    if db:
+        command += ["--db", str(db)]
+    command += list(args)
+    result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         message = (result.stderr or result.stdout).strip().removeprefix("error:").strip()
         raise ToolError(message)
@@ -437,7 +438,7 @@ def tool_claim(registry: Registry, arguments: dict, default_agent: str | None) -
     args = ["claim", str(task_id), "--revision", str(revision), "--agent", agent]
     if arguments.get("ttl"):
         args += ["--ttl", str(arguments["ttl"])]
-    run_cli(registry.root, *args)
+    run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
@@ -454,7 +455,7 @@ def tool_renew(registry: Registry, arguments: dict, default_agent: str | None) -
         args += ["--epoch", str(arguments["epoch"])]
     if arguments.get("ttl"):
         args += ["--ttl", str(arguments["ttl"])]
-    run_cli(registry.root, *args)
+    run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
@@ -473,7 +474,7 @@ def tool_release(registry: Registry, arguments: dict, default_agent: str | None)
             "--reason", str(reason), "--agent", agent]
     if arguments.get("epoch") is not None:
         args += ["--epoch", str(arguments["epoch"])]
-    run_cli(registry.root, *args)
+    run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
@@ -495,10 +496,10 @@ def tool_transition(registry: Registry, arguments: dict, default_agent: str | No
     for key, flag in (("evidence", "--evidence"), ("reviewer", "--reviewer"),
                       ("decision", "--decision"), ("severity", "--severity"),
                       ("reason", "--reason"), ("reviewAnswer", "--review-answer"),
-                      ("integratedSource", "--integrated-source")):
+                      ("integratedSource", "--integrated-source"), ("needs", "--needs")):
         if arguments.get(key):
             args += [flag, str(arguments[key])]
-    run_cli(registry.root, *args)
+    run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
@@ -657,6 +658,7 @@ TOOL_DEFS = [
                 "decision": {"type": "string", "enum": ["approve", "reject"]},
                 "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
                 "reason": {"type": "string"},
+                "needs": {"type": "string", "enum": ["human", "agent"]},
                 "agent": {"type": "string"},
             },
         },
@@ -819,7 +821,7 @@ def tool_takeover(registry: Registry, arguments: dict, default_agent: str | None
         args += ["--ttl", str(arguments["ttl"])]
     if arguments.get("lockDelay"):
         args += ["--lock-delay", str(arguments["lockDelay"])]
-    run_cli(registry.root, *args)
+    run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     task = registry.find(str(task_id))
     return summarize(registry, task, registry.tasks())
@@ -832,7 +834,7 @@ def tool_inbox(registry: Registry, arguments: dict, default_agent: str | None) -
         args += ["--task", str(arguments["task"])]
     if arguments.get("all"):
         args.append("--all")
-    output = run_cli(registry.root, *args)
+    output = run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     questions = json.loads(output) if output.startswith("[") else []
     return {"agent": agent, "count": len(questions), "questions": questions}
@@ -853,7 +855,7 @@ def tool_ask(registry: Registry, arguments: dict, default_agent: str | None) -> 
                       ("reviewEvidence", "--review-evidence")):
         if arguments.get(key):
             args += [flag, str(arguments[key])]
-    output = run_cli(registry.root, *args)
+    output = run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     return {"task": str(task_id), "to": str(target), "result": output}
 
@@ -869,7 +871,7 @@ def tool_answer(registry: Registry, arguments: dict, default_agent: str | None) 
             "--agent", agent]
     if arguments.get("note"):
         args += ["--note", str(arguments["note"])]
-    output = run_cli(registry.root, *args)
+    output = run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     return {"task": str(task_id), "question": question, "result": output}
 
@@ -883,7 +885,7 @@ def tool_search(registry: Registry, arguments: dict, default_agent: str | None) 
     args = ["search", *[str(term) for term in terms], "--json"]
     if arguments.get("limit"):
         args += ["--limit", str(arguments["limit"])]
-    output = run_cli(registry.root, *args)
+    output = run_cli(registry.root, getattr(registry.store, "db_path", None), *args)
     registry.refresh()
     tasks = json.loads(output) if output.startswith("[") else []
     all_tasks = registry.tasks()

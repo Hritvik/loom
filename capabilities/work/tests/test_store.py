@@ -305,6 +305,25 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([event["event"] for _, event in events], ["create"])
         self.assertEqual(len(registry["tasks"]), 4)
 
+    def test_init_creates_a_registry_and_first_board(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            (repo / "docs").mkdir(parents=True)
+            (repo / "docs" / "board.json").write_text(json.dumps({"packets": []}))
+            db = root / "work.db"
+            initialized = run("--root", str(root), "--db", str(db), "init",
+                              "--id", "demo.board", "--repo", str(repo),
+                              "--path", "docs/board.json", "--agent", "setup")
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            created = run("--root", str(root), "--db", str(db), "create",
+                          "--id", "demo/W-1", "--board", "demo.board", "--title", "First",
+                          "--status", "ready", "--write-path", "src/one", "--agent", "setup")
+            self.assertEqual(created.returncode, 0, created.stderr)
+            claimed = run("--root", str(root), "--db", str(db), "claim", "demo/W-1",
+                          "--revision", "0", "--agent", "setup", "--now", T0)
+            self.assertEqual(claimed.returncode, 0, claimed.stderr)
+
     def test_factory_returns_sqlite(self):
         self.assertIsInstance(make_store(self.ws.root, "sqlite", self.db), SqliteStore)
         with self.assertRaises(Exception):

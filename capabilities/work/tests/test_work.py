@@ -76,6 +76,8 @@ class Workspace:
         os.environ["LOOM_WORKTREES"] = str(self.root / "worktrees")
         self._previous_reviews = os.environ.get("LOOM_REVIEWS")
         os.environ["LOOM_REVIEWS"] = str(self.root / "reviews")
+        self._previous_roots = os.environ.get("LOOM_TICK_ROOTS")
+        os.environ["LOOM_TICK_ROOTS"] = str(self.root / "tick.roots")
         self.repo = self.root / "repo"
         (self.repo / "docs").mkdir(parents=True)
 
@@ -181,6 +183,10 @@ class Workspace:
             os.environ.pop("LOOM_REVIEWS", None)
         else:
             os.environ["LOOM_REVIEWS"] = self._previous_reviews
+        if self._previous_roots is None:
+            os.environ.pop("LOOM_TICK_ROOTS", None)
+        else:
+            os.environ["LOOM_TICK_ROOTS"] = self._previous_roots
         self.tmp.cleanup()
 
 
@@ -270,15 +276,49 @@ class WorkCLITest(unittest.TestCase):
         self.invoke("renew", "demo/W-1", "--revision", "1", "--ttl", "1h",
                     "--agent", "agent-a", "--now", "2030-01-01T10:10:00Z")
         record = self.ws.task_record("demo/W-1")
-        self.assertEqual(record["revision"], 2)
+        self.assertEqual(record["revision"], 1)
         self.assertEqual(record["claim"]["lease_expires"], "2030-01-01T11:10:00Z")
 
-        self.invoke("release", "demo/W-1", "--revision", "2", "--reason", "handing back",
+        self.invoke("release", "demo/W-1", "--revision", "1", "--reason", "handing back",
                     "--agent", "agent-a", "--now", "2030-01-01T10:20:00Z")
         record = self.ws.task_record("demo/W-1")
         self.assertEqual(record["status"], "ready")
         self.assertIsNone(record["claim"])
-        self.assertEqual(record["revision"], 3)
+        self.assertEqual(record["revision"], 2)
+
+    def test_renew_keeps_the_review_request_valid(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.invoke("renew", "demo/W-1", "--revision", "2", "--ttl", "1h",
+                    "--agent", "agent-a", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["revision"], 2)
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "1",
+                    "--worker-command", "/usr/bin/true",
+                    "--reviewer-identity", "opencode/reviewer-agent", "--now", T0)
+        launch = [event for event in self.ws.events()
+                  if event.get("event") == "launch" and event.get("role") == "reviewer"][-1]
+        self.assertEqual(launch["question"], int(request))
+
+    def test_a_launch_that_renewed_then_died_is_failed_and_requeued(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "opencode/loom-worker",
+                    "--now", T0)
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/loom-worker", role="implementer",
+                                   state="pending", pid=999999, revision=1, now=T0)
+        finally:
+            store.close()
+        self.invoke("renew", "demo/W-1", "--revision", "1", "--agent", "opencode/loom-worker",
+                    "--now", "2030-01-01T10:01:00Z")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--worker-command", "/usr/bin/true", "--now", "2030-01-01T10:02:00Z")
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
+        self.assertEqual(launches[-1].get("state"), "failed")
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "ready")
 
     def test_takeover_requires_expiry_and_reason(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
@@ -577,15 +617,15 @@ class WorkCLITest(unittest.TestCase):
         self.invoke("ask", "demo/W-1", "--to", "other-reviewer", "--question", "Renewed lease",
                     "--review-source", source, "--review-evidence", "evidence/W-1.md",
                     "--agent", "agent-a", "--now", T0, expect=2)
-        self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "red",
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "red",
                     "--agent", "agent-a", "--now", T0)
-        self.invoke("transition", "demo/W-1", "--revision", "4", "--to", "green",
+        self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "green",
                     "--agent", "agent-a", "--now", T0)
         self.invoke("ask", "demo/W-1", "--to", "other-reviewer", "--question", "Same rejected commit",
                     "--review-source", source, "--review-evidence", "evidence/W-1.md",
                     "--agent", "agent-a", "--now", T0, expect=2)
         approval = self.approve_review(self.request_review(self.commit("Address reviewer findings")))
-        self.invoke("transition", "demo/W-1", "--revision", "5", "--to", "reviewed",
+        self.invoke("transition", "demo/W-1", "--revision", "4", "--to", "reviewed",
                     "--reviewer", "other-reviewer", "--decision", "approve", "--review-answer", approval,
                     "--agent", "agent-b", "--now", T0, expect=2)
 
@@ -1319,7 +1359,7 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(launch["source"], source)
         self.assertEqual(launch["agent"], "opencode/reviewer-agent")
         self.assertEqual(launch["state"], "pending")
-        tree = self.ws.root / "reviews" / "demo-w-1"
+        tree = self.ws.root / "reviews" / f"demo-w-1-{int(request)}"
         self.assertTrue(tree.exists())
         head = subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True).strip()
         self.assertEqual(head, source)
@@ -1360,7 +1400,7 @@ class WorkCLITest(unittest.TestCase):
         request = self.request_review(source, reviewer="opencode/reviewer-agent")
         self.approve_review(request, reviewer="opencode/reviewer-agent")
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
-                    "--worker-command", "/usr/bin/true", "--now", T0)
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
         transition = [event for event in self.ws.events()
                       if event.get("event") == "transition"
@@ -1404,7 +1444,7 @@ class WorkCLITest(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "answer" for event in self.ws.events()),
                         "the spawned reviewer never answered")
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
-                    "--worker-command", "/usr/bin/true", "--now", T0)
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
 
     def test_a_reviewer_launch_that_answered_is_done_not_failed(self):
@@ -1473,13 +1513,13 @@ class WorkCLITest(unittest.TestCase):
         self.assertTrue((path / ".git").exists())
 
     def test_launch_is_live_rejects_a_reused_pid(self):
-        import datetime as dt
-        from engine import launch_is_live
+        from engine import launch_is_live, process_start
         from store import iso
 
-        now = dt.datetime.now(dt.timezone.utc)
+        started = process_start(os.getpid())
+        self.assertIsNotNone(started)
         self.assertFalse(launch_is_live({"pid": os.getpid(), "ts": "2020-01-01T00:00:00Z"}))
-        self.assertTrue(launch_is_live({"pid": os.getpid(), "ts": iso(now)}))
+        self.assertTrue(launch_is_live({"pid": os.getpid(), "ts": iso(started)}))
 
     def test_reconcile_closes_superseded_pending_launches(self):
         store = self.ws.store()
@@ -1573,6 +1613,112 @@ class WorkCLITest(unittest.TestCase):
                              "--now", "2030-01-01T10:01:00Z")
         self.assertIn("Rework held", result.stdout)
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "green")
+
+    def test_tick_does_not_reask_a_source_from_an_older_revision(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit()
+        self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.ws.registry = self.ws.load()
+        task = next(item for item in self.ws.registry["tasks"] if item["id"] == "demo/W-1")
+        task["revision"] = 3
+        self.ws.save()
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("resubmit_required", result.stdout)
+        asks = [event for event in self.ws.events()
+                if event.get("event") == "ask" and event.get("task") == "demo/W-1"]
+        self.assertEqual(len(asks), 1)
+
+    def test_a_live_reviewer_is_not_superseded_by_an_implementer_closure(self):
+        import datetime as dt
+        from store import iso
+
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "opencode/loom-worker",
+                    "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        store = self.ws.store()
+        try:
+            with store.lock():
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/loom-worker", role="implementer",
+                                   state="pending", pid=999999, revision=1, now=T0)
+                store.append_event(event="launch", task="demo/W-1",
+                                   agent="opencode/reviewer-agent", role="reviewer",
+                                   state="pending", pid=os.getpid(), revision=2, question=12345,
+                                   started_at=iso(dt.datetime.now(dt.timezone.utc)), now=T0)
+        finally:
+            store.close()
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        launches = [event for event in self.ws.events()
+                    if event.get("event") == "launch" and event.get("task") == "demo/W-1"]
+        implementer = [event for event in launches if event.get("role") == "implementer"][-1]
+        reviewer = [event for event in launches if event.get("role") == "reviewer"][-1]
+        self.assertEqual(implementer.get("state"), "done")
+        self.assertEqual(reviewer.get("state"), "pending")
+
+    def test_tick_integrates_an_on_main_review_with_opt_in(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--integrate", "--max-integrate", "1", "--worker-command", "/usr/bin/true",
+                    "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "integrated")
+        transition = [event for event in self.ws.events()
+                      if event.get("event") == "transition"
+                      and event.get("status") == "integrated"][-1]
+        self.assertEqual(transition["integrated_source"], source)
+
+    def test_tick_reports_a_review_that_needs_a_merge(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        repo = self.ws.repo
+        self.commit("Base")
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "loom/demo-w-1"],
+                       check=True)
+        source = self.commit("Branch work")
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "main"], check=True)
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.approve_review(request, reviewer="opencode/reviewer-agent")
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--integrate", "--max-integrate", "1",
+                             "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("merge_needed", result.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+
+    def test_validator_detects_a_forged_lease(self):
+        self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
+        self.ws.registry = self.ws.load()
+        task = next(item for item in self.ws.registry["tasks"] if item["id"] == "demo/W-1")
+        task["claim"]["lease_expires"] = "2031-01-01T00:00:00Z"
+        self.ws.save()
+        result = validate(self.ws.root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lease_expires", result.stdout)
+
+    def test_tick_reports_planned_and_agent_blocked_roots(self):
+        self.invoke("create", "--agent", "agent-a", "--now", T0,
+                    "--id", "demo/W-7", "--board", "demo.board", "--title", "Draft prerequisite",
+                    "--status", "draft", "--write-path", "src/seven")
+        self.invoke("create", "--agent", "agent-a", "--now", T0,
+                    "--id", "demo/W-8", "--board", "demo.board", "--title", "Waiting on draft",
+                    "--status", "ready", "--write-path", "src/eight", "--depends-on", "demo/W-7")
+        self.invoke("create", "--agent", "agent-a", "--now", T0,
+                    "--id", "demo/W-9", "--board", "demo.board", "--title", "Agent blocked",
+                    "--status", "ready", "--write-path", "src/nine")
+        self.invoke("transition", "demo/W-9", "--revision", "0", "--to", "blocked",
+                    "--needs", "agent", "--reason", "waiting for a peer", "--agent", "agent-a",
+                    "--now", T0)
+        result = self.invoke("tick", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        self.assertIn("Planned prerequisites", result.stdout)
+        self.assertIn("demo/W-7", result.stdout)
+        self.assertIn("Blocked on an agent", result.stdout)
+        self.assertIn("demo/W-9", result.stdout)
 
     def test_green_does_not_hold_a_write_path(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)

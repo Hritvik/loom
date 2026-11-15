@@ -64,7 +64,7 @@ class LinearProjectionTest(unittest.TestCase):
             task("alpha/D", status="integrated"),
         ], edges=[{"from": "alpha/T", "to": "alpha/H"}], focus=None)
         self.assertTrue(cards["alpha/H"]["needs_human"])
-        self.assertEqual(cards["alpha/H"]["priority"], 3)
+        self.assertEqual(cards["alpha/H"]["priority"], 1)
         self.assertEqual(cards["alpha/T"]["priority"], 4)
         self.assertEqual(cards["alpha/D"]["priority"], 0)
 
