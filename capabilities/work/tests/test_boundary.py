@@ -57,7 +57,8 @@ PLACEHOLDER_DOMAINS = ("example.com", "example.net", "example.org", "example",
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 POSIX_HOME = re.compile(r"/(?:" + "|".join(("Users", "home", "root")) + r")/[A-Za-z0-9._-]+")
 WINDOWS_HOME = re.compile(
-    r"[A-Za-z]:\\\\?(?:" + "|".join(("Users", "home")) + r")\\\\[A-Za-z0-9._-]+"
+    r"[A-Za-z]:[\\/]{1,2}(?:" + "|".join(("Users", "home", "root"))
+    + r")[\\/]{1,2}[A-Za-z0-9._-]+"
 )
 
 DENYLIST_ENV = "LOOM_BOUNDARY_DENYLIST"
@@ -300,6 +301,61 @@ class EngineSourceTest(unittest.TestCase):
 # --------------------------------------------------------------------------
 # 2. A tracked file carries no machine path or personal mailbox
 # --------------------------------------------------------------------------
+
+
+def _absolute(kind: str, name: str) -> str:
+    """Build a POSIX home path without writing one into this tracked file."""
+    return "/" + kind + "/" + name
+
+
+def _windows(drive: str, kind: str, name: str, separator: str) -> str:
+    """Build a Windows home path without writing one into this tracked file."""
+    return drive + ":" + separator + kind + separator + name
+
+
+def _mailbox(local: str, domain: str) -> str:
+    """Build a mailbox without writing one into this tracked file."""
+    return local + "@" + domain
+
+
+class TreeDetectorTest(unittest.TestCase):
+    """The path and mailbox detectors are exercised on synthetic text.
+
+    Without this, a broken branch (a Windows separator that never matches) looks exactly like a
+    clean tree: the real-tree tests pass because nothing in the checkout violates the rule. The
+    fixtures are assembled from parts because this file is itself tracked and scanned.
+    """
+
+    def test_home_paths_finds_posix_and_windows_homes(self):
+        cases = [
+            _absolute("Users", "alice") + "/project",
+            _absolute("home", "bob"),
+            _absolute("root", ".config"),
+            _windows("C", "Users", "alice", "\\"),
+            _windows("C", "Users", "alice", "/"),
+            _windows("D", "home", "bob", "\\"),
+            _windows("E", "root", "carol", "\\\\"),
+        ]
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertTrue(home_paths(text), f"{text!r} was not seen as a home path")
+
+    def test_home_paths_ignores_relative_and_placeholder_paths(self):
+        cases = ("~/repositories/loom", "capabilities/work/tests", "$HOME/x", "<home>/x")
+        for text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(home_paths(text), [])
+
+    def test_personal_emails_flags_only_reachable_mailboxes(self):
+        placeholders = [
+            _mailbox("a", "example.com"),
+            _mailbox("b", "sub.example.org"),
+            _mailbox("c", "invalid"),
+            _mailbox("d", "localhost"),
+        ]
+        reachable = _mailbox("e", "real-domain.io")
+        text = " ".join([*placeholders, reachable, _mailbox("loom-worker", "example.invalid")])
+        self.assertEqual(personal_emails(text), [reachable])
 
 
 class TrackedTreeTest(unittest.TestCase):
