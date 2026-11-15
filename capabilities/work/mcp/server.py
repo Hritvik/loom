@@ -236,8 +236,9 @@ def repo_matches(task: dict, repo: str | None) -> bool:
 def infer_agent(registry: Registry, repo: str | None) -> str | None:
     """Prefer the program namespace over the directory name.
 
-    `~/repositories/gym-tracker` is the MyFitnessGuide repo, so the default
-    identity is `myfitnessguide-agent`, not `gym-tracker-agent`.
+    A checkout's directory need not match the program that owns it: a repo
+    cloned as `~/repositories/example-repo` may belong to program `demo`, so
+    the default identity is `demo-agent`, not `example-repo-agent`.
     """
     if not repo:
         return None
