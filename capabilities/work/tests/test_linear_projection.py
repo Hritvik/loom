@@ -133,8 +133,15 @@ class LinearProjectionTest(unittest.TestCase):
     def test_reviewed_without_structured_receipt_remains_review_work(self):
         historical = task(FOCUS, status="reviewed", review={"reviewer": "reviewer", "decision": "approve"})
         self.assertEqual(self.cards([historical])[FOCUS]["lane"], "needs_review")
+        # An approval that predates content binding is incomplete, not integrable.
+        legacy = task(FOCUS, status="reviewed", review={
+            "reviewer": "reviewer", "decision": "approve", "source": COMMIT, "answer": 4,
+        })
+        self.assertEqual(self.cards([legacy])[FOCUS]["lane"], "needs_review")
+
         current = task(FOCUS, status="reviewed", review={
             "reviewer": "reviewer", "decision": "approve", "source": COMMIT, "answer": 4,
+            "paths": [{"path": "src/one/a.txt", "blob": "d" * 40}], "digest": "e" * 64,
         })
         self.assertEqual(self.cards([current])[FOCUS]["lane"], "awaiting_integration")
 

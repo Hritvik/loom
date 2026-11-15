@@ -59,10 +59,20 @@ identical on all three surfaces.
 ## Integration receipts
 
 An integration is only proven by the event that records it: the `transition` to
-`integrated` carries `integrated_source` and `integration_tip`, verified against the
-board's integration branch. Tasks migrated from the pre-SQLite registry have no such
-event, so `validate_work.py` warns and `loom show` prints
-`integrated: NO RECEIPT`.
+`integrated` carries `integrated_source`, `integration_tip` and the digest of the content it
+approved, verified against the board's integration branch. Recording `reviewed` binds the
+receipt to that content: the receipt stores the changed path and blob pairs and a SHA-256
+digest over them, taken from the approved commit. Integration checks each recorded blob at the
+ref tip instead of re-diffing a history that may have moved. When a path moved it names the exact
+paths in the error, e.g. `approved paths changed in refs/heads/main: src/one/value.txt`.
+
+Receipts written before content binding keep a null digest. They are reported as incomplete —
+by `loom show`, `loom tick` (`receipt_incomplete`), `loom integration-plan` and
+`validate_work.py` — and are never silently repaired by recomputing the paths at integration
+time. Reopen the task and run the review again.
+
+Tasks migrated from the pre-SQLite registry have no integration event, so `validate_work.py`
+warns and `loom show` prints `integrated: NO RECEIPT`.
 
 Pre-migration integrations whose commits no longer exist are accepted as proven by evidence
 only, per `decisions/integration-receipts-001.md`; the validator reports the count as one
@@ -75,9 +85,10 @@ rewriting history and without inventing a hash:
 ```
 
 The commit must exist in the owner checkout and be in the history of the board's
-`integration_ref`. `--base` is optional and, when given, re-checks that the paths the
-commit changed are unchanged at the integration tip. Annotating is refused when a
-receipt already exists, and the event is appended to the audit log like any other.
+`integration_ref`. `--base` is optional; when given, the receipt also records the path/blob
+pairs and their digest, and re-checks that the paths the commit changed are unchanged at the
+integration tip. Annotating is refused when a receipt already exists, and the event is appended
+to the audit log like any other.
 
 ## One command
 

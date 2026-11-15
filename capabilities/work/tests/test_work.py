@@ -45,6 +45,16 @@ def validate(root: Path, *extra):
     )
 
 
+def content_digest(pairs):
+    digest = hashlib.sha256()
+    for pair in sorted(pairs, key=lambda item: item["path"]):
+        digest.update(pair["path"].encode())
+        digest.update(b"\0")
+        digest.update((pair["blob"] or "").encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 def packet(packet_id, status, paths, depends_on=None):
     return {
         "id": packet_id,
@@ -742,6 +752,131 @@ class WorkCLITest(unittest.TestCase):
         self.commit("Restore approved content", path=earlier, content="approved")
         self.invoke(*integrated)
 
+    def test_review_receipt_binds_the_content_it_approved(self):
+        self.mark_green()
+        base = self.commit("Base")
+        self.commit("First approved path", path="src/one/a.txt", content="a")
+        source = self.commit("Second approved path", path="src/one/b.txt", content="b")
+        approval = self.approve_review(self.request_review(source, base=base))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+
+        review = self.ws.task_record("demo/W-1")["review"]
+        self.assertEqual([pair["path"] for pair in review["paths"]],
+                         ["src/one/a.txt", "src/one/b.txt"])
+        for pair in review["paths"]:
+            blob = subprocess.check_output(
+                ["git", "-C", str(self.ws.repo), "rev-parse", f"{source}:{pair['path']}"],
+                text=True).strip()
+            self.assertEqual(pair["blob"], blob)
+        self.assertEqual(review["digest"], content_digest(review["paths"]))
+
+        event = [item for item in self.ws.events() if item.get("status") == "reviewed"][-1]
+        self.assertEqual(event["review_digest"], review["digest"])
+        self.assertEqual(event["review_path_count"], 2)
+        self.assertIn("approved content", self.invoke("show", "demo/W-1").stdout)
+
+    def test_integration_names_the_exact_paths_that_moved(self):
+        self.mark_green()
+        base = self.commit("Base")
+        self.commit("Kept path", path="src/one/kept.txt", content="kept")
+        source = self.commit("Moved path", path="src/one/moved.txt", content="approved")
+        approval = self.approve_review(self.request_review(source, base=base))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+        self.commit("Unreviewed change", path="src/one/moved.txt", content="changed")
+
+        result = self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "integrated",
+                             "--evidence", "evidence/W-1.md", "--integrated-source", source,
+                             "--agent", "agent-a", "--now", T0, expect=2)
+        self.assertIn("src/one/moved.txt", result.stderr)
+        self.assertNotIn("src/one/kept.txt", result.stderr)
+
+    def test_a_renamed_path_verifies_by_its_recorded_blobs(self):
+        self.mark_green()
+        base = self.commit("Base", path="src/one/old.txt", content="x")
+        subprocess.run(["git", "-C", str(self.ws.repo), "mv", "src/one/old.txt",
+                        "src/one/new.txt"], check=True, capture_output=True)
+        source = self.commit("Rename the path")
+        approval = self.approve_review(self.request_review(source, base=base))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+
+        review = self.ws.task_record("demo/W-1")["review"]
+        blobs = {pair["path"]: pair["blob"] for pair in review["paths"]}
+        self.assertIsNone(blobs["src/one/old.txt"])
+        self.assertTrue(blobs["src/one/new.txt"])
+
+        self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "integrated",
+                    "--evidence", "evidence/W-1.md", "--integrated-source", source,
+                    "--agent", "agent-a", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "integrated")
+
+    def test_a_legacy_receipt_is_incomplete_and_never_repaired(self):
+        self.mark_green()
+        self.commit("Base")
+        source = self.commit("Approved", path="src/one/a.txt", content="a")
+
+        # What an older engine wrote: an approval event and receipt with no content digest.
+        store = self.ws.store()
+        try:
+            with store.lock():
+                registry = store.load()
+                task = next(item for item in registry["tasks"] if item["id"] == "demo/W-1")
+                task.update(status="reviewed", revision=3, evidence="evidence/W-1.md",
+                            claim=None, review={
+                    "reviewer": "reviewer-r", "decision": "approve", "source": source,
+                    "base": None, "answer": 1, "evidence": "evidence/W-1.md",
+                })
+                store.commit(event="transition", task="demo/W-1", agent="agent-b",
+                             status="reviewed", previous_status="green", revision=3,
+                             reviewer="reviewer-r", decision="approve", review_answer=1,
+                             review_source=source, evidence="evidence/W-1.md")
+        finally:
+            store.close()
+
+        refused = self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "integrated",
+                              "--evidence", "evidence/W-1.md", "--integrated-source", source,
+                              "--agent", "agent-a", "--now", T0, expect=2)
+        self.assertIn("incomplete", refused.stderr)
+        self.assertIn("no approved content digest", refused.stderr)
+
+        tick = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                           "--integrate", "--max-integrate", "1",
+                           "--worker-command", "/usr/bin/true", "--now", T0)
+        self.assertIn("receipt_incomplete", tick.stdout)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+        self.assertIsNone(self.ws.task_record("demo/W-1")["review"].get("digest"))
+
+        warning = validate(self.ws.root)
+        self.assertEqual(warning.returncode, 0, warning.stdout)
+        self.assertIn("no approved content digest", warning.stdout)
+
+    def test_a_hand_edited_receipt_digest_is_an_error(self):
+        self.mark_green()
+        self.commit("Base")
+        source = self.commit("Approved", path="src/one/a.txt", content="a")
+        approval = self.approve_review(self.request_review(source))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+        registry = self.ws.load()
+        task = next(item for item in registry["tasks"] if item["id"] == "demo/W-1")
+        task["review"]["paths"][0]["blob"] = "0" * 40
+        self.ws.registry = registry
+        self.ws.save()
+
+        result = validate(self.ws.root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("review receipt digest does not match", result.stdout)
+
     def test_integration_uses_main_and_rechecks_dependencies(self):
         self.mark_green()
         self.commit("Main before review")
@@ -1105,6 +1240,12 @@ class WorkCLITest(unittest.TestCase):
 
         receipt = next(event for event in self.ws.events() if event.get("event") == "annotate")
         self.assertEqual(receipt["integrated_source"], second)
+        blob = subprocess.check_output(
+            ["git", "-C", str(self.ws.repo), "rev-parse", f"{second}:src/two.txt"],
+            text=True).strip()
+        self.assertEqual(receipt["approved_paths"], [{"path": "src/two.txt", "blob": blob}])
+        self.assertEqual(receipt["approved_digest"],
+                         content_digest([{"path": "src/two.txt", "blob": blob}]))
         self.assertEqual(receipt["integration_tip"], second)
         self.assertEqual(receipt["base"], first)
         self.assertEqual(receipt["reason"], "migrated; commit verified on main")

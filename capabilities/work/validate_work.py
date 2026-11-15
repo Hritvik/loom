@@ -45,6 +45,17 @@ def parse_time(value: str) -> dt.datetime:
     return parsed.astimezone(dt.timezone.utc)
 
 
+def review_digest(pairs: list[dict]) -> str:
+    """The same digest the engine writes over a receipt's path/blob pairs."""
+    digest = hashlib.sha256()
+    for pair in sorted(pairs, key=lambda item: item.get("path", "")):
+        digest.update(str(pair.get("path", "")).encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update((pair.get("blob") or "").encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
 # --------------------------------------------------------------------------
 # Minimal JSON Schema subset validator (draft 2020-12 features we use)
 # --------------------------------------------------------------------------
@@ -712,11 +723,17 @@ def main(argv: list[str] | None = None) -> int:
                         "decision": review_event.get("decision"),
                         "source": review_event.get("review_source"),
                         "answer": review_event.get("review_answer"),
+                        "digest": review_event.get("review_digest"),
                     }
                     actual = {key: review.get(key) for key in expected}
                     if actual != expected:
                         errors.append(
                             f"{task_id}: review receipt does not match the reviewed transition")
+                    if review.get("digest"):
+                        pairs = review.get("paths") or []
+                        if review_digest(pairs) != review["digest"]:
+                            errors.append(
+                                f"{task_id}: review receipt digest does not match its path/blob pairs")
         claimants: dict[str, set[str]] = {}
         for _, record in records:
             if record.get("event") in {"claim", "renew", "takeover"} and record.get("task"):
@@ -744,6 +761,16 @@ def main(argv: list[str] | None = None) -> int:
             warnings.append(
                 f"{len(unproven)} pre-migration integrations are proven by evidence only"
                 f" (accepted by decisions/integration-receipts-001.md): {preview}")
+        incomplete = sorted(
+            task_id for task_id, task in by_id.items()
+            if task.get("status") == "reviewed"
+            and (task.get("review") or {}).get("source")
+            and not (task.get("review") or {}).get("digest"))
+        if incomplete:
+            preview = ", ".join(incomplete[:5]) + (", …" if len(incomplete) > 5 else "")
+            warnings.append(
+                f"{len(incomplete)} reviewed receipt(s) record no approved content digest and are"
+                f" incomplete; reopen and re-review: {preview}")
     else:
         warnings.append("no event log; create the registry with `loom init` or write `genesis`")
 

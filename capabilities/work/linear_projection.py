@@ -91,7 +91,8 @@ def _lane(
     if state in _WORK["DEP_SATISFIED"]:
         return "integrated", None, reviewer
     if state == "reviewed":
-        if review.get("source") and review.get("answer") and review.get("decision") == "approve":
+        if (review.get("source") and review.get("answer") and review.get("decision") == "approve"
+                and review.get("digest")):
             return "awaiting_integration", implementer or "integrator", reviewer
         blockers.append("Independent review receipt required")
         return "needs_review", "coordinator", reviewer

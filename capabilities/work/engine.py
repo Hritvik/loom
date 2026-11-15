@@ -332,7 +332,16 @@ def summarize(task: dict, registry: dict) -> str:
     if task.get("evidence"):
         lines.append(f"  evidence: {task['evidence']}")
     if task.get("review"):
-        lines.append(f"  review:   {task['review'].get('decision')} by {task['review'].get('reviewer')}")
+        review = task["review"]
+        line = f"  review:   {review.get('decision')} by {review.get('reviewer')}"
+        if review.get("source"):
+            line += f" at {review['source'][:12]}"
+        if review.get("digest"):
+            line += (f" · approved content {review['digest'][:12]}"
+                     f" ({len(review.get('paths') or [])} path(s))")
+        else:
+            line += " · content digest: none (incomplete)"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -871,6 +880,8 @@ def cmd_show(args, store: Store) -> int:
                 "source": receipt.get("integrated_source"),
                 "tip": receipt.get("integration_tip"),
                 "event": receipt.get("seq"),
+                "digest": receipt.get("approved_digest"),
+                "paths": receipt.get("approved_paths"),
             }
         if attempts:
             payload["attempts"] = [attempt_payload(item) for item in attempts]
@@ -886,6 +897,13 @@ def cmd_show(args, store: Store) -> int:
         if receipt:
             print(f"  integrated: {receipt.get('integrated_source')[:12]}"
                   f" (event {receipt.get('seq')})")
+            if receipt.get("approved_digest"):
+                count = receipt.get("approved_path_count")
+                if count is None:
+                    count = len(receipt.get("approved_paths") or [])
+                print(f"  content:    {receipt['approved_digest'][:12]} ({count} path(s))")
+            else:
+                print("  content:    digest: none (incomplete)")
         elif task.get("status") in {"integrated", "accepted"}:
             print("  integrated: NO RECEIPT — run `./loom annotate` with a provable commit")
     return 0
@@ -1100,6 +1118,58 @@ def latest_review_request(task: dict, history: list[dict]) -> dict:
     ), {})
 
 
+def blob_at(task: dict, commit: str, path: str) -> str | None:
+    """The object a path resolves to at a commit, or None when the path is absent there."""
+    listed = git_review_check(task, "ls-tree", "-z", "--full-tree", commit, "--", path)
+    if listed.returncode:
+        raise WorkError(f"{task['id']}: could not read {path!r} at {commit[:12]}")
+    for entry in listed.stdout.split("\0"):
+        if not entry:
+            continue
+        meta, _, name = entry.partition("\t")
+        if name != path:
+            continue
+        parts = meta.split()
+        if len(parts) == 3:
+            return parts[2]
+    return None
+
+
+def content_digest(pairs: list[dict]) -> str:
+    """A stable digest over the path/blob pairs a receipt covers."""
+    digest = hashlib.sha256()
+    for pair in sorted(pairs, key=lambda item: item["path"]):
+        digest.update(pair["path"].encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update((pair.get("blob") or "").encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def approved_content(task: dict, source: str, base: str | None) -> dict:
+    """The paths the approved commit changed and the content each path holds at the source.
+
+    Recorded when the approval is written, so integration verifies the content it approved
+    instead of re-diffing a history that may have moved.
+    """
+    if base:
+        changed = git_review_check(task, "diff", "--name-only", "-z", "--no-renames", base, source)
+    else:
+        changed = git_review_check(
+            task, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--no-renames", source,
+        )
+    if changed.returncode:
+        raise WorkError("could not determine the paths changed by the approved commit")
+    paths = list(dict.fromkeys(changed.stdout.split("\0")[:-1]))
+    pairs = [{"path": path, "blob": blob_at(task, source, path)} for path in sorted(paths)]
+    return {"paths": pairs, "digest": content_digest(pairs)}
+
+
+def diverged_content(task: dict, pairs: list[dict], tip: str) -> list[str]:
+    """Paths whose content at the integration tip differs from the approved blob."""
+    return [pair["path"] for pair in pairs if blob_at(task, tip, pair["path"]) != pair.get("blob")]
+
+
 def verified_review(args, store: Store, task: dict) -> dict:
     if not args.reviewer or args.decision != "approve":
         raise WorkError("transition to reviewed requires --reviewer and --decision approve")
@@ -1121,6 +1191,7 @@ def verified_review(args, store: Store, task: dict) -> dict:
     if args.evidence and args.evidence != request["review_evidence"]:
         raise WorkError("review evidence must match the submitted evidence path")
     require_source_commit(task, request["review_source"])
+    content = approved_content(task, request["review_source"], request["review_base"])
     return {
         "reviewer": args.reviewer,
         "decision": "approve",
@@ -1128,6 +1199,8 @@ def verified_review(args, store: Store, task: dict) -> dict:
         "base": request["review_base"],
         "evidence": request["review_evidence"],
         "answer": args.review_answer,
+        "paths": content["paths"],
+        "digest": content["digest"],
         **({"severity": args.severity} if args.severity else {}),
     }
 
@@ -1150,23 +1223,23 @@ def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
     review = task.get("review") or {}
     if not review.get("source") or not review.get("answer"):
         raise WorkError("missing verified review receipt; reopen the task and submit it for review")
+    if not review.get("digest"):
+        raise WorkError(
+            f"{task['id']}: review receipt is incomplete: it records no approved content digest; "
+            "reopen the task and submit it for review")
     if source != review["source"]:
         raise WorkError("--integrated-source must be the exact approved commit")
+    pairs = review.get("paths") or []
+    if content_digest(pairs) != review["digest"]:
+        raise WorkError(
+            f"{task['id']}: review receipt digest does not match its recorded path/blob pairs; "
+            "reopen the task and submit it for review")
     integration_tip = require_source_on_ref(task, source, ref)
-    base = review.get("base")
-    if base:
-        changed = git_review_check(task, "diff", "--name-only", "-z", "--no-renames", base, source)
-    else:
-        changed = git_review_check(
-            task, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", source,
-        )
-    if changed.returncode:
-        raise WorkError("could not determine the paths changed by the approved commit")
-    paths = list(dict.fromkeys(changed.stdout.split("\0")[:-1]))
-    if paths and git_review_check(
-        task, "diff", "--quiet", "--no-ext-diff", "--ignore-submodules=none", source, integration_tip, "--", *paths,
-    ).returncode:
-        raise WorkError(f"paths changed by the approved commit differ in {ref}; submit the integrated change for review")
+    moved = diverged_content(task, pairs, integration_tip)
+    if moved:
+        preview = ", ".join(moved[:12]) + (f" (+{len(moved) - 12} more)" if len(moved) > 12 else "")
+        raise WorkError(
+            f"approved paths changed in {ref}: {preview}; submit the integrated change for review")
     return integration_tip
 
 
@@ -1248,13 +1321,19 @@ def cmd_transition(args, store: Store) -> int:
     elif current == "blocked":
         task.pop("blocked_needs", None)
     bump(task, target, now)
+    approved = (task.get("review") or {}) if target == "integrated" else {}
     store.commit(event="transition", task=task["id"], agent=agent, status=target,
                        previous_status=current, revision=task["revision"],
                        epoch=acting_epoch, evidence=args.evidence, reviewer=args.reviewer,
                        decision=args.decision, reason=args.reason, now=args.now,
-                       **({"review_answer": review["answer"], "review_source": review["source"]} if review else {}),
+                       **({"review_answer": review["answer"], "review_source": review["source"],
+                           "review_digest": review["digest"],
+                           "review_path_count": len(review["paths"])} if review else {}),
                        **({"integrated_source": args.integrated_source, "integration_tip": integration_tip}
-                          if integration_tip else {}))
+                          if integration_tip else {}),
+                       **({"approved_digest": approved.get("digest"),
+                           "approved_path_count": len(approved.get("paths") or [])}
+                          if approved.get("digest") else {}))
     print(f"{task['id']}: {current} -> {target} at revision {task['revision']}")
     return 0
 
@@ -1292,23 +1371,23 @@ def cmd_annotate(args, store: Store) -> int:
     board = find_board(registry, task["board"])
     ref = board.get("integration_ref", "refs/heads/main")
     integration_tip = require_source_on_ref(task, args.integrated_source, ref)
+    approved_paths: list[dict] = []
+    approved_digest = None
     if args.base:
         base = review_base(task, args.integrated_source, args.base)
-        changed = git_review_check(
-            task, "diff", "--name-only", "-z", "--no-renames", base, args.integrated_source)
-        if changed.returncode:
-            raise WorkError("could not determine the paths changed since --base")
-        paths = list(dict.fromkeys(changed.stdout.split("\0")[:-1]))
-        if paths and git_review_check(
-            task, "diff", "--quiet", "--no-ext-diff", "--ignore-submodules=none",
-            args.integrated_source, integration_tip, "--", *paths,
-        ).returncode:
-            raise WorkError(f"paths changed since --base differ in {ref}")
+        content = approved_content(task, args.integrated_source, base)
+        approved_paths = content["paths"]
+        approved_digest = content["digest"]
+        moved = diverged_content(task, approved_paths, integration_tip)
+        if moved:
+            raise WorkError(f"paths changed since --base differ in {ref}: {', '.join(moved)}")
     bump(task, task["status"], parse_now(args.now))
     store.commit(event="annotate", task=task["id"], agent=agent, status=task["status"],
                        revision=task["revision"], integrated_source=args.integrated_source,
                        integration_tip=integration_tip, base=args.base or None,
                        path_check="verified" if args.base else "skipped",
+                       approved_digest=approved_digest,
+                       **({"approved_paths": approved_paths} if approved_paths else {}),
                        reason=args.reason, now=args.now)
     print(f"{task['id']}: integration receipt {args.integrated_source[:12]} at revision {task['revision']}")
     return 0
@@ -2315,6 +2394,15 @@ def apply_review_sweep(store: Store, items: list[dict], args) -> tuple[list[dict
     return reissued, blocked
 
 
+def integration_action(message: str) -> str:
+    """Classify why an approved task cannot be integrated from the engine's own message."""
+    if "review receipt is incomplete" in message:
+        return "receipt_incomplete"
+    if "approved paths changed" in message:
+        return "paths_diverged"
+    return "integration_blocked"
+
+
 def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], list[dict]]:
     """Classify reviewed tasks: auto-integrable, merge-needed, paths-diverged, receipt-missing."""
     queue, blocked = [], []
@@ -2326,6 +2414,14 @@ def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], li
         if not (review.get("decision") == "approve" and review.get("source")
                 and review.get("answer") and review.get("evidence")):
             blocked.append({"task": task["id"], "action": "receipt_missing"})
+            continue
+        if not review.get("digest"):
+            blocked.append({
+                "task": task["id"], "action": "receipt_incomplete",
+                "reason": "receipt predates content digests; it records no approved path/blob pairs",
+                "source": review["source"],
+                "repo": str(Path(str(task.get("owner_repo") or ".")).expanduser()),
+            })
             continue
         satisfied, unmet = dependencies_met(registry, task)
         if not satisfied:
@@ -2350,7 +2446,7 @@ def plan_integration(store: Store, registry: dict, args) -> tuple[list[dict], li
             require_reviewed_source(task, review["source"], ref)
         except (WorkError, OSError, subprocess.SubprocessError) as exc:
             message = str(exc)
-            action = "paths_diverged" if ("differ" in message or "paths" in message) else "integration_blocked"
+            action = integration_action(message)
             blocked.append({
                 "task": task["id"], "action": action, "reason": message,
                 "repo": str(Path(str(task.get("owner_repo") or ".")).expanduser()),
@@ -2382,8 +2478,7 @@ def apply_integration(store: Store, queue: list[dict], args) -> tuple[list[dict]
             integrated.append({**item, "action": "integrated"})
         except WorkError as exc:
             message = str(exc)
-            action = "paths_diverged" if ("differ" in message or "paths" in message) else "integration_blocked"
-            blocked.append({**item, "action": action, "reason": message})
+            blocked.append({**item, "action": integration_action(message), "reason": message})
     return integrated, blocked
 
 
@@ -2454,19 +2549,6 @@ def ref_tip(repo: Path, ref: str | None) -> str | None:
     return result.stdout.strip() or None
 
 
-def commit_paths(repo: Path, base: str, tip: str) -> list[str]:
-    """Paths a commit changed relative to its review base."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "diff", "--name-only", base, tip],
-            capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if result.returncode != 0:
-        return []
-    return [line for line in result.stdout.splitlines() if line.strip()]
-
-
 def commit_delta(repo: Path, base: str, tip: str) -> dict:
     """How far a branch moved past the commit a reviewer approved."""
     info = {"commits": None, "paths": []}
@@ -2510,11 +2592,13 @@ def integration_plan(store: Store, registry: dict, args) -> dict:
         if not source or not tip:
             continue
         item["delta"] = commit_delta(repo, source, tip)
-        base = (task.get("review") or {}).get("base")
-        reviewed = commit_paths(repo, base, source) if base else []
-        moved = set(item["delta"].get("paths") or ())
-        item["reviewedPaths"] = reviewed
-        item["divergedPaths"] = [path for path in reviewed if path in moved]
+        # The receipt names the content it approved; that is what the tip is checked against.
+        pairs = (task.get("review") or {}).get("paths") or []
+        item["reviewedPaths"] = [pair["path"] for pair in pairs]
+        try:
+            item["divergedPaths"] = diverged_content(task, pairs, tip)
+        except WorkError:
+            item["divergedPaths"] = []
 
     expired = []
     for task in registry["tasks"]:
@@ -2556,6 +2640,8 @@ def integration_plan(store: Store, registry: dict, args) -> dict:
             "merge_needed": sum(1 for item in integration_blocked if item["action"] == "merge_needed"),
             "paths_diverged": sum(1 for item in integration_blocked if item["action"] == "paths_diverged"),
             "receipt_missing": sum(1 for item in integration_blocked if item["action"] == "receipt_missing"),
+            "receipt_incomplete": sum(1 for item in integration_blocked
+                                      if item["action"] == "receipt_incomplete"),
             "dependency_blocked": sum(1 for item in integration_blocked
                                       if item["action"] == "dependency_blocked"),
             "never_submitted": sum(1 for item in review_blocked if item["action"] == "never_submitted"),
@@ -2590,7 +2676,9 @@ def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) 
     add("| Bucket | Count |")
     add("|---|---:|")
     for key, label in (("merge_needed", "Merge needed"), ("paths_diverged", "Paths diverged"),
-                       ("receipt_missing", "Receipt missing"), ("dependency_blocked", "Dependency blocked"),
+                       ("receipt_missing", "Receipt missing"),
+                       ("receipt_incomplete", "Receipt incomplete (legacy)"),
+                       ("dependency_blocked", "Dependency blocked"),
                        ("never_submitted", "Never submitted"), ("resubmit_required", "Resubmit required"),
                        ("rework", "Changes requested"), ("human_review", "Human review"),
                        ("human_blocked", "Blocked on a human"), ("agent_blocked", "Blocked on an agent"),
@@ -2712,6 +2800,32 @@ def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) 
         add("infer either.")
     else:
         add("Nothing is missing a receipt.")
+    add("")
+
+    incomplete = [item for item in plan["integration"] if item["action"] == "receipt_incomplete"]
+    add(f"### Receipts with no content digest ({len(incomplete)})")
+    add("")
+    add("These carry an approval but record no approved path/blob pairs, so integration cannot")
+    add("verify the content. They are reported as incomplete, never silently repaired by re-diffing")
+    add("the ref. Reopen and run the review again.")
+    add("")
+    if incomplete:
+        add("| Task | Revision | Approved | Evidence |")
+        add("|---|---:|---|---|")
+        for item in incomplete:
+            add(f"| `{item['task']}` | {item.get('revision', 0)} | "
+                f"`{(item.get('source') or '-')[:12]}` | `{item.get('evidence') or '-'}` |")
+        add("")
+        add("```bash")
+        for item in incomplete:
+            add(f"loom transition {item['task']} --revision {item.get('revision', 0)} --to ready \\")
+            add(f"  --reason \"reopen: review receipt records no approved content digest; re-run the review\" --agent {implementer}")
+        add("```")
+        add("")
+        add("Then, per task: `loom claim` → `loom transition --to green --evidence <path>` →")
+        add("`loom ask --review-source <branch tip>`.")
+    else:
+        add("Every receipt records a content digest.")
     add("")
 
     review = plan["review"]
@@ -3189,6 +3303,11 @@ def cmd_tick(args, store: Store) -> int:
             elif action == "receipt_missing":
                 print(f"  receipt_missing {len(items)} task(s): reopen to ready with a reason, "
                       "then resubmit for review")
+                print("    " + ", ".join(item["task"] for item in items[:4])
+                      + (f" (+{len(items) - 4} more)" if len(items) > 4 else ""))
+            elif action == "receipt_incomplete":
+                print(f"  receipt_incomplete {len(items)} task(s): the receipt records no approved "
+                      "content digest; reopen with a reason and resubmit for review")
                 print("    " + ", ".join(item["task"] for item in items[:4])
                       + (f" (+{len(items) - 4} more)" if len(items) > 4 else ""))
             else:

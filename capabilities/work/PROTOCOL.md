@@ -160,9 +160,14 @@ loom answer <id> --question <ask-seq> --decision "approve|changes requested" --n
   changes-requested answer is requeued for rework.
 - The tick re-issues a request only for the current revision. A stale source from an older revision
   is reported `resubmit_required`, never attached to new work.
-- Integration is a receipt, not a merge. It is recorded automatically only when enabled and only
-  when the approved source is already an ancestor of the board's integration ref and its paths are
-  unchanged; everything else is reported as merge-needed, paths-diverged or receipt-missing.
+- Integration is a receipt, not a merge. Recording `reviewed` binds the receipt to the content it
+  approved: the changed path and blob pairs and a digest over them. Integration verifies those
+  blobs at the ref tip and fails naming the exact moved paths, instead of re-diffing a history
+  that may have moved. Receipts with no digest predate that binding, are reported incomplete, and
+  are never repaired silently. Integration is recorded automatically only when enabled and only
+  when the approved source is already an ancestor of the board's integration ref and its recorded
+  paths are unchanged; everything else is reported as merge-needed, paths-diverged,
+  receipt-incomplete or receipt-missing.
 - Requests addressed to a human are never answered by a worker.
 
 ## Event log
