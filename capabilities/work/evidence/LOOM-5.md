@@ -61,11 +61,36 @@ Additional: `test_a_claim_opens_its_attempt_in_the_same_write` (a refused claim 
 `test_repeated_spawn_failures_are_distinct_attempts`, `test_the_worker_brief_names_its_attempt`,
 `test_reconcile_keeps_a_launch_it_cannot_prove_is_reused`, and the updated legacy-launch tests.
 
+## Rework after review (answer event 1650, changes requested)
+
+The reviewer found two consumers I had missed, both still keying on `launch state == "pending"`,
+which this change stops writing:
+
+- `changes_requested_tasks` — the "is a worker still running on it?" guard. With the guard dead,
+  a changes-requested task owned by the scheduler worker was released while its worker was still
+  running, and a following pass claimed it again and started a second implementer beside the
+  first — the exact collision this task exists to remove.
+- `review_request_sweep` — the `reviewer_live` guard, same dead shape.
+
+Both now read `attempt_views()` / `live_attempts()`. Two regression tests launch a real sleeping
+worker through `tick` and drive the rework path, which the previous tests did not do:
+
+- `test_tick_holds_rework_while_the_worker_it_launched_is_running` — green, ask, changes requested:
+  the task stays green, the claim is kept, and a following `--max-implementer 2` pass starts no
+  second attempt (`Rework held (changes requested)`).
+- `test_a_live_reviewer_attempt_holds_the_request_sweep` — a request at the current revision
+  addressed to a known non-configured agent is reported `reviewer_live` rather than re-asked while
+  the reviewer attempt is live.
+
+Also taken: `next_attempt_id` is now called *inside* the claim's transaction, so its docstring
+matches the code (the store lock made the earlier placement safe, but the ordering was not
+self-evident).
+
 ## Verification
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s tests      # 228 tests, OK
+python3 -m unittest discover -s tests      # 230 tests, OK
 python3 validate_work.py                   # PASS (against the live registry)
 ./loom attempts --live                     # folds this worker's legacy launch correctly
 ./loom show loom/LOOM-5                    # prints the current attempt

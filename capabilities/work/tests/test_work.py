@@ -1778,6 +1778,56 @@ class WorkCLITest(unittest.TestCase):
         self.assertIn("Rework held", result.stdout)
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "green")
 
+    def test_tick_holds_rework_while_the_worker_it_launched_is_running(self):
+        # The scheduler launched this implementer; it is still asleep. Releasing its claim would
+        # let the same pass claim the task again and start a second implementer beside it.
+        self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0)
+        attempt = self.attempts("demo/W-1", live=True)[0]
+        self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "red",
+                    "--agent", "opencode/loom-worker", "--now", T0)
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "green",
+                    "--agent", "opencode/loom-worker", "--evidence", "evidence/W-1.md",
+                    "--now", T0)
+        source = self.commit()
+        request = self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.invoke("answer", "demo/W-1", "--question", request,
+                    "--decision", "changes requested", "--note", "Rework the error path",
+                    "--agent", "opencode/reviewer-agent", "--now", T0)
+
+        result = self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                             "--no-integrate", "--worker-command", "sh -c 'sleep 60'",
+                             "--now", T0).stdout
+        self.assertIn("Rework held (changes requested)", result)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "green")
+        # A following pass cannot claim it either: one task, one live implementer.
+        self.invoke("tick", "--apply", "--max-implementer", "2", "--max-reviewer", "0",
+                    "--no-integrate", "--worker-command", "sh -c 'sleep 60'", "--now", T0)
+        self.assertEqual([item["attempt"] for item in self.attempts("demo/W-1")],
+                         [attempt["attempt"]])
+        self.assertEqual(len(self.attempts("demo/W-1", live=True)), 1)
+
+    def test_a_live_reviewer_attempt_holds_the_request_sweep(self):
+        self.mark_green("--evidence", "evidence/W-1.md")
+        source = self.commit()
+        self.request_review(source, reviewer="opencode/reviewer-agent")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "1",
+                    "--worker-command", "sh -c 'sleep 60'",
+                    "--reviewer-identity", "opencode/reviewer-agent", "--now", T0)
+        reviewer = next(item for item in self.attempts("demo/W-1", live=True)
+                        if item["role"] == "reviewer")
+        # A request at this revision addressed to a known agent that is not the configured
+        # reviewer: the sweep would re-ask it, unless it can see the reviewer still working.
+        self.invoke("ask", "demo/W-1", "--to", "opencode/reviewer", "--question",
+                    "Review the submitted revision", "--review-source", source,
+                    "--review-evidence", "evidence/W-1.md", "--agent", "agent-b", "--now", T0)
+        result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                             "--no-integrate", "--worker-command", "sh -c 'sleep 60'",
+                             "--reviewer-identity", "opencode/reviewer-agent", "--now", T0).stdout
+        self.assertIn("reviewer_live", result)
+        self.assertEqual([item["attempt"] for item in self.attempts("demo/W-1", live=True)],
+                         [reviewer["attempt"]])
+
     def test_tick_does_not_reask_a_source_from_an_older_revision(self):
         self.mark_green("--evidence", "evidence/W-1.md")
         source = self.commit()

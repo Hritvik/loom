@@ -927,8 +927,8 @@ def cmd_claim(args, store: Store) -> int:
     bump(task, "claimed", now)
     # The attempt is allocated inside the claim's transaction: a claim without a run and a run
     # without a claim are the two halves of the drift that let a relaunch shadow a live worker.
-    attempt = next_attempt_id([record for _, record in store.read_events()], task["id"])
     with store.transaction():
+        attempt = next_attempt_id([record for _, record in store.read_events()], task["id"])
         store.commit(event="claim", task=task["id"], agent=agent, status="claimed",
                      revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
                      base_revision=args.revision, epoch=epoch, now=args.now)
@@ -1024,8 +1024,8 @@ def cmd_takeover(args, store: Store) -> int:
         "heartbeat": iso(now),
     }
     bump(task, "claimed", now)
-    attempt = next_attempt_id([record for _, record in store.read_events()], task["id"])
     with store.transaction():
+        attempt = next_attempt_id([record for _, record in store.read_events()], task["id"])
         store.commit(event="takeover", task=task["id"], agent=agent, status="claimed",
                      revision=task["revision"], lease_expires=task["claim"]["lease_expires"],
                      previous_agent=previous_agent, previous_epoch=previous_epoch,
@@ -1625,8 +1625,8 @@ def attempt_suffix(attempt_id) -> str:
 def next_attempt_id(records: list[dict], task_id: str) -> str:
     """The next free attempt identity for a task.
 
-    Read from the log inside the claim's own transaction, so the identity is allocated by the
-    same write that grants the claim and cannot be handed out twice.
+    Called inside the claim's own write transaction and read from the log there, so the identity
+    is allocated by the same write that grants the claim and cannot be handed out twice.
     """
     numbers = [attempt_number(record.get("attempt")) for record in records
                if record.get("event") == "attempt" and record.get("task") == task_id]
@@ -2140,6 +2140,11 @@ def sweep_approved_reviews(store: Store, now: dt.datetime, agent: str,
 def changes_requested_tasks(store: Store, registry: dict, now: dt.datetime) -> list[dict]:
     """Green tasks whose latest review request was answered `changes requested`."""
     items = []
+    views = attempt_views([record for _, record in store.read_events()])
+    # A worker that is still running keeps its task: releasing the claim under it would let the
+    # next pass start a second implementer beside it, which is the collision the attempt removes.
+    live_tasks = {item.get("task") for item in live_attempts(views)
+                  if (item.get("role") or "implementer") == "implementer"}
     for task in registry["tasks"]:
         if task.get("status") != "green":
             continue
@@ -2153,11 +2158,7 @@ def changes_requested_tasks(store: Store, registry: dict, now: dt.datetime) -> l
             continue
         owner = claim_owner(task)
         expiry = lease_expiry(task)
-        live = any(
-            record.get("event") == "launch" and record.get("task") == task["id"]
-            and record.get("role") == "implementer"
-            and record.get("state") == "pending" and launch_is_live(record)
-            for _, record in store.read_events())
+        live = task["id"] in live_tasks
         if owner == WORKER_IDENTITY and not live:
             action = "release"
         elif owner and expiry and expiry <= now:
@@ -2213,11 +2214,9 @@ def review_request_sweep(store: Store, registry: dict, now: dt.datetime, args) -
     known = KNOWN_AGENTS | set(args.known_agents or ())
     reviewer = args.reviewer_identity
     records = [record for _, record in store.read_events()]
-    live_reviewer_tasks = {
-        record.get("task") for record in records
-        if record.get("event") == "launch" and record.get("role") == "reviewer"
-        and record.get("state") == "pending" and launch_is_live(record)
-    }
+    views = attempt_views(records)
+    live_reviewer_tasks = {item.get("task") for item in live_attempts(views)
+                           if item.get("role") == "reviewer"}
     reask, blocked = [], []
     for task in registry["tasks"]:
         if task.get("status") != "green":
