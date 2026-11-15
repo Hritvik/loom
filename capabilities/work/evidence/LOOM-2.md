@@ -2,7 +2,7 @@
 
 Repository: `~/repositories/loom`
 Branch: `loom/loom-loom-2` (isolated worktree)
-Status: green, resubmitted after changes requested on review requests 1547 and 1592
+Status: green, resubmitted after changes requested on review requests 1547, 1592, 1924 and 1933
 
 Every check below was re-measured on the tree this file ships with, each beside the command that
 reproduces it. This submission changes this evidence file and nothing else, so the templates and the
@@ -96,7 +96,8 @@ Run from the worktree root unless a step says otherwise.
    - `WARN  loom/LOOM-2: registry says …, program says reviewed` — the registry-versus-program
      drift described in Limits. The registry side of the message tracks the task's current status,
      so this is the shape of the warning rather than one snapshot of it: it read `green` at
-     `82f8bcd` and reads `claimed` while a worker holds the claim.
+     `82f8bcd`, reads `green` again now that the review is recorded, and read `claimed` while a
+     worker held the claim.
 
    The rest is shared registry state, including 21 reviewed tasks whose receipts record no approved
    content digest. None of it comes from this diff.
@@ -110,9 +111,10 @@ Run from the worktree root unless a step says otherwise.
 
    The drift warning is the one place where "external to this diff" would be false: this task's own
    range edits `docs/work-items.md` and moves LOOM-1, LOOM-2 and LOOM-3 to `**Status.** Reviewed.`,
-   while the registry holds them green, claimed and green — so all three warn and the board text
-   came from this diff. It is recorded as a known limit in Limits rather than cleared by editing
-   three tasks' entries under this claim.
+   and two of those now disagree with the registry — LOOM-1 is `integrated` and LOOM-2 `green`.
+   LOOM-3 does not warn because its registry status is also `reviewed`, so the comparison passes;
+   it would warn again only while the two differ. Recorded as a known limit in Limits rather than
+   cleared by editing three tasks' entries under this claim.
 
 6. **The reviewed guarantee still holds.** The delta review's concern was that the engine moved
    after the approved commit. For this task's paths it did not move after the reviewed point:
@@ -140,15 +142,16 @@ Run from the worktree root unless a step says otherwise.
   and is a shared file in the
   commit guard, so this submission does not change it. **Recommended follow-up:** a task on
   `README.md` that adds one line pointing at `docs/artifacts.md` and `docs/adopting.md`.
-- **The program board's status lines drift from the registry.** `docs/work-items.md:7`, `:11` and
+- **Two program-board status lines drift from the registry.** `docs/work-items.md:7`, `:11` and
   `:15` mark LOOM-1, LOOM-2 and LOOM-3 `**Status.** Reviewed.` — text this task's range introduced
-  at `2be45cc` — while the registry holds them green, claimed and green. `validate_work.py:450-454`
-  warns on each. The board file is outside this task's declared write path, but a status line is a
+  at `2be45cc`. Two disagree with the registry today (LOOM-1 `integrated`, LOOM-2 `green`) and
+  `validate_work.py:450-454` warns on those two; LOOM-3 matches and does not warn, and would warn
+  again only while its registry status differs from the board line. The board file is outside this task's declared write path, but a status line is a
   projection of the registry and belongs to the board sync, not to a worker editing three tasks'
   entries to make its own warning disappear; doing that here would also fight the next claim and
   release. **Recommended follow-up:** the coordinator runs
   `./loom reconcile --board loom.program --apply --agent <coordinator>` so the three lines follow
-  the registry, after which all three warnings clear without a template change.
+  the registry, after which the two warnings clear without a template change.
 - **The contract registry is validated; the capability map is only cross-referenced — not
   validated.** `validate_work.py:check_contracts` checks the contract-registry shape and its
   copies: `kind` in `http|event`, a known `status`, an `id` ending `.v<version>`, `gate` naming a
@@ -170,6 +173,21 @@ Run from the worktree root unless a step says otherwise.
   `docs/adopting.md`, so LOOM-3 can commit it and should. This submission leaves the text alone rather than editing another task's deliverable
   under this claim. **Recommended follow-up:** give LOOM-3 the write path and have it fix the
   line, or add it to a documentation-cleanup task.
+
+## Rounds 1924 and 1933 (answers 1926, 1935)
+
+Both returned changes requested with the deliverable unchanged; every finding was in this file.
+
+- **1924:** 221 named as measured on the branch being submitted (it was 276 at the tip, and 221
+  belonged to a pre-rebase commit), 72 warnings where there were 78, a write-path overlap that no
+  longer existed, a README pointer at 437-438 instead of 476-477, and a `# empty` annotation on a
+  diff that had 104 added lines.
+- **1933:** a preamble anchoring every check to `82f8bcd`, a warning breakdown that subtracted to 70
+  from 78 and counted two aggregate warnings as task counts, the drift warning cited at 436-443
+  instead of 450-454, a write-path contradiction between the 1547 item and Limits, and five sections
+  where the capability map has six.
+
+All are corrected in the blocks above.
 
 ## Rework after review request 1592 (event 1608, changes requested)
 
