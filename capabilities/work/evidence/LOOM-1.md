@@ -3,13 +3,19 @@
 Repository: `~/repositories/loom`
 Status: green, submitted for independent review (round 4)
 
+> Redacted by LOOM-4. The commands below once quoted this portfolio's program names, a personal
+> handle and two private repository slugs. Those are now guarded by
+> `tests/test_boundary.py` and read from the operator's denylist, so this file describes what each
+> sweep looked for instead of repeating the names.
+
 ## Delivered
 
 - The portfolio integration map moved out of the engine to the content repository
-  (`portfolio-planning/capabilities/work/programs/identity-platform-integration.yaml`).
+  (`<content-repo>/capabilities/work/programs/<integration-map>.yaml`).
 - The Linear projection runbook moved with it; it names a specific workspace.
-- `README.md`: the ten-row program table and the Dutch ADR note are replaced by a three-repository
-  model (engine / content / contracts) and the environment variables that point at them.
+- `README.md`: the ten-row program table and the portfolio-specific ADR note are replaced by a
+  three-repository model (engine / content / contracts) and the environment variables that point at
+  them.
 - `AGENT-GUIDE.md`: the portfolio review-scope examples and the plan link are gone; "where things
   live" now points at `$WORK_CONTENT_HOME` and `$WORK_CONTRACTS`.
 - `PROTOCOL.md`: the service-ownership list is genericised.
@@ -17,8 +23,9 @@ Status: green, submitted for independent review (round 4)
 
 ## Verification
 
-- `grep -ri "IAM\|UMS\|Dutch\|hritvik"` over the engine's markdown returns only the example value
-  of `WORK_CONTENT_HOME`.
+- A case-insensitive grep for the portfolio's program names, a personal handle and its private
+  repository slugs over the engine's markdown returns only the example value of
+  `WORK_CONTENT_HOME`.
 - `python3 -m unittest discover -s tests` — 132 tests, all pass.
 - `python3 validate_work.py` — PASS; contracts are skipped unless `--contracts` is given.
 
@@ -46,8 +53,9 @@ tree and found fourteen hits. Fixed:
   and silently skipped two checks while the docs promised them.
 - Tests no longer use a person's name or this portfolio's program ids as fixtures.
 
-Verification: `git grep -n -I -E "hritvik|IAM|UMS|Dutch|portfolio-planning|dutch/S7"` returns
-nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validator PASS.
+Verification: a case-insensitive grep for the portfolio's program names, a personal handle and two
+private repository slugs over the tracked tree returns nothing outside `docs/adr/0001` and this
+evidence file. 134 tests pass; validator PASS.
 
 ## Second rework after re-review (event 819, changes requested)
 
@@ -73,13 +81,14 @@ pass replaced every remaining portfolio identifier in the engine with neutral on
   `test_linear_sync.py`
 - the personal repository link in the top-level README
 
-Verification: `grep -rn -I -E "\biam\b|\bums\b|\bdutch\b|portfolio-contracts"` over the tracked tree
-returns nothing outside `docs/adr/0001` and this evidence file. 134 tests pass; validator PASS.
+Verification: a case-insensitive grep for the portfolio's program names and one private repository
+slug over the tracked tree returns nothing outside `docs/adr/0001` and this evidence file. 134 tests
+pass; validator PASS.
 
-Correction (round 4): that claim was false. The pattern still matched `README.md:49`
-(`portfolio-contracts`), three `task` CLI examples still used `iam`, and BSD `grep -E` does not treat
-`\b` as a word boundary here, so `iam/W-15` never matched. The sweep now uses explicit character
-classes; see the fourth rework below.
+Correction (round 4): that claim was false. The pattern still matched `README.md:49` (a private
+repository slug), three `task` CLI examples still used a program name, and BSD `grep -E` does not
+treat `\b` as a word boundary here, so a namespaced id never matched. The sweep now uses explicit
+character classes; see the fourth rework below.
 
 ## Fourth rework after re-review (event 886, changes requested)
 
@@ -99,8 +108,9 @@ classes; see the fourth rework below.
 
 Verification at the commit named in the review request:
 
-- `git grep -n -I -E "(^|[^A-Za-z0-9_])(iam|ums|dutch)([^A-Za-z0-9_]|$)|[Hh]ritvik|portfolio-contracts|portfolio-planning"`
-  over the tracked tree returns only the engine's own clone URL (`README.md:22`,
-  `docs/adopting.md:8`), `docs/adr/0001` (the accepted limit recorded above) and this file.
+- `git grep` with explicit character classes for the portfolio's program names, a personal handle
+  and two private repository slugs, over the tracked tree, returns only the engine's own clone URL
+  (`README.md:22`, `docs/adopting.md:8`), `docs/adr/0001` (the accepted limit recorded above) and
+  this file.
 - `python3 validate_work.py` — PASS.
 - `python3 -m unittest discover -s tests` — 140 tests, all pass.

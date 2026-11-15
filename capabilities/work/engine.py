@@ -386,7 +386,7 @@ def cmd_create(args, store: Store) -> int:
     now = parse_now(args.now)
     registry = store.load()
     if not ID_PATTERN.match(args.id):
-        raise WorkError(f"invalid task id {args.id!r}; expected <program>/<NAME>, e.g. alpha/W-1")
+        raise WorkError(f"invalid task id {args.id!r}; expected <program>/<NAME>, e.g. <program>/W-1")
     if any(task["id"] == args.id for task in registry["tasks"]):
         raise WorkError(f"task {args.id} already exists; ids are never reused or renumbered")
     board = find_board(registry, args.board)
@@ -2693,7 +2693,6 @@ def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) 
     add("review again.")
     add("")
     if missing:
-        legacy = [item for item in missing if re.match(r"iam/W0[0-9]", item["task"])]
         add("| Task | Revision | Evidence |")
         add("|---|---:|---|")
         for item in missing:
@@ -2707,11 +2706,10 @@ def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) 
         add("")
         add("Then, per task: `loom claim` → `loom transition --to green --evidence <path>` →")
         add("`loom ask --review-source <branch tip>`.")
-        if legacy:
-            add("")
-            add(f"**Decision needed for the {len(legacy)} legacy `iam/W0*` tasks:** re-run them, or")
-            add("record them as accepted historical debt in a decisions entry. The engine should not")
-            add("infer either.")
+        add("")
+        add(f"**Decision needed for the {len(missing)} task(s) without a receipt:** re-run them, or")
+        add("record them as accepted historical debt in a decisions entry. The engine should not")
+        add("infer either.")
     else:
         add("Nothing is missing a receipt.")
     add("")

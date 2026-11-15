@@ -1571,7 +1571,7 @@ class WorkCLITest(unittest.TestCase):
 
     def test_tick_does_not_answer_a_request_addressed_to_a_human(self):
         self.mark_green()
-        self.request_review(self.commit(), reviewer="hritvik")
+        self.request_review(self.commit(), reviewer="owner")
         self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "2",
                     "--worker-command", "/usr/bin/true", "--now", T0)
         roles = [event.get("role") for event in self.ws.events() if event.get("event") == "launch"]

@@ -565,7 +565,7 @@ TOOL_DEFS = [
             "type": "object",
             "additionalProperties": False,
             "required": ["task"],
-            "properties": {"task": {"type": "string", "description": "Namespaced id, e.g. alpha/W-1"}},
+            "properties": {"task": {"type": "string", "description": "Namespaced id, e.g. <program>/W-1"}},
         },
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },

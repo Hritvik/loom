@@ -379,6 +379,22 @@ heartbeat ordering), shared-artifact ownership conflicts, cross-repo write-path 
 chain's sequence, hashes, timestamps and terminal state, and the capability-steward registry beside
 this home (artifact paths, owner ids, dormant owners).
 
+### Public boundary
+
+The engine ships to repositories that share none of this portfolio's identities, so the suite
+enforces the boundary instead of an evidence file claiming it:
+
+| Check | Fails when |
+|---|---|
+| `tests/test_boundary.py` (source) | a shipped module carries a task-id literal, branches on a program namespace, or defaults `--program`/`--focus` to one |
+| `tests/test_boundary.py` (tree) | a tracked file holds an absolute home path or a personal mailbox |
+| `LOOM_BOUNDARY_DENYLIST` sweep | a name the operator guards appears in a tracked file |
+
+The denylist lives outside this repository: point `LOOM_BOUNDARY_DENYLIST` at a file with one
+literal per line (`#` comments allowed). Without it the sweep skips with a pointer, so a public
+checkout still runs its suite. Examples in source use `<program>/<NAME>`; examples in docs and
+tests use generic programs and reserved example domains.
+
 ## Messages
 
 Claims say who is working; messages say what is blocking. A question is an event, not a chat

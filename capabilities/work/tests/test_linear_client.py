@@ -102,7 +102,7 @@ class LinearClientTest(unittest.TestCase):
     def test_issue_reads_priority_and_labels(self):
         self.respond({"data": {"issues": page([{
             **issue(), "priority": 2,
-            "labels": {"nodes": [{"id": "label-1", "name": "iam"}]},
+            "labels": {"nodes": [{"id": "label-1", "name": "alpha"}]},
         }])}})
         row = next(self.client.issues("team", "project"))
         self.assertEqual(row["priority"], 2)
