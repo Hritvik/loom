@@ -14,7 +14,8 @@ and tracked files that carry a name the operator guards.
   detector still bites:
   - **source** — AST scan of every shipped module (`engine.py`, `store.py`, `loom`,
     `validate_work.py`, the MCP and A2A servers, the Linear modules) for a task-id literal, a
-    comparison against a namespace literal, a regex branch on `<program>/…`, or a
+    comparison against a namespace literal, a prefix branch on `<program>/` (a `.startswith`, a
+    `re.match`, or `id.split("/")[0]` compared), a regex branch on `<program>/…`, or a
     `--program`/`--namespace`/`--focus` default that names a program.
   - **tree** — every tracked file is checked for an absolute home path (`/Users/<name>`,
     `/home/<name>`, `/root/<name>`, `C:\Users\<name>` in either separator style) and for a mailbox
@@ -133,11 +134,77 @@ python3 validate_work.py
 PASS
 ```
 
+## Review round three — the source detectors proved, prefix branches caught
+
+Review of `eb3deed` accepted criteria 2 and 3 and found two gaps in criterion 1:
+
+1. The file claimed the detectors were exercised on synthetic source, but only the tree detectors
+   had such a test. Replacing `TASK_ID_LITERAL` with a never-matching pattern and planting a real
+   `acmewidget/W-1` in `engine.py` left the suite green: the source detectors could become no-ops
+   under a real leak, the same defect `d27dfd2` fixed for the tree detectors.
+2. A branch on the namespace *prefix* was missed. `task["id"].startswith("acmewidget/")`,
+   `re.match(r"^acmewidget/", task["id"])` and `task["id"].split("/")[0] == "acmewidget"` each name
+   a program without spelling a whole task id, and all three passed.
+
+Fixed in `6ee4396`:
+
+- `SourceDetectorTest` exercises all three source detectors on synthetic source: a task id is found;
+  placeholders, agent identities and mime types are not; every prefix-branch shape is found; generic
+  task-id code (`id.split("/", 1)[0] + "/"`, `re.fullmatch(r"[a-z][a-z0-9.-]{2,63}", program)`,
+  `id.startswith("W-")` — a task-name prefix, not a namespace) is not; an option default names a
+  program while a required option does not.
+- `namespace_branches` now treats a task-id expression as a namespace source. It flags
+  `.startswith`/`.endswith`/`.split`/`.partition`/`.removeprefix` on an id (or on the namespace taken
+  from an id) when the literal names a namespace, a comparison between such an expression and a
+  namespace literal, `"…/" in task["id"]`, and `re.match(r"^…/", id)`.
+
+The no-op control, on a clean copy with `TASK_ID_LITERAL` replaced by `r"(?!)"` and nothing planted:
+
+```
+python3 -m unittest tests.test_boundary
+FAILED (failures=1, skipped=2)
+  test_namespaced_literals_finds_a_task_id: [] != ['acmewidget/W-1']
+```
+
+The reviewer's three examples plus a full task-id literal, planted in `engine.py` of a scratch copy:
+
+```
+python3 -m unittest tests.test_boundary.EngineSourceTest
+FAILED (failures=2)
+  engine.py:3869  'acmewidget/W-1'
+  engine.py:3871  task['id'].startswith('acmewidget/')
+  engine.py:3873  re.match('^acmewidget/', task['id'])
+  engine.py:3875  task['id'].split('/')[0] == 'acmewidget'
+```
+
+`names_a_namespace`, the literal test behind the prefix branch, on namespace and generic literals:
+
+```
+True   'acmewidget/'   True  '^acmewidget/'   True   'acmewidget'
+False  '/'             False '[a-z][a-z0-9.-]{2,63}'
+False  '^[a-z][a-z0-9-]{1,31}/[A-Za-z0-9._-]+$'
+```
+
+`'capabilities/work'` reads as a namespace too, which is why a prefix literal is only judged when it
+is compared against an expression that holds a task id; the generic patterns above are not.
+
+```
+python3 -m unittest tests.test_boundary -v
+Ran 19 tests ... OK (skipped=2)
+
+python3 -m unittest discover -s tests
+Ran 241 tests in 70.6s
+OK (skipped=2)
+
+python3 validate_work.py
+PASS
+```
+
 ## Acceptance
 
 | Criterion | Where it is proved |
 |---|---|
-| A structural test fails on a literal program-namespace id or a branch on one | `EngineSourceTest.test_engine_source_carries_no_task_id_literal`, `…_does_not_branch_on_a_namespace`; red run above |
+| A structural test fails on a literal program-namespace id or a branch on one | `EngineSourceTest.test_engine_source_carries_no_task_id_literal`, `…_does_not_branch_on_a_namespace`; `SourceDetectorTest` proves both detectors on synthetic source, including prefix-only branches; red run and no-op control above |
 | A test fails on an absolute home path or a personal email in tracked files | `TrackedTreeTest`; `TreeDetectorTest` for both separator styles and for reserved versus reachable mailboxes; scratch run above |
 | The private denylist runs without the list entering the public repo | `PrivateDenylistTest`: env-var path, outside-repo assertion, skip-with-pointer, synthetic mechanism tests |
 
@@ -167,6 +234,12 @@ reports them and fails.
 - **The source scan covers `capabilities/work` Python only.** Shell hooks (`.githooks/`,
   `capabilities/work/hooks/`) and templates outside it are covered by the tracked-tree checks, which
   catch paths, mailboxes and denylisted names but cannot see a namespace branch.
+- **The branch scan follows an id one step.** It sees a literal compared against a task id, against
+  the namespace taken from one (`id.split("/")[0]`), or used as a prefix/regex/membership test on
+  one. A namespace copied into a variable and compared later, a pattern built by concatenation
+  (`re.match(r"^" + name + "/", id)`), and a module-level compiled pattern applied as
+  `pattern.match(id)` are generic code that the scan cannot tell from correct code. The literal scan
+  still catches the program name itself wherever it appears in source.
 - **Option defaults** are checked for `--program`, `--namespace` and `--focus`. An option invented
   under another name could still default to a named program; the literal and branch scans would only
   catch it if the value looked like a task id.
