@@ -163,7 +163,12 @@ duplicated columns. A mutation commits the registry and its event in one transac
 
 The commit is differential: the store remembers the body it read for each document and writes
 only the ones the command changed, so a claim updates one task row instead of rewriting the
-registry. The event log is unchanged by this — it was and remains the audit chain.
+registry. What that saves is the write — one statement and 16 KiB of WAL — not the in-memory
+pass that compares documents, which is still linear in registry size. The event log is unchanged
+by this — it was and remains the audit chain.
+
+`export` renders tasks, boards, claims and edges in rowid order, so the same database exports the
+same bytes in every process, which is what makes it diffable in git and usable as a genesis digest.
 
 ```bash
 ./loom list --ready                                                    # default store

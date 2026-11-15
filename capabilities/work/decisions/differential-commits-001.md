@@ -3,6 +3,7 @@
 Status: accepted
 Owner: engine maintainer
 Date: 2026-11-15
+Revised: 2026-11-15 after review 1718 — edge order fixed, durable-write reading stated
 Task: loom/LOOM-11
 
 ## Context
@@ -26,7 +27,7 @@ that record and writes only what differs:
 - a changed document is `UPDATE`d in place, so it keeps its position in the registry order;
 - a new document is appended with `INSERT`;
 - a document absent from the registry is `DELETE`d;
-- edges are diffed as a set of `(from, to, kind)`;
+- edges are diffed as a set of `(from, to, kind)` but read and inserted in order (see below);
 - `meta` is written only when a value changed.
 
 The row decides whether it exists (`UPDATE`, then `INSERT` if it matched nothing), so a stale cache
@@ -35,27 +36,39 @@ cannot lose or duplicate a document. A caller that assigns `registry` without lo
 rows are still removed. The new baseline is adopted only after `COMMIT`: a rolled-back commit
 leaves the store's memory exactly as it was, so a retry writes its change again.
 
+Registry order is rowid order, for edges as for documents. `load()` reads edges into a list and
+`_sync_edges` inserts along the registry list; the set is the difference, never the iteration order.
+Order is part of the contract because `export` renders it and `genesis` digests `export_bytes`, and
+a set-derived order changes with `PYTHONHASHSEED` — the first cut of this change did exactly that
+and was caught in review (`evidence/LOOM-11.md`, revision after `8bacbf7`).
+
 Nothing else moved. The event log, its hash chain, the external checkpoint, `snapshot()` and the
 load-decide-commit CLI contract are unchanged; the event was and remains the audit chain.
 
-## Measured on the live registry
+## Measured
 
-One-document commit, median of twelve, against a copy of `~/.local/state/loom/work.db`:
+One-document commit against a copy of the live `~/.local/state/loom/work.db` (213 tasks, 24 boards,
+147 edges), median of twelve. "Before" is the same tree at `31ef45e`. Both runs use the same
+harness; the commit excluding `load` is the span the store itself owns.
 
 | | before | after |
 |---|---|---|
-| write statements per commit | 395 | 2 |
+| document write statements per commit | 391 | 1 |
 | WAL written per commit | 241 KiB | 16 KiB |
-| write path | 2.38 ms | 0.97 ms |
-| whole commit, load included | 4.07 ms | 2.36 ms |
+| commit, excluding `load` | 2.71 ms | 1.25 ms |
+| commit, `load` included | 3.74 ms | 2.29 ms |
 
-Synthetic registries (10 / 213 / 1000 tasks) show the same flat write with a linear `load`:
+Synthetic registries built from real task bodies, same commit measured at three sizes:
 
-| tasks | statements | WAL per commit | write path |
+| tasks | document writes before → after | WAL per commit | commit ms before → after |
 |---|---|---|---|
-| 10 | 2 / 2 | 48 → 16 KiB | 0.10 → 0.05 ms |
-| 213 | 434 → 2 | 125 → 16 KiB | 1.67 → 0.59 ms |
-| 1000 | 2008 → 2 | 439 → 16 KiB | 7.93 → 2.73 ms |
+| 10 | 48 → 1 | 48 → 16 KiB | 0.47 → 0.33 |
+| 200 | 375 → 1 | 221 → 16 KiB | 2.51 → 1.15 |
+| 1000 | 1175 → 1 | 507 → 16 KiB | 7.61 → 3.24 |
+
+What reaches the disk is flat. What still grows is memory work: `load` (0.10 / 0.97 / 2.90 ms at
+10 / 200 / 1000 tasks) and the change-detection pass (0.10 / 0.92 / 2.96 ms). Total commit latency
+therefore still rises with registry size; the durable cost does not.
 
 ## Alternatives considered
 
@@ -72,12 +85,21 @@ Synthetic registries (10 / 213 / 1000 tasks) show the same flat write with a lin
 
 ## Consequences
 
-- Commit amplitude follows the change set; the durable cost is flat in registry size.
-- The change-detection pass is still linear in registry size: one JSON serialisation per document,
-  ~0.4 ms per 200 KiB, on top of the `load` the CLI already performs. It is CPU, not I/O, and it
-  disappears if the CLI ever stops handing over a whole registry.
+- Commit amplitude follows the change set; the durable cost is flat in registry size. This is the
+  reading this decision claims, and it is the one the event dispatcher pays per cursor advance:
+  one statement and 16 KiB per event, not 391 and 241 KiB.
+- Total commit latency is **not** flat. The change-detection pass is linear in registry size: one
+  JSON serialisation per document, plus the `load` the CLI already performs. It is CPU, not I/O,
+  and it disappears if the CLI ever stops handing over a whole registry. Anyone reading "commit
+  cost does not grow linearly" as wall time should read it as a statement about durable writes.
 - A document that is byte-identical after a round trip is not written, so format drift in `_dump`
   cannot cause a spurious write.
+- Registry order is rowid order and no longer depends on process hash seed, so `export` and the
+  `genesis` digest are reproducible. New rows still land at the end of their table: a document
+  inserted mid-list in memory is written after the existing rows. Not reachable through a command
+  (the CLI appends), but `migrate --force` into a populated database keeps the target's rowids, so
+  exported order can differ from the source file's. A position column would fix it and would be
+  stripped by `_upgrade`, which rebuilds any document table with columns past `id, body`.
 - `docs/adr/0002-store-is-a-document-log.md` still says a whole-registry save rewrites every
   document. That paragraph is now stale and needs a maintainer edit; this task's write path is
   `capabilities/work`, so the ADR itself was left alone.

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -539,6 +541,87 @@ class StoreTest(unittest.TestCase):
         finally:
             sqlite.close()
         self.assertEqual([edge["from"] for edge in after["edges"]], ["demo/W-2"])
+
+    def _with_edges(self, edges: list[dict]) -> SqliteStore:
+        """A saved store whose registry holds `edges`, in that list order."""
+        sqlite = self._saved()
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                registry["edges"] = edges
+                sqlite.save()
+        except BaseException:
+            sqlite.close()
+            raise
+        return sqlite
+
+    def test_edge_order_follows_the_registry_and_not_a_set(self):
+        """Registry order is rendered by `export` and digested by `genesis`; keep it stable."""
+        edges = [{"from": f"demo/W-{index}", "to": "demo/W-4", "kind": "depends-on"}
+                 for index in range(1, 4)]
+        sqlite = self._with_edges(edges)
+        try:
+            first = sqlite.export_bytes()
+            self.assertEqual([(edge["from"], edge["to"]) for edge in sqlite.load()["edges"]],
+                             [(edge["from"], edge["to"]) for edge in edges])
+            with sqlite.lock():
+                sqlite.load()
+                with Writes(sqlite) as writes:
+                    sqlite.save()
+                again = sqlite.export_bytes()
+            self.assertEqual(writes.to("edges"), [])
+        finally:
+            sqlite.close()
+        self.assertEqual(again, first, "an unchanged edge set changed the export")
+
+    def test_edge_order_survives_a_reload_in_list_order(self):
+        """An edge added before the others in registry order must not leapfrog the rows on disk."""
+        sqlite = self._with_edges([{"from": "demo/W-1", "to": "demo/W-2", "kind": "depends-on"}])
+        try:
+            with sqlite.lock():
+                registry = sqlite.load()
+                registry["edges"] = [
+                    {"from": "demo/W-2", "to": "demo/W-3", "kind": "depends-on"},
+                    {"from": "demo/W-3", "to": "demo/W-4", "kind": "depends-on"},
+                ] + registry["edges"]
+                sqlite.save()
+                after = sqlite.load()
+        finally:
+            sqlite.close()
+        self.assertEqual([(edge["from"], edge["to"]) for edge in after["edges"]],
+                         [("demo/W-1", "demo/W-2"), ("demo/W-2", "demo/W-3"),
+                          ("demo/W-3", "demo/W-4")],
+                         "new edges landed out of order")
+
+    def test_export_bytes_do_not_depend_on_the_process(self):
+        """`export` is the diffable state and the genesis digest; PYTHONHASHSEED must not reach it.
+
+        Each reader is a fresh interpreter with a different hash seed, which is what randomises
+        set iteration order between commands.
+        """
+        edges = [{"from": f"demo/W-{index}", "to": "demo/W-4", "kind": "depends-on"}
+                 for index in range(1, 4)]
+        sqlite = self._with_edges(edges)
+        try:
+            expected = hashlib.sha256(sqlite.export_bytes()).hexdigest()
+            database = str(sqlite.db_path)
+        finally:
+            sqlite.close()
+        roots = []
+        for seed in ("0", "1", "2", "3"):
+            reader = subprocess.run(
+                [sys.executable, "-c",
+                 "import hashlib, sys\n"
+                 f"sys.path.insert(0, {str(WORK)!r})\n"
+                 "from pathlib import Path\n"
+                 "from store import SqliteStore\n"
+                 f"store = SqliteStore(Path({str(self.ws.root)!r}), Path({database!r}))\n"
+                 "print(hashlib.sha256(store.export_bytes()).hexdigest())\n"],
+                capture_output=True, text=True, env={**os.environ, "PYTHONHASHSEED": seed},
+            )
+            self.assertEqual(reader.returncode, 0, reader.stderr)
+            roots.append((seed, reader.stdout.strip()))
+        self.assertEqual({digest for _, digest in roots}, {expected}, roots)
 
     def test_a_registry_assigned_without_a_load_replaces_the_stored_documents(self):
         """`loom migrate --force` sets `registry` directly; stale rows must still go."""

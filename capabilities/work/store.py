@@ -461,8 +461,12 @@ class SqliteStore(Store):
                           self.connection.execute("SELECT id, body FROM boards ORDER BY rowid")]
             task_rows = [(row["id"], row["body"]) for row in
                          self.connection.execute("SELECT id, body FROM tasks ORDER BY rowid")]
-            edge_rows = {(row["from_task"], row["to_task"], row["kind"]) for row in
-                         self.connection.execute("SELECT from_task, to_task, kind FROM edges")}
+            # Edges are read in rowid order, like the documents. Registry order is part of what
+            # `export` renders and what `genesis` digests, so it must not depend on set iteration
+            # (which PYTHONHASHSEED randomises per process). The set below is membership only.
+            edge_rows = [(row["from_task"], row["to_task"], row["kind"]) for row in
+                         self.connection.execute(
+                             "SELECT from_task, to_task, kind FROM edges ORDER BY rowid")]
             claim_rows = [(row["artifact"], row["body"]) for row in
                           self.connection.execute("SELECT artifact, body FROM claims ORDER BY rowid")]
             data = {
@@ -471,14 +475,15 @@ class SqliteStore(Store):
                 "updated": meta.get("updated", ""),
                 "boards": [json.loads(body) for _, body in board_rows],
                 "tasks": [json.loads(body) for _, body in task_rows],
-                "edges": [{"from": edge[0], "to": edge[1], "kind": edge[2]} for edge in edge_rows],
+                "edges": [{"from": source, "to": target, "kind": kind}
+                          for source, target, kind in edge_rows],
                 "claims": [json.loads(body) for _, body in claim_rows],
             }
             self._stored = {
                 "meta": meta,
                 "boards": dict(board_rows),
                 "tasks": dict(task_rows),
-                "edges": edge_rows,
+                "edges": set(edge_rows),
                 "claims": dict(claim_rows),
             }
         self.registry = data
@@ -526,14 +531,29 @@ class SqliteStore(Store):
         return current
 
     def _sync_edges(self, edges, stored: set) -> set:
-        current = {(edge["from"], edge["to"], edge.get("kind", "depends-on")) for edge in edges}
-        for edge in current - stored:
+        """Write only the edges the registry added or dropped, in registry order.
+
+        The difference is a set, but the inserts walk the registry list, so newly added edges keep
+        the order the command gave them instead of the arbitrary order `set` iteration produced.
+        """
+        current: list[tuple[str, str, str]] = []
+        seen: set = set()
+        for edge in edges:
+            key = (edge["from"], edge["to"], edge.get("kind", "depends-on"))
+            if key in seen:
+                continue
+            seen.add(key)
+            current.append(key)
+        for key in current:
+            if key in stored:
+                continue
             self.connection.execute(
-                "INSERT OR IGNORE INTO edges (from_task, to_task, kind) VALUES (?, ?, ?)", edge)
-        for edge in stored - current:
-            self.connection.execute(
-                "DELETE FROM edges WHERE from_task = ? AND to_task = ? AND kind = ?", edge)
-        return current
+                "INSERT OR IGNORE INTO edges (from_task, to_task, kind) VALUES (?, ?, ?)", key)
+        for key in stored:
+            if key not in seen:
+                self.connection.execute(
+                    "DELETE FROM edges WHERE from_task = ? AND to_task = ? AND kind = ?", key)
+        return seen
 
     def _write_registry(self) -> dict:
         """Persist the registry difference and return the rows the database now holds."""
