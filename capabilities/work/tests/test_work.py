@@ -1843,6 +1843,27 @@ class WorkCLITest(unittest.TestCase):
         self.assertEqual(passes[1], 2, passes)
         self.assertEqual(passes[2], 2, passes)
 
+    def test_a_closed_launch_still_holds_its_slot_while_the_process_runs(self):
+        import datetime as dt
+        from engine import process_start
+        from store import iso
+
+        store = self.ws.store()
+        try:
+            with store.lock():
+                opened = store.append_event(
+                    event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                    role="implementer", state="pending", pid=os.getpid(),
+                    started_at=iso(process_start(os.getpid())), revision=0, now=T0)
+                store.append_event(
+                    event="launch", task="demo/W-1", agent="opencode/loom-worker",
+                    role="implementer", state="done", pid=os.getpid(), revision=1,
+                    closes=opened["seq"], now=T0)
+        finally:
+            store.close()
+        preview = self.invoke("tick", "--max-implementer", "2", "--now", T0).stdout
+        self.assertIn("capacity: implementer 1/2", preview)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",

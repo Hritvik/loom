@@ -2668,9 +2668,12 @@ def cmd_tick(args, store: Store) -> int:
     # a live launch is an agent actually running. Deriving capacity from claims let a released or
     # regressed claim free a slot while its worker kept running, and a green task's claim shrink
     # the pool while its review was pending.
+    # A launch closed as done or failed can still have a live process: the worker may be winding
+    # down after its task advanced. Counting the process, not the bookkeeping state, keeps the
+    # slot until the agent has actually exited.
     live_launches = [
         record for record in latest_launch.values()
-        if record.get("state") == "pending" and launch_is_live(record)
+        if record.get("pid") and launch_is_live(record)
     ]
     active = {role: 0 for role in ROLES}
     for record in live_launches:
