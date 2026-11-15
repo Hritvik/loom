@@ -6,8 +6,9 @@ never travel with it, and each has a test here:
 
 1. **A program namespace in engine source.** A task id is `<program>/<NAME>`; naming a real program,
    or branching on one (`task.get("program") == "…"`, `re.match(r"…/W0[0-9]", id)`), binds the
-   engine to one portfolio. Engine source uses `<program>` placeholders, and any literal that looks
-   like a task id fails.
+   engine to one portfolio. A branch on the prefix alone counts too: `id.startswith("…/")`,
+   `re.match(r"^…/", id)` and `id.split("/")[0] == "…"` name a program without spelling a whole task
+   id. Engine source uses `<program>` placeholders, and any literal that looks like a task id fails.
 2. **An absolute home path or a personal email in a tracked file.** Both name a person's machine or
    mailbox. Use `~`, `$HOME` or a reserved example domain instead.
 3. **The names that the operator guards.** Those live in a denylist *outside* this repository; the
@@ -46,6 +47,26 @@ TASK_ID_LITERAL = re.compile(
 NAMESPACE_NAMES = {
     "program", "namespace", "program_id", "programid", "context_id", "contextid",
 }
+
+# The namespace half of a task id. A prefix branch tests a task id against one of these, whether or
+# not the literal carries the rest of an id: `startswith("widget/")`, `re.match(r"^widget/", id)`.
+NAMESPACE_PREFIX = re.compile(r"(?<![A-Za-z0-9_/])[a-z][a-z0-9.-]{0,62}/")
+# A namespace with no separator: the half you get from `id.split("/")[0]`. Task names start
+# uppercase, so a bare lowercase literal compared against a task id names a program.
+NAMESPACE_WORD = re.compile(r"[a-z][a-z0-9._-]{0,62}")
+
+# Keys and expressions that hold a task id. Their prefix is the program namespace. Any field named
+# `id` counts: a literal compared against an id is a branch on one portfolio's data, which is the
+# binding this test forbids, whether the id names a task, a board or a program.
+TASK_ID_KEYS = {"id", "task_id", "taskid", "identifier", "task"}
+TASK_ID_NAMES = {"task_id", "taskid", "identifier"}
+
+# Methods that take a literal and compare it against (a piece of) the string they are called on.
+STRING_METHODS = {"startswith", "endswith", "split", "partition", "removeprefix",
+                  "removesuffix", "rsplit", "rpartition"}
+
+# Methods that extract the namespace from a task id.
+SPLIT_METHODS = {"split", "rsplit", "partition", "rpartition"}
 
 # Options a public engine must never default to a named program or task.
 NAMESPACE_OPTIONS = {"--program", "--namespace", "--focus"}
@@ -149,6 +170,43 @@ def is_namespace_target(node: ast.AST) -> bool:
     return False
 
 
+def _holds_task_id(node: ast.AST) -> bool:
+    """True when the expression is a task id: `task["id"]`, `task.get("id")`, `task.id`."""
+    if isinstance(node, ast.Name):
+        return node.id.lower() in TASK_ID_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr.lower() in TASK_ID_KEYS
+    if isinstance(node, ast.Subscript):
+        key = node.slice
+        return (isinstance(key, ast.Constant) and isinstance(key.value, str)
+                and key.value.lower() in TASK_ID_KEYS)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+        first = node.args[0] if node.args else None
+        return (isinstance(first, ast.Constant) and isinstance(first.value, str)
+                and first.value.lower() in TASK_ID_KEYS)
+    return False
+
+
+def is_namespace_of_task_id(node: ast.AST) -> bool:
+    """True for `<task id>.split("/")[0]` and friends: the namespace, derived from an id."""
+    if not isinstance(node, ast.Subscript):
+        return False
+    call = node.value
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            and call.func.attr in SPLIT_METHODS and _holds_task_id(call.func.value)):
+        return False
+    separator = call.args[0] if call.args else None
+    if separator is not None and not (isinstance(separator, ast.Constant)
+                                      and separator.value in {"/", "\\"}):
+        return False
+    return isinstance(node.slice, ast.Constant) and node.slice.value == 0
+
+
+def names_a_namespace(value: str) -> bool:
+    """True when a literal names a program namespace: `widget/`, `^widget/`, `widget`."""
+    return bool(NAMESPACE_PREFIX.search(value)) or bool(NAMESPACE_WORD.fullmatch(value))
+
+
 def _string_constants(node: ast.AST) -> list[ast.Constant]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return [node]
@@ -165,24 +223,38 @@ def namespace_branches(tree: ast.AST, source: str = "") -> list[tuple[int, str]]
         if isinstance(node, ast.Compare):
             operands = [node.left, *node.comparators]
             for index, operand in enumerate(operands):
-                if not _string_constants(operand):
+                constants = _string_constants(operand)
+                if not constants:
                     continue
-                if any(is_namespace_target(other)
-                       for position, other in enumerate(operands) if position != index):
+                others = [other for position, other in enumerate(operands) if position != index]
+                if any(is_namespace_target(other) or is_namespace_of_task_id(other)
+                       for other in others):
                     found.append((node.lineno, ast.unparse(node)))
+                    break
+                if any(_holds_task_id(other) and names_a_namespace(constant.value)
+                       for other in others for constant in constants):
+                    found.append((node.lineno, ast.unparse(node)))
+                    break
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
         method = node.func.attr
-        if method in {"startswith", "endswith", "split", "partition", "removeprefix",
-                      "removesuffix"} and is_namespace_target(node.func.value):
-            if any(isinstance(argument, ast.Constant) and isinstance(argument.value, str)
-                   and argument.value for argument in node.args):
+        target = node.func.value
+        if method in STRING_METHODS:
+            values = [argument.value for argument in node.args
+                      if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                      and argument.value]
+            if is_namespace_target(target) and values:
+                found.append((node.lineno, ast.unparse(node)))
+            elif (any(_holds_task_id(part) for part in ast.walk(target))
+                  and any(names_a_namespace(value) for value in values)):
                 found.append((node.lineno, ast.unparse(node)))
         if (method in {"match", "search", "fullmatch", "findall", "sub"}
                 and isinstance(node.func.value, ast.Name) and node.func.value.id == "re"
                 and node.args and isinstance(node.args[0], ast.Constant)
                 and isinstance(node.args[0].value, str)
-                and TASK_ID_LITERAL.search(node.args[0].value)):
+                and (TASK_ID_LITERAL.search(node.args[0].value)
+                     or (names_a_namespace(node.args[0].value)
+                         and any(_holds_task_id(argument) for argument in node.args[1:])))):
             found.append((node.lineno, ast.unparse(node)))
     return found
 
@@ -272,6 +344,91 @@ def _scan_sources(finder) -> list[Hit]:
 # --------------------------------------------------------------------------
 # 1. Engine source names no program
 # --------------------------------------------------------------------------
+
+
+class SourceDetectorTest(unittest.TestCase):
+    """The three source detectors are exercised on synthetic source.
+
+    Without this, a detector that has stopped biting looks exactly like a clean module: the
+    real-source tests pass because no literal names a program. Review of `eb3deed` replaced
+    `TASK_ID_LITERAL` with a never-matching pattern and planted a real task id in `engine.py`; the
+    suite stayed green. The fixtures below are assembled from parts because this file is itself
+    tracked and swept for the operator's guarded names.
+    """
+
+    NAMESPACE = "acme" + "widget"
+
+    def scan(self, detector, source: str) -> list[tuple[int, str]]:
+        return detector(ast.parse(source), source)
+
+    def test_namespaced_literals_finds_a_task_id(self):
+        task_id = self.NAMESPACE + "/" + "W-1"
+        hits = self.scan(namespaced_literals, f"LIMIT = {task_id!r}\n")
+        self.assertEqual([token for _, token in hits], [task_id])
+
+    def test_namespaced_literals_ignores_placeholders_and_identities(self):
+        source = (
+            'A = "<program>/<NAME>"\n'
+            'B = "<program>/W-1"\n'
+            'C = "opencode/loom-worker"\n'
+            'D = "text/plain"\n'
+            'E = "mcp/server.py"\n'
+        )
+        self.assertEqual(self.scan(namespaced_literals, source), [])
+
+    def test_namespace_branches_finds_every_shape_of_prefix_branch(self):
+        namespace = self.NAMESPACE
+        cases = {
+            "dict lookup compared": f'if task.get("program") == {namespace!r}: pass\n',
+            "regex on a task id":
+                f'import re\nif re.match(r"^{namespace}/", task["id"]): pass\n',
+            "regex on a task's id field":
+                f'import re\nif re.match(r"^{namespace}/W[0-9]", item["task"]): pass\n',
+            "startswith on a task id":
+                f'if task["id"].startswith("{namespace}/"): pass\n',
+            "bare prefix on a task id":
+                f'if task["id"].startswith({namespace!r}): pass\n',
+            "startswith on a namespace taken from a task id":
+                f'if task["id"].split("/")[0].startswith({namespace!r}): pass\n',
+            "split then compare":
+                f'if task["id"].split("/")[0] == {namespace!r}: pass\n',
+            "rsplit then compare":
+                f'if task["id"].rsplit("/", 1)[0] == {namespace!r}: pass\n',
+            "membership on a task id":
+                f'if "{namespace}/" in task["id"]: pass\n',
+        }
+        for label, source in cases.items():
+            with self.subTest(shape=label):
+                self.assertTrue(self.scan(namespace_branches, source),
+                                f"{label} was not seen as a namespace branch: {source.strip()}")
+
+    def test_namespace_branches_ignores_generic_task_id_code(self):
+        source = (
+            'import re\n'
+            'namespace = task["id"].split("/", 1)[0]\n'
+            'if dep.startswith(namespace + "/"):\n    pass\n'
+            'if a.startswith(b + "/"):\n    pass\n'
+            'if re.fullmatch(r"[a-z][a-z0-9.-]{2,63}", program):\n    pass\n'
+            'if task["id"] == other:\n    pass\n'
+            'if task["id"].startswith("W-"):\n    pass\n'
+            'if task["id"].split("/"):\n    pass\n'
+        )
+        self.assertEqual(self.scan(namespace_branches, source), [])
+
+    def test_namespace_defaults_finds_a_named_default(self):
+        for option in sorted(NAMESPACE_OPTIONS):
+            with self.subTest(option=option):
+                source = f"parser.add_argument({option!r}, default={self.NAMESPACE!r})\n"
+                self.assertTrue(self.scan(namespace_defaults, source),
+                                f"{option} with a named default was not seen")
+
+    def test_namespace_defaults_ignores_a_required_option(self):
+        source = (
+            'parser.add_argument("--program", required=True)\n'
+            'parser.add_argument("--namespace", default=None)\n'
+            'parser.add_argument("--depth", default="3")\n'
+        )
+        self.assertEqual(self.scan(namespace_defaults, source), [])
 
 
 class EngineSourceTest(unittest.TestCase):
