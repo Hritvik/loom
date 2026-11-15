@@ -2,16 +2,22 @@
 
 Repository: `~/repositories/loom`
 Branch: `loom/loom-loom-2` (isolated worktree)
-Status: green, resubmitted after changes requested on review request 1436
+Status: green, resubmitted after changes requested on review request 1547
 
-All checks below were run on `8168ddc4a3959ac310f098c41a8b2c8f86afb50c`, the branch tip before
-this submission. This submission changes this evidence file and nothing else:
-`git diff --stat 8168ddc <submitted commit> -- docs templates` is empty, so the templates and the
-taxonomy under review are byte-identical to the ones the delta review inspected at `38dbdf3`.
+All checks below were measured on `efc1b0d68d18a161c0ecf075a1814fc3c72b5090` (the branch tip
+before this submission) except where a step names a different command. This submission changes
+this evidence file and nothing else, so the templates and the taxonomy under review are
+byte-identical to the ones the delta review inspected at `38dbdf3` and re-inspected at `efc1b0d`:
+
+```bash
+git diff --stat 8168ddc..<submitted commit> -- docs templates   # empty
+```
 
 ## Delivered
 
-`templates/` holds a copy-and-fill starter for every kind in `docs/artifacts.md`:
+`templates/` holds a copy-and-fill starter for every kind in `docs/artifacts.md`. The table lists
+the artefact starters only; `templates/` also carries one configuration example that is not a
+starter (see below the table).
 
 | Template | Kind |
 |---|---|
@@ -23,6 +29,12 @@ taxonomy under review are byte-identical to the ones the delta review inspected 
 | `adr.md` | context, decision, consequences, alternatives |
 | `memory-vault/README.md` | scopes, kinds, and the promote-when-verified rule |
 | `agents-block.md` | the coordination block every product repository carries — not an artefact kind |
+
+`templates/linear-portfolio.example.json` is the ninth file under `templates/` and is **not** an
+artefact starter: it is the example state and label map for
+`~/.config/loom/linear-portfolio.json`, and the only pointer to it is
+`capabilities/work/README.md:437-438`. It is listed here so the table is not read as a complete
+inventory of the directory.
 
 `docs/artifacts.md` is the index: its kind table has seven rows and its template table has eight,
 the eighth explicitly marked "not an artefact kind".
@@ -40,42 +52,63 @@ Run from the worktree root unless a step says otherwise.
 
    Result: 8 of 8 `OK`, no `MISSING`.
 
-2. **No portfolio instance in the templates.** The reviewer's own pattern returns nothing:
+2. **No portfolio instance in the templates.** The reviewer's widened pattern returns nothing:
 
    ```bash
-   grep -riE "hritvik|IAM|UMS|Dutch|ATLAS|alpha" templates/
+   grep -riE "hritvik|jarvis|dutch|ums|iam|atlas|superapp|modelswitch|relay" templates/
    ```
 
-   Result: no matches. The only service-shaped text is the `<service>-effort` placeholder.
+   Result: no matches (exit 1). The only service-shaped text is the `<service>` /
+   `<service>-effort` placeholder.
 
-3. **The suite passes.** From `capabilities/work`:
+3. **The structured templates parse.**
+
+   ```bash
+   python3 -c "import json,yaml; yaml.safe_load(open('templates/capability-map.yaml')); \
+     yaml.safe_load(open('templates/contract-registry.yaml')); \
+     json.load(open('templates/linear-portfolio.example.json'))"
+   ```
+
+   Result: no exception.
+
+4. **The suite passes.** From `capabilities/work`:
 
    ```bash
    python3 -m unittest discover -s tests
    ```
 
-   Result: `Ran 221 tests in 71.141s` — `OK`. That is 221 `def test_` methods across `tests/`,
-   matching the number the test runner reports.
+   Result at `efc1b0d`: `Ran 221 tests in 70.451s` — `OK`. `grep -rn "    def test_" tests --include='*.py'
+   | wc -l` also returns `221`, so the runner's number and the source's number agree.
+   This number is measured on the branch being submitted, not carried over from an older commit.
 
-4. **The registry validates.** From `capabilities/work`:
+5. **The registry validates.** From `capabilities/work`:
 
    ```bash
    python3 validate_work.py
    ```
 
-   Result: `PASS`, with pre-existing warnings that are not this task's: expired leases and
-   dependency drift on other boards, the `docs` write-path overlap between `loom/LOOM-1` and this
-   task, and 52 pre-migration integrations proven by evidence only (accepted by
-   `decisions/integration-receipts-001.md`).
+   Result: `PASS`, 72 warnings. All of them are conditions of the shared registry, not of this
+   diff: stale program-board revisions and dependency drift on other boards, expired and legacy
+   (epoch-less) claims on other boards, control-plane drift between registry and program files,
+   one ordering warning inside the shared event log (`event line 1040: timestamp moved
+   backwards`), and 52 pre-migration integrations proven by evidence only (accepted by
+   `decisions/integration-receipts-001.md`). The only warning that names this task is the `docs`
+   write-path overlap with `loom/LOOM-1`, which follows from the declared paths and is the
+   coordinator's to sequence, not something this diff can clear.
 
-5. **The reviewed guarantee still holds.** The delta review's concern was that the engine moved
+6. **The reviewed guarantee still holds.** The delta review's concern was that the engine moved
    after the approved commit. For this task's paths it did not move after the reviewed point:
 
    ```bash
-   git diff --stat 38dbdf3..8168ddc -- docs templates
+   git diff --stat 38dbdf3..efc1b0d -- docs templates   # empty
+   git diff --stat 2be45cc..efc1b0d -- docs templates   # the whole delta this task ever had
    ```
 
-   Result: empty.
+   The second command reports 7 files. The two that carry this task's content —
+   `docs/artifacts.md` and `templates/agents-block.md` — were named in the delta review at 1468 as
+   the only template/taxonomy changes: the `WORK_CONTRACTS` example became `your-contracts`, and
+   the coordination block moved from `./task` to `./loom`. The other five are the adopting guide
+   and the two ADRs (LOOM-3 and engine history), the work-items index, and the Linear example.
 
 ## Limits
 
@@ -88,24 +121,59 @@ Run from the worktree root unless a step says otherwise.
   `README.md` is outside this task's write paths (`docs`, `templates`) and is a shared file in the
   commit guard, so this submission does not change it. **Recommended follow-up:** a task on
   `README.md` that adds one line pointing at `docs/artifacts.md` and `docs/adopting.md`.
-- **The templates are prose skeletons, not schemas.** Only `contract-registry.yaml` and
-  `capability-map.yaml` have machine-checkable shapes today; the other six are copied and filled
-  by hand and nothing validates their contents.
+- **The contract registry is validated; the capability map is only cross-referenced — not
+  validated.** `validate_work.py:check_contracts` checks the contract-registry shape and its
+  copies: `kind` in `http|event`, a known `status`, an `id` ending `.v<version>`, `gate` naming a
+  real task, `artifact` + `sha256` present and matching for accepted contracts, companion files
+  and fixtures present, consumer pins compared to the artifact digest, and program maps barred
+  from inventing a contract id. `validate_work.py:cross_check_capabilities` reads the
+  capability-steward `registry.yaml` beside the work home (its `efforts`/`contracts`/`decisions`
+  entries with `id`, `path`, `status`, `owner`) and never parses a capability map. So the five
+  sections of `templates/capability-map.yaml` — `provides`, `consumes`, `owns`, `excludes`,
+  `open_questions` — are a hand-filled shape with no machine check behind them, and the six prose
+  starters (wayfinder map, spec, plan, ADR, memory, agents block) are in the same position.
 - **`docs/adr/0001-state-leaves-git.md` is history, not a template instance.** It records this
   engine's own split and cites this portfolio's scale. It is the engine's decision record about
   state leaving git; replacing it is not part of publishing templates.
+- **`docs/adopting.md:11` carries a doubled trailing comment.** The `coordination.home` line ends
+  with two `#` comments in one line, introduced by `d954e99` inside the reviewed range. The file
+  is inside this task's write paths (`docs`, per `loom show loom/LOOM-2` and the guard's
+  `covers()` in `capabilities/work/hooks/pre-commit:100-105`), but it is LOOM-3's deliverable, and
+  `loom show loom/LOOM-3` declares no write paths at all — so no LOOM-3 worker can commit it
+  either. This submission leaves the text alone rather than editing another task's deliverable
+  under this claim. **Recommended follow-up:** give LOOM-3 the write path and have it fix the
+  line, or add it to a documentation-cleanup task.
+
+## Rework after review request 1547 (event 1579, changes requested)
+
+The reviewer confirmed the deliverable — the template set, the seven-versus-eight table, the
+absence of a portfolio instance, the `agents-block` commands against `./loom claim --help`, the
+`contract-registry.yaml` field names against `check_contracts`, and the re-measured 221 tests — and
+rejected the record on three points. All three are corrected above; no template or taxonomy
+content changed.
+
+1. **False write-path claim.** The previous version said `docs/adopting.md` was "outside this
+   task's write paths". It is not: `loom show loom/LOOM-2` lists `docs`, and the guard's `covers()`
+   matches any path under a declared root. The claim is replaced by the accurate statement in
+   Limits, together with the fact that LOOM-3 declares no write paths.
+
+2. **Wrong line number.** The doubled comment is at `docs/adopting.md:11`, not `:10` — line 10 is
+   the `core.hooksPath` line. Corrected everywhere it appears.
+
+3. **Overstated machine-checkability.** "Only `contract-registry.yaml` and `capability-map.yaml`
+   have machine-checkable shapes today" was wrong about the capability map: `check_contracts`
+   validates the contract registry; `cross_check_capabilities` reads the capability-steward
+   registry and never parses a capability map. Reworded in Limits.
+
+Also taken from that review: the Delivered table now says it lists artefact starters only, and
+names `templates/linear-portfolio.example.json` so the table is not read as the whole directory.
 
 ## Rework after the delta review (event 1468, changes requested)
 
-The reviewer found two false claims in the previous evidence. Both are corrected above; neither
-was a defect in the templates.
+Kept for the record. Both findings were false claims in the evidence, not defects in the
+templates; both were corrected in `efc1b0d` and confirmed fixed by the reviewer at 1547.
 
 1. **"README.md points at the directory" was false.** It does not — see Limits. The claim is gone
-   and the gap is now stated as a limit with a follow-up recommendation.
-2. **"132 tests" / "134 tests" were both wrong.** Measured at `8168ddc`:
-   `python3 -m unittest discover -s tests` runs **221** tests and reports `OK`. The command is
-   recorded above so the number can be reproduced rather than trusted.
-
-Also noted, unchanged here: `docs/adopting.md:10` still has a doubled trailing comment on its
-`git config` line. `docs/adopting.md` is LOOM-3's file — outside this task's write paths — so it is
-left for that task rather than edited under this claim.
+   and the gap is stated as a limit with a follow-up recommendation.
+2. **"132 tests" / "134 tests" were both wrong.** Measured here: 221, with the command recorded
+   above so the number can be reproduced rather than trusted.
