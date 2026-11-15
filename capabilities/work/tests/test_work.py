@@ -1883,6 +1883,18 @@ class WorkCLITest(unittest.TestCase):
         preview = self.invoke("tick", "--max-implementer", "4", "--now", T0).stdout
         self.assertIn("capacity: implementer 2/4", preview)
 
+    def test_an_applying_pass_records_its_decision(self):
+        decisions = self.ws.root / "decisions.jsonl"
+        os.environ["LOOM_TICK_DECISIONS"] = str(decisions)
+        try:
+            self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                        "--no-integrate", "--worker-command", "sh -c 'sleep 30'", "--now", T0)
+        finally:
+            os.environ.pop("LOOM_TICK_DECISIONS", None)
+        record = json.loads(decisions.read_text().splitlines()[-1])
+        self.assertEqual(record["limits"]["implementer"], 1)
+        self.assertEqual(len(record["launched"]), 1)
+
     def test_green_does_not_consume_an_implementer_slot(self):
         self.invoke("claim", "demo/W-1", "--revision", "0", "--agent", "agent-a", "--now", T0)
         self.invoke("transition", "demo/W-1", "--revision", "1", "--to", "green",

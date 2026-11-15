@@ -2798,6 +2798,22 @@ def cmd_tick(args, store: Store) -> int:
                                      "question": item["question"], "source": item["source"],
                                      "worktree": str(tree)})
 
+    if args.apply:
+        # Every mutating pass leaves one line saying what it believed. A pass that claims but
+        # prints nothing is otherwise unexplainable after the fact, which is how an over-launch
+        # went undiagnosed from the log alone.
+        decisions = Path(os.environ.get("LOOM_TICK_DECISIONS")
+                         or Path.home() / ".local/state/loom/tick.decisions.jsonl")
+        decisions.parent.mkdir(parents=True, exist_ok=True)
+        with decisions.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "ts": iso(now), "active": active, "limits": limits,
+                "launched": [item["task"] for item in launched],
+                "held": {item["task"]: item.get("reason") for item in held},
+                "reviews": [item["task"] for item in launched_reviews],
+                "problems": problems,
+            }, sort_keys=True) + "\n")
+
     if args.json:
         print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
                           "held": held, "expired": expired, "launched": launched,
