@@ -147,8 +147,8 @@ approval, without a claim. Four leaks came back with that delta and one predated
    present before the delta and had never been fixed.
 5. The verification block above was false. Corrected, and re-run below.
 
-Verification, run on `90b01e22092c` (the parent of the commit that carries this text; the only
-difference between the two is this file):
+Verification, run on the tree this file ships with. The commit that carries it changes only this
+file, so the measured values below are the ones for the current tree:
 
 - The guarded-name sweep over the tracked tree returns five files: `README.md` and
   `docs/adopting.md` (the public clone URL, one line each), `docs/adr/0001-state-leaves-git.md`
@@ -195,4 +195,5 @@ Verification at the commit named in the review request:
   `decisions/published-history-001.md` — the last is new in this round and unavoidable: the
   decision cannot ask the owner to purge 27 paths without naming them.
 - `python3 validate_work.py` — PASS.
-- `python3 -m unittest discover -s tests` — 221 tests, all pass.
+- `python3 -m unittest discover -s tests` — 221 tests at `2919804`, all pass. Historical: the tree
+  has grown since; the current count is in the block above.
