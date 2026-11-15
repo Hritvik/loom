@@ -24,6 +24,7 @@ without colliding, without a human dispatching tasks, and without trusting each 
 git clone https://github.com/Hritvik/loom.git ~/repositories/loom
 cd ~/repositories/loom
 git config core.hooksPath .githooks          # the coordination pre-commit guard
+git config --global coordination.home ~/repositories/loom   # the guard's engine path
 python3 -m unittest discover -s capabilities/work/tests
 ```
 

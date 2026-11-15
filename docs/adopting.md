@@ -7,7 +7,8 @@ Fifteen minutes from nothing to a claimed task.
 ```bash
 git clone https://github.com/Hritvik/loom.git ~/repositories/loom
 cd ~/repositories/loom
-git config core.hooksPath .githooks        # the coordination pre-commit guard
+git config core.hooksPath .githooks
+git config --global coordination.home ~/repositories/loom   # required: the guard fails closed without it        # the coordination pre-commit guard
 python3 -m unittest discover -s capabilities/work/tests
 ```
 
