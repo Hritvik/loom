@@ -193,7 +193,7 @@ python3 -m unittest tests.test_boundary -v
 Ran 19 tests ... OK (skipped=2)
 
 python3 -m unittest discover -s tests
-Ran 241 tests in 70.6s
+Ran 270 tests in 85.7s (skipped=2) at 47c2715
 OK (skipped=2)
 
 python3 validate_work.py
@@ -238,8 +238,16 @@ reports them and fails.
   the namespace taken from one (`id.split("/")[0]`), or used as a prefix/regex/membership test on
   one. A namespace copied into a variable and compared later, a pattern built by concatenation
   (`re.match(r"^" + name + "/", id)`), and a module-level compiled pattern applied as
-  `pattern.match(id)` are generic code that the scan cannot tell from correct code. The literal scan
-  still catches the program name itself wherever it appears in source.
+  `pattern.match(id)` are generic code that the scan cannot tell from correct code.
+- **The literal scan does not catch a bare namespace.** `namespaced_literals` matches a whole
+  task-id literal (`<namespace>/<NAME>`), not a namespace on its own, because a bare short name is
+  indistinguishable from an ordinary word. So the most plausible way this binding returns is
+  invisible to it: a module-level collection of program names — `PROGRAMS = ("alpha", "beta")` — plus
+  `if task["id"].split("/")[0] in PROGRAMS:` produces no hit from any of the three detectors, and
+  neither does `re.match(r"^" + name + "/", task_id)` built from a local. Catching that needs the
+  denylist-supplied sweep (`LOOM_BOUNDARY_DENYLIST`), which is a tracked-tree check and therefore
+  cannot see a branch either, or a scan that is told the names. Treat the branch scan as a
+  tripwire for the direct shape, not as proof of absence.
 - **Option defaults** are checked for `--program`, `--namespace` and `--focus`. An option invented
   under another name could still default to a named program; the literal and branch scans would only
   catch it if the value looked like a task id.
@@ -256,3 +264,7 @@ LOOM_BOUNDARY_DENYLIST=~/.config/loom/boundary-denylist.txt \
 python3 -m unittest discover -s tests
 python3 validate_work.py
 ```
+
+The tree under review is `47c2715`. Earlier rounds quote pre-rebase hashes (`d27dfd2`, `eb3deed`,
+`6ee4396`, `2086122`): they still resolve in the object database but are no longer on the branch, so
+map a round by its description rather than its hash.
