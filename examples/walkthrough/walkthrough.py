@@ -95,7 +95,8 @@ def main() -> int:
               expect=2).splitlines()[-1])
 
     # The claim prints its fencing epoch; the holder must present it on every later mutation.
-    epoch = claimed.rsplit("epoch ", 1)[-1].strip()
+    # The line ends with the attempt id now, so take the epoch token rather than the rest of it.
+    epoch = claimed.rsplit("epoch ", 1)[-1].split()[0]
 
     step(3, "Move it through the implementation loop")
     print(run("transition", "alpha/W-1", "--revision", "1", "--epoch", epoch,
