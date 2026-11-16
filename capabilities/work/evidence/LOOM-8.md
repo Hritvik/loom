@@ -1,8 +1,8 @@
 # Evidence — LOOM-8 check the registry against a fold of the log
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-8-a3` (worktree `~/.local/state/loom/worktrees/loom-loom-8-a3`)
-Status: green, submitted for independent review (round 2)
+Branch: `loom/loom-loom-8-a5` (worktree `~/.local/state/loom/worktrees/loom-loom-8-a5`)
+Status: green, submitted for independent review (round 3)
 
 ## The problem
 
@@ -53,6 +53,52 @@ events --verify exit 0 | event chain OK        # the log itself was never touche
 validate exit 1                                 # the baseline, not the chain, had to anchor it
 ERROR fold: BROKEN snapshot 99: no event at that sequence …
 ```
+
+## Round 3 — the regression guard now tests the fix it names
+
+Round 2's blocking finding was that the test cited as proof of the anchoring fix did not exercise it.
+`test_a_baseline_whose_row_digest_was_forged_with_it_is_still_broken` built its forged row with
+`json.dumps(body)` at the default separators, while the engine hashes `canonical_registry(body)`
+(compact separators). The row was therefore *not* self-consistent, so even the vulnerable
+row-digest comparison reported it `BROKEN` — the test passed against `2ce14c4`, and a regression back
+to trusting the row digest would have stayed green.
+
+The forged text is now rendered through the engine's own renderer, `canonical_registry` (imported in
+`FoldTest.forged_row_text`), so the row agrees with itself by construction and only the digest
+recorded in the hash-chained event can catch it. The same helper is used for the no-event row (its
+digest matches its body, so the missing event is the only reason it is broken) and for the validator
+case. If the canonical rendering ever changes, the forged row follows it, so the test cannot silently
+become vacuous again.
+
+Proven by running the same test file against the pre-fix engine:
+
+```text
+# against 2ce14c4 (vulnerable) engine, round-3 test file
+test_a_baseline_whose_row_digest_was_forged_with_it_is_still_broken ... FAIL
+    AssertionError: 'BROKEN' not found in "task demo/W-1: field 'title' differs — log 'Forged with a
+    matching row digest', registry 'Task demo/W-1'\nfoldcheck: 1 divergence(s) from snapshot 2\n"
+test_a_snapshot_row_with_no_event_at_its_sequence_is_broken ... FAIL
+test_the_validator_reports_a_tampered_baseline ... FAIL
+# 3 failures; every other test in the file passes on 2ce14c4
+
+# against this branch
+python3 -m unittest discover -s tests -p 'test_fold.py'   # 20 tests, OK
+```
+
+The same launder, run by hand on both engines, is the clearest statement of it — forge the snapshot
+row's body *and* digest with the engine's own canonical renderer, then edit the task row to agree:
+
+```text
+# 2ce14c4 (row digest trusted)              # this branch (event digest required)
+foldcheck exit 0                            foldcheck exit 1
+foldcheck: no divergence from               BROKEN snapshot 2 body digest 4742ca26fd87… does not
+snapshot 2 (1 state delta(s) over           match the digest recorded in the event chain
+2 event(s))                                 af72a4775f0b…
+```
+
+The round-2 evidence sentence claiming "body and digest column forged, still `BROKEN` because the
+event names the digest" described the code correctly but was not what the test demonstrated; it now
+describes what the test actually proves.
 
 ## Delivered
 
@@ -105,7 +151,8 @@ Supporting: `test_a_claim_carries_its_delta_and_the_attempt_does_not`,
 `test_a_batch_mutation_puts_its_remaining_delta_on_the_last_event`,
 `test_a_tampered_snapshot_body_is_reported`,
 `test_a_baseline_whose_row_digest_was_forged_with_it_is_still_broken` (body **and** digest column
-forged, still `BROKEN` because the event names the digest),
+forged through `canonical_registry`, so the row agrees with itself and the event's digest is the only
+thing that can catch it; fails against `2ce14c4`'s engine),
 `test_a_snapshot_row_with_no_event_at_its_sequence_is_broken` (the reviewer's laundering path),
 `test_the_validator_reports_a_tampered_baseline`,
 `test_a_second_snapshot_refuses_to_bless_a_divergent_registry`,
@@ -158,6 +205,20 @@ foldcheck: no divergence from snapshot 3 (2 state delta(s) over 4 event(s))
 
 ## Limits
 
+- **`foldcheck` is not a whole-store tamper detector, and "no divergence" must not be read as one.**
+  If someone forges the baseline *and* recomputes every later event's `prev` and `hash`, `foldcheck`
+  reports clean, because the log it folds is internally consistent. Reproduced: with the snapshot
+  event's digest rewritten and the chain re-linked from it, `foldcheck` exits 0
+  (`no divergence from snapshot 2`), while `./loom events --verify` exits 1 with
+  `event log head 4:dbeeb80a5110 does not match the external checkpoint 4:e29356cfbf9a` — the
+  checkpoint written outside the log is what closes this. So the honest claim is: `foldcheck` detects
+  a registry that disagrees with the log; `events --verify` (and the validator, which runs it) detects
+  a log that disagrees with its own checkpoint. `events --verify --reanchor` deliberately blesses the
+  current head, so a re-chain is only "clean" once a human has done that.
+- **Write paths overlap with `loom/LOOM-12` on `engine.py` and `tests`.** Both tasks were prompted in
+  parallel against the same files. This branch's changes are confined to `tests/test_fold.py` and
+  `evidence/LOOM-8.md` since round 2; the engine and validator changes were already committed at
+  `0375e7b`. Coordinator sequencing is still needed before either integrates, as flagged in round 1.
 - **`PROTOCOL.md` is not updated.** The `state_delta` field, the snapshot baseline and the three
   commands belong in the event-log and storage sections there; the file is outside this task's write
   paths, so the contract currently lives in the `store.py`/`engine.py` docstrings, the README rows and

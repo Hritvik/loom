@@ -255,13 +255,24 @@ class FoldTest(unittest.TestCase):
         self.assertIn("BROKEN", result.stdout)
         self.assertIn("does not match the digest recorded in the event chain", result.stdout)
 
+    def forged_row_text(self, body):
+        """Render a forged baseline exactly as the engine would, so the row agrees with itself.
+
+        The point of these tests is that a self-consistent row is still caught: whoever edited the
+        body can recompute the row digest too. Building the text with `json.dumps` defaults would
+        make the row internally inconsistent and let a row-digest comparison claim the catch, so
+        the test would pass against the vulnerable implementation.
+        """
+        from engine import canonical_registry
+        return canonical_registry(body)
+
     def test_a_baseline_whose_row_digest_was_forged_with_it_is_still_broken(self):
         self.snapshot()
         connection = sqlite3.connect(self.ws.db)
         try:
             body = json.loads(connection.execute("SELECT body FROM snapshots").fetchone()[0])
             body["tasks"][0]["title"] = "Forged with a matching row digest"
-            text = json.dumps(body)
+            text = self.forged_row_text(body)
             connection.execute(
                 "UPDATE snapshots SET body = ?, digest = ?",
                 (text, hashlib.sha256(text.encode("utf-8")).hexdigest()))
@@ -279,7 +290,7 @@ class FoldTest(unittest.TestCase):
         try:
             body = json.loads(connection.execute("SELECT body FROM snapshots").fetchone()[0])
             body["tasks"][0]["title"] = "Smuggled in without an event"
-            text = json.dumps(body)
+            text = self.forged_row_text(body)
             connection.execute(
                 "INSERT INTO snapshots (seq, ts, digest, body) VALUES (?, ?, ?, ?)",
                 (99, T0, hashlib.sha256(text.encode("utf-8")).hexdigest(), text))
@@ -297,7 +308,7 @@ class FoldTest(unittest.TestCase):
         try:
             body = json.loads(connection.execute("SELECT body FROM snapshots").fetchone()[0])
             body["tasks"][0]["title"] = "Forged at the baseline"
-            text = json.dumps(body)
+            text = self.forged_row_text(body)
             connection.execute(
                 "UPDATE snapshots SET body = ?, digest = ?",
                 (text, hashlib.sha256(text.encode("utf-8")).hexdigest()))
