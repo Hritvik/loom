@@ -1638,7 +1638,9 @@ Do this:
 4. Keep the lease alive. The lease is short and is not renewed for you; once it expires your
    epoch is fenced and you cannot write. Before it runs out:
    `./loom renew {task} --revision N{epoch_flag} --ttl 30m --agent {agent}`
-5. Write evidence to {evidence} in the repository, then ask for review:
+5. Write evidence to {evidence} in the repository from the template in `capabilities/work/engine.py`
+   (`EVIDENCE_TEMPLATE`): a span between `<!-- loom:<derivation> -->` and `<!-- /loom -->` is
+   re-derived by the suite, and everything else is prose. Then ask for review:
    `./loom ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
     --review-evidence {evidence} --agent {agent}`
 6. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
@@ -4991,6 +4993,434 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
             if record.get("agent") != claim.get("agent"):
                 errors.append(f"{task_id}: last claim event agent does not match registry claim")
     return errors
+
+
+# --------------------------------------------------------------------------
+# Evidence claims — prose with machine-checked spans
+# --------------------------------------------------------------------------
+#
+# An evidence file is read by a reviewer who cannot re-run every command, so a sentence like "the
+# suite ran 276 tests, OK" is believed. That class of sentence has been wrong often enough that
+# belief is the risk. A **machine-checked span** replaces it: the value sits between two HTML
+# comments that name a derivation, a checker re-derives the value from the tree, and a difference
+# fails. HTML comments render blank, so a reader sees the sentence and not the markers.
+#
+#     The suite collects <!-- loom:tests.count -->276<!-- /loom --> tests.
+#
+#   <!-- loom:<derivation> -->            opens the span; the derivation is a name
+#   <value>                               what the file claims, on one line
+#   <!-- /loom -->                        closes it
+#
+# Everything outside a span is **prose**: no checker reads it, which is exactly why a number
+# written as prose is a claim on the author and not on the tree. `EVIDENCE_TEMPLATE` below states
+# the distinction for the writer and marks both kinds of line.
+#
+# A derivation is `callable(root, argument, cache) -> str`. The argument is the optional text after
+# the derivation name (`tests.count:tests` reads tests from another directory). The built-ins cover
+# the suite, the validator and tracked-file counts; a checker may register more, which is how a
+# repository adds a sweep without copying its detector into the engine:
+#
+#     register_evidence_derivation("sweep.example", derive_example_sweep)
+#
+# A derivation raises `EvidenceClaimError` when it cannot answer. An unknown derivation, an
+# unclosed span and a stray close are all problems, never silent passes: a typo in a marker has to
+# fail rather than quietly turn the claim into prose again.
+
+EVIDENCE_MARKER = re.compile(
+    r"<!--\s*(?:/(?P<close>loom)|loom:(?P<claim>[a-z][a-z0-9_.-]*)(?::(?P<argument>[^\n]*?))?)\s*-->"
+)
+EVIDENCE_SPAN = re.compile(
+    r"<!--\s*loom:(?P<claim>[a-z][a-z0-9_.-]*)(?::(?P<argument>[^\n]*?))?\s*-->\s*"
+    r"(?P<value>[^<>\n]*)"
+    r"<!--\s*/loom\s*-->"
+)
+EVIDENCE_NAME = re.compile(r"^[a-z][a-z0-9_.-]*$")
+
+# A fenced code block quotes text, so a marker inside one is an example rather than a claim. The
+# template needs to show the syntax, and an evidence file may need to quote a marker it rejected.
+FENCE = re.compile(r"^\s*(?:`{3,}|~{3,})")
+
+
+class EvidenceClaimError(WorkError):
+    """A claim cannot be re-derived: missing input, unknown derivation, unreadable output."""
+
+
+def mask_fenced_code(text: str) -> tuple[str, int | None]:
+    """Blank every fenced code block, keeping offsets and newlines.
+
+    Masking rather than removing keeps line numbers true, so a problem reports the line a reader
+    would count to. An unclosed fence is returned as the line it opened on, because everything
+    after it would otherwise be exempt from checking — the quietest way to disarm this guard.
+    """
+    masked: list[str] = []
+    fenced = False
+    opened_at: int | None = None
+    for number, line in enumerate(text.splitlines(keepends=True), start=1):
+        if FENCE.match(line):
+            if fenced:
+                fenced = False
+                opened_at = None
+            else:
+                fenced = True
+                opened_at = number
+            masked.append(re.sub(r"[^\n]", " ", line))
+            continue
+        masked.append(re.sub(r"[^\n]", " ", line) if fenced else line)
+    return "".join(masked), (opened_at if fenced else None)
+
+
+def evidence_spec(claim: dict) -> str:
+    """`name` or `name:argument`, the way the marker spells it."""
+    argument = claim.get("argument") or ""
+    return f"{claim['claim']}:{argument}" if argument else claim["claim"]
+
+
+def parse_evidence_claims(text: str) -> tuple[list[dict], list[dict]]:
+    """Every machine-checked span in `text`, and every marker that is not part of one.
+
+    Pairing is done by scanning markers in order rather than by substituting spans out, so a
+    problem reports the line the marker is really on. A marker inside a fenced code block is a
+    quotation and is skipped.
+    """
+    claims: list[dict] = []
+    problems: list[dict] = []
+    masked, unclosed = mask_fenced_code(text)
+    if unclosed is not None:
+        problems.append({"line": unclosed, "problem": "unclosed code fence: every claim after it "
+                                                      "would be exempt from checking"})
+    consumed_until = -1
+    for marker in EVIDENCE_MARKER.finditer(masked):
+        if marker.start() < consumed_until:
+            continue
+        line = text.count("\n", 0, marker.start()) + 1
+        span = EVIDENCE_SPAN.match(masked, marker.start())
+        if span is not None:
+            consumed_until = span.end()
+            claims.append({
+                "claim": span.group("claim"),
+                "argument": span.group("argument") or "",
+                "recorded": span.group("value").strip(),
+                "line": line,
+            })
+            continue
+        if marker.group("close"):
+            problems.append({"line": line, "problem": "closing marker with no span to close"})
+        else:
+            problems.append({
+                "line": line,
+                "problem": f"marker {marker.group('claim')!r} is not a span: "
+                           f"it needs a value and a closing <!-- /loom --> on the same line",
+            })
+    return claims, problems
+
+
+EVIDENCE_DERIVATIONS: dict[str, object] = {}
+
+
+def register_evidence_derivation(name: str, derive) -> None:
+    """Make `name` resolvable in a marker. Re-registering the same name replaces it."""
+    if not EVIDENCE_NAME.match(name):
+        raise WorkError(f"invalid derivation name {name!r}; use [a-z][a-z0-9_.-]*")
+    EVIDENCE_DERIVATIONS[name] = derive
+
+
+def evidence_derivations(extra: dict | None = None) -> dict:
+    table = dict(EVIDENCE_DERIVATIONS)
+    table.update(extra or {})
+    return table
+
+
+def _cached(cache: dict, key, build):
+    if key not in cache:
+        cache[key] = build()
+    return cache[key]
+
+
+def derive_tests_count(root: Path, argument: str, cache: dict) -> str:
+    """How many tests `unittest` collects under `root/argument` — what `Ran N tests` prints."""
+    key = ("tests.count", str(root), argument)
+
+    def build() -> str:
+        import unittest  # imported here so the CLI's startup does not pay for the test framework
+
+        start = Path(root) / (argument or "tests")
+        if not start.is_dir():
+            raise EvidenceClaimError(f"no test directory at {start}")
+        suite = unittest.defaultTestLoader.discover(str(start))
+        return str(suite.countTestCases())
+
+    return _cached(cache, key, build)
+
+
+def _validator_run(root: Path, cache: dict) -> tuple[int, str]:
+    """Run the repository's validator once per root and keep its status and output."""
+    key = ("validator", str(root))
+
+    def build() -> tuple[int, str]:
+        script = Path(root) / "validate_work.py"
+        if not script.is_file():
+            raise EvidenceClaimError(f"no validate_work.py under {root}")
+        process = subprocess.run(
+            [sys.executable, str(script), "--root", str(root)],
+            capture_output=True, text=True, timeout=300,
+        )
+        return process.returncode, (process.stdout or "") + (process.stderr or "")
+
+    return _cached(cache, key, build)
+
+
+def derive_validator_verdict(root: Path, argument: str, cache: dict) -> str:
+    """PASS or FAIL, from the validator's own exit status."""
+    if argument:
+        raise EvidenceClaimError("validator.verdict takes no argument")
+    status, _output = _validator_run(root, cache)
+    return "PASS" if status == 0 else "FAIL"
+
+
+VALIDATOR_TALLY = re.compile(r"^FAIL \((?P<errors>\d+) errors?, (?P<warnings>\d+) warnings?\)$")
+
+
+def derive_validator_errors(root: Path, argument: str, cache: dict) -> str:
+    """How many `ERROR` lines the validator printed, optionally only those naming `argument`.
+
+    The count is checked against the validator's own tally rather than trusted from its shape: a
+    validator that cannot load a registry prints `FAIL` with no `ERROR` lines, and counting that as
+    zero would make every claim about it pass vacuously.
+    """
+    status, output = _validator_run(root, cache)
+    lines = [line for line in output.splitlines() if line.startswith("ERROR ")]
+    if status == 0:
+        if lines:
+            raise EvidenceClaimError(
+                f"the validator exited 0 but printed {len(lines)} ERROR line(s)")
+        return "0"
+    tally = None
+    for line in reversed(output.splitlines()):
+        match = VALIDATOR_TALLY.match(line.strip())
+        if match:
+            tally = int(match.group("errors"))
+            break
+    if tally is None:
+        raise EvidenceClaimError(
+            "the validator failed without a `FAIL (n errors, n warnings)` line, so its output "
+            "cannot be counted")
+    if tally != len(lines):
+        raise EvidenceClaimError(
+            f"the validator counted {tally} error(s) but printed {len(lines)} ERROR line(s); "
+            "the derivation no longer matches the output it reads")
+    if argument:
+        lines = [line for line in lines if argument in line]
+    return str(len(lines))
+
+
+def derive_tracked_count(root: Path, argument: str, cache: dict) -> str:
+    """How many files git tracks under the pathspec `argument`."""
+    if not argument:
+        raise EvidenceClaimError("tracked.count needs a pathspec, e.g. tracked.count:templates/")
+    if argument.startswith("-") or argument.startswith("/") or ".." in Path(argument).parts:
+        raise EvidenceClaimError(f"tracked.count refuses the pathspec {argument!r}")
+    key = ("tracked.count", str(root), argument)
+
+    def build() -> str:
+        process = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--", argument],
+            capture_output=True, text=True, timeout=60,
+        )
+        if process.returncode != 0:
+            raise EvidenceClaimError(
+                f"git ls-files failed for {argument!r}: {process.stderr.strip()}")
+        return str(len([name for name in (process.stdout or "").split("\0") if name]))
+
+    return _cached(cache, key, build)
+
+
+register_evidence_derivation("tests.count", derive_tests_count)
+register_evidence_derivation("validator.verdict", derive_validator_verdict)
+register_evidence_derivation("validator.errors", derive_validator_errors)
+register_evidence_derivation("tracked.count", derive_tracked_count)
+
+
+def _derive_claim(claim: dict, root: Path, table: dict, cache: dict) -> str:
+    derive = table.get(claim["claim"])
+    if derive is None:
+        raise EvidenceClaimError(
+            f"unknown derivation {claim['claim']!r}; known: {', '.join(sorted(table)) or '(none)'}")
+    return derive(root, claim["argument"], cache)
+
+
+def check_evidence(text: str, root: Path | None = None, derivations: dict | None = None) -> dict:
+    """Re-derive every claim in `text` and compare it with the value the file records."""
+    root = Path(root) if root is not None else HOME
+    table = evidence_derivations(derivations)
+    claims, problems = parse_evidence_claims(text)
+    cache: dict = {}
+    for claim in claims:
+        try:
+            claim["derived"] = _derive_claim(claim, root, table, cache)
+            claim["ok"] = claim["derived"] == claim["recorded"]
+        except (EvidenceClaimError, OSError, subprocess.SubprocessError) as exc:
+            claim["derived"] = None
+            claim["ok"] = False
+            problems.append({"line": claim["line"], "problem": f"{evidence_spec(claim)}: {exc}"})
+    stale = [claim for claim in claims if claim["derived"] is not None and not claim["ok"]]
+    return {
+        "claims": claims,
+        "problems": problems,
+        "stale": stale,
+        "ok": not problems and not stale,
+    }
+
+
+def check_evidence_file(path: Path, root: Path | None = None,
+                        derivations: dict | None = None) -> dict:
+    path = Path(path)
+    result = check_evidence(path.read_text(encoding="utf-8"), root=root, derivations=derivations)
+    base = Path(root) if root is not None else HOME
+    try:
+        result["path"] = str(path.resolve().relative_to(base.resolve()))
+    except ValueError:
+        result["path"] = str(path)
+    return result
+
+
+def refresh_evidence_text(text: str, root: Path | None = None,
+                          derivations: dict | None = None) -> tuple[str, list[str]]:
+    """Rewrite every stale value in place and report what changed. Prose is never touched."""
+    root = Path(root) if root is not None else HOME
+    table = evidence_derivations(derivations)
+    cache: dict = {}
+    changes: list[str] = []
+    pieces: list[str] = []
+    cursor = 0
+
+    def replace(match: re.Match) -> str:
+        claim = {
+            "claim": match.group("claim"),
+            "argument": match.group("argument") or "",
+            "recorded": match.group("value").strip(),
+        }
+        try:
+            derived = _derive_claim(claim, root, table, cache)
+        except (EvidenceClaimError, OSError, subprocess.SubprocessError) as exc:
+            changes.append(f"{evidence_spec(claim)}: {exc}; left as recorded")
+            return match.group(0)
+        if derived == claim["recorded"]:
+            return match.group(0)
+        changes.append(
+            f"{evidence_spec(claim)}: {claim['recorded'] or '(empty)'} -> {derived}")
+        return f"<!-- loom:{evidence_spec(claim)} -->{derived}<!-- /loom -->"
+
+    masked, unclosed = mask_fenced_code(text)
+    for match in EVIDENCE_SPAN.finditer(masked):
+        pieces.append(text[cursor:match.start()])
+        pieces.append(replace(match))
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    if unclosed is not None:
+        changes.append(f"line {unclosed}: unclosed code fence; nothing below it was refreshed")
+    return "".join(pieces), changes
+
+
+def refresh_evidence_file(path: Path, root: Path | None = None,
+                          derivations: dict | None = None) -> list[str]:
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    updated, changes = refresh_evidence_text(text, root=root, derivations=derivations)
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+    return changes
+
+
+def evidence_report(results: list[dict]) -> str:
+    """A readable account of one or more checks: the claims, then a verdict per file."""
+    lines: list[str] = []
+    for result in results:
+        for claim in result["claims"]:
+            state = "current" if claim["ok"] else ("STALE" if claim["derived"] is not None
+                                                  else "unresolved")
+            derived = "-" if claim["derived"] is None else claim["derived"]
+            lines.append(f"  {result.get('path', '(text)')}:{claim['line']}  "
+                         f"{evidence_spec(claim)}  recorded {claim['recorded'] or '-'}  "
+                         f"derived {derived}  {state}")
+            if claim["derived"] is not None and not claim["ok"]:
+                lines.append("    refresh: the value above is what the tree says now; "
+                             "rewrite the span instead of retyping it")
+        for problem in result["problems"]:
+            lines.append(f"  {result.get('path', '(text)')}:{problem['line']}  {problem['problem']}")
+        claims = len(result["claims"])
+        verdict = "current" if result["ok"] else "STALE"
+        lines.append(f"{result.get('path', '(text)')}: {claims} machine-checked claim(s), "
+                     f"{len(result['stale'])} stale, {len(result['problems'])} problem(s) — {verdict}")
+    return "\n".join(lines)
+
+
+EVIDENCE_TEMPLATE = """# Evidence — {task} {title}
+
+Repository: `{repo}`
+Branch: {branch}
+Source: {source}
+
+Two kinds of line live in this file, and the difference matters to a reviewer.
+
+- A **machine-checked** span is written:
+
+  ```
+  <!-- loom:<derivation> --><value><!-- /loom -->
+  ```
+
+  The markers are HTML comments, so they render as nothing: a reader sees `<value>` in the
+  sentence. The suite re-derives the value from the tree and fails when it differs, so the span
+  carries no trust and needs none. Never retype one; refresh it (the checker prints the command).
+- Everything else is **prose**. No checker reads it. A number, count or verdict written as prose
+  is a claim on the author, so if a sentence states something a machine can re-derive, mark it
+  instead of typing the value twice.
+
+| Derivation | Re-derived from | Example |
+|---|---|---|
+| `tests.count` | the suite `unittest` collects under `tests/` | `<!-- loom:tests.count --><!-- /loom -->` |
+| `validator.verdict` | the validator's exit status | `<!-- loom:validator.verdict --><!-- /loom -->` |
+| `validator.errors` | its `ERROR` lines, optionally filtered by a substring | `<!-- loom:validator.errors:{task} --><!-- /loom -->` |
+| `tracked.count` | `git ls-files` under a pathspec | `<!-- loom:tracked.count:tests --><!-- /loom -->` |
+
+A repository may register more (a sweep, a schema count) with `register_evidence_derivation`; an
+unknown derivation fails the check rather than passing as prose.
+
+## Delivered
+
+<!-- Prose. What changed, and where. Name the paths a reviewer should open. -->
+
+## Verification
+
+The suite collects <!-- loom:tests.count --><!-- /loom --> tests.
+
+The validator reports <!-- loom:validator.errors:{task} --><!-- /loom --> error(s) naming this
+task, and no others are this task's to fix.
+
+<!-- Prose. Paste the commands, not their output: a command can be run at any commit, a pasted
+block persuades and then rots. -->
+
+## Limits
+
+<!-- Prose. What this submission does not claim, and who has to act on it. -->
+"""
+
+EVIDENCE_TEMPLATE_FIELDS = {
+    "task": "<program>/<NAME>",
+    "title": "<title>",
+    "repo": "~/repositories/<repository>",
+    "branch": "`<branch>`",
+    "source": "`<40-char commit under review>`",
+}
+
+
+def render_evidence_template(root: Path | None = None, derivations: dict | None = None,
+                             **fields) -> str:
+    """The starter evidence file, with every machine-checked span filled in for `root`."""
+    values = dict(EVIDENCE_TEMPLATE_FIELDS)
+    values.update(fields)
+    text = EVIDENCE_TEMPLATE.format(**values)
+    text, _changes = refresh_evidence_text(text, root=root, derivations=derivations)
+    return text
 
 
 def require_agent(args) -> str:
