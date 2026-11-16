@@ -21,9 +21,9 @@ Two claims are forbidden in a body, and each has a detector here:
 A bare reference is not a claim: `See LOOM-5 for the attempt model.` stays allowed, because it
 asserts nothing about the relation.
 
-The detectors are exercised on synthetic sections below, so a refactor cannot quietly turn them into
-no-ops. A detector that has stopped biting looks exactly like a clean body — which is the failure
-this file exists to stop, one layer up.
+The detectors, and the problem-statement check, are exercised on synthetic sections below, so a
+refactor cannot quietly turn them into no-ops. A detector that has stopped biting looks exactly like
+a clean body — which is the failure this file exists to stop, one layer up.
 
 Run: python3 -m unittest discover -s tests -v
 """
@@ -53,12 +53,22 @@ STATUS_LABEL = re.compile(
     re.IGNORECASE,
 )
 
+# A markdown table row whose first cell is the label: `| Status | Ready |`. The label is still a
+# label the reader sees, so it is a claim even though it carries no colon.
+STATUS_ROW = re.compile(r"^\s*\|\s*(?:status|state)\s*\|", re.IGNORECASE)
+
 # `**Depends.** LOOM-5`, `Dependencies: LOOM-4`, `- Blocked by LOOM-3`. A label only claims an edge
 # when it is punctuated or names a task: prose that wraps onto a line beginning with the word
 # "dependency" is describing the rule, not asserting one.
 DEPENDENCY_LABEL = re.compile(
     LEAD + r"(?:depends(?:\s+on)?|dependencies|dependency|blocked\s+by|blocks)\b"
     r"(?P<after>[*_`]{0,2}\s*[.:])?",
+    re.IGNORECASE,
+)
+
+# The table shape: `| Dependencies | LOOM-4 |`. Punctuation is the cell boundary, not a colon.
+DEPENDENCY_ROW = re.compile(
+    r"^\s*\|\s*(?:depends(?:\s+on)?|dependencies|dependency|blocked\s+by|blocks)\s*\|",
     re.IGNORECASE,
 )
 
@@ -118,6 +128,8 @@ class Claim:
 
 def is_dependency_claim(line: str) -> bool:
     """True when the line asserts a dependency edge, whether as a label or inside a sentence."""
+    if DEPENDENCY_ROW.match(line):
+        return True
     names_a_task = TASK_REFERENCE.search(line) is not None
     label = DEPENDENCY_LABEL.match(line)
     if label and (label.group("after") or names_a_task):
@@ -133,7 +145,7 @@ def body_claims(text: str, vocabulary: tuple[str, ...] | None = None) -> list[Cl
         stripped = line.strip()
         if not stripped:
             continue
-        if STATUS_LABEL.match(line) or bare_status_claim(line, forms):
+        if STATUS_LABEL.match(line) or STATUS_ROW.match(line) or bare_status_claim(line, forms):
             claims.append(Claim(number, "status", stripped))
         if is_dependency_claim(line):
             claims.append(Claim(number, "dependency", stripped))
@@ -151,6 +163,23 @@ def sections(text: str) -> list[tuple[str, list[tuple[int, str]]]]:
         elif current is not None:
             current.append((number, line))
     return found
+
+
+def problem_statement(lines: list[tuple[int, str]]) -> list[str]:
+    """A section's prose, ending where its acceptance begins.
+
+    The cut is what makes the check real. Acceptance paragraphs wrap onto several lines, and a
+    filter that skips only the `**Acceptance.**` line counts those continuation lines as the
+    problem statement — so a section with no problem statement at all still passes. This was the
+    state of the check when review first read it.
+    """
+    prose: list[str] = []
+    for _, line in lines:
+        if line.strip().startswith("**Acceptance.**"):
+            break
+        if line.strip():
+            prose.append(line)
+    return prose
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +211,7 @@ class ClaimDetectorTest(unittest.TestCase):
             "bullet": "- Status: ready\n",
             "blockquote state": "> **State.** claimed\n",
             "label alone": "**Status.**\n",
+            "table row": "| Status | Ready |\n",
         }
         for label, body in shapes.items():
             with self.subTest(shape=label):
@@ -217,6 +247,7 @@ class ClaimDetectorTest(unittest.TestCase):
             "plural label": "Dependencies: LOOM-4\n",
             "blocked bullet": "- Blocked by LOOM-3\n",
             "inline after a status": "**Status.** Ready. Depends on LOOM-5.\n",
+            "table row": "| Dependencies | LOOM-4 |\n",
         }
         for label, body in shapes.items():
             with self.subTest(shape=label):
@@ -245,6 +276,16 @@ class ClaimDetectorTest(unittest.TestCase):
         )
         self.assertEqual(self.claims(body), [],
                          "a sentence that wrapped onto the word 'dependency' was read as an edge")
+
+    def test_the_problem_statement_check_is_not_satisfied_by_acceptance_text(self):
+        acceptance_only = [
+            (1, "**Acceptance.** The regression is covered."),
+            (2, "so a wrapped second line is still acceptance text."),
+        ]
+        self.assertEqual(problem_statement(acceptance_only), [],
+                         "acceptance text was counted as a problem statement")
+        self.assertTrue(problem_statement([(1, "The engine must fail.")] + acceptance_only),
+                        "a section with real prose was read as having none")
 
 
 # --------------------------------------------------------------------------
@@ -278,10 +319,9 @@ class WorkItemsBodyTest(unittest.TestCase):
 
     def test_every_section_keeps_its_problem_statement(self):
         for heading, lines in self.sections:
-            prose = [line for _, line in lines
-                     if line.strip() and not line.strip().startswith("**Acceptance.**")]
             with self.subTest(section=heading):
-                self.assertTrue(prose, f"{heading} has no problem statement left")
+                self.assertTrue(problem_statement(lines),
+                                f"{heading} has no problem statement before its acceptance")
 
     def test_every_acceptance_keeps_its_criteria(self):
         for heading, lines in self.sections:
