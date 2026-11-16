@@ -10,6 +10,7 @@ Run: python3 -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import unittest
@@ -252,6 +253,61 @@ class FoldTest(unittest.TestCase):
 
         result = self.invoke("foldcheck", expect=1)
         self.assertIn("BROKEN", result.stdout)
+        self.assertIn("does not match the digest recorded in the event chain", result.stdout)
+
+    def test_a_baseline_whose_row_digest_was_forged_with_it_is_still_broken(self):
+        self.snapshot()
+        connection = sqlite3.connect(self.ws.db)
+        try:
+            body = json.loads(connection.execute("SELECT body FROM snapshots").fetchone()[0])
+            body["tasks"][0]["title"] = "Forged with a matching row digest"
+            text = json.dumps(body)
+            connection.execute(
+                "UPDATE snapshots SET body = ?, digest = ?",
+                (text, hashlib.sha256(text.encode("utf-8")).hexdigest()))
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = self.invoke("foldcheck", expect=1)
+        self.assertIn("BROKEN", result.stdout)
+        self.assertIn("does not match the digest recorded in the event chain", result.stdout)
+
+    def test_a_snapshot_row_with_no_event_at_its_sequence_is_broken(self):
+        self.snapshot()
+        connection = sqlite3.connect(self.ws.db)
+        try:
+            body = json.loads(connection.execute("SELECT body FROM snapshots").fetchone()[0])
+            body["tasks"][0]["title"] = "Smuggled in without an event"
+            text = json.dumps(body)
+            connection.execute(
+                "INSERT INTO snapshots (seq, ts, digest, body) VALUES (?, ?, ?, ?)",
+                (99, T0, hashlib.sha256(text.encode("utf-8")).hexdigest(), text))
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = self.invoke("foldcheck", expect=1)
+        self.assertIn("BROKEN", result.stdout)
+        self.assertIn("snapshot 99: no event at that sequence", result.stdout)
+
+    def test_the_validator_reports_a_tampered_baseline(self):
+        self.snapshot()
+        connection = sqlite3.connect(self.ws.db)
+        try:
+            body = json.loads(connection.execute("SELECT body FROM snapshots").fetchone()[0])
+            body["tasks"][0]["title"] = "Forged at the baseline"
+            text = json.dumps(body)
+            connection.execute(
+                "UPDATE snapshots SET body = ?, digest = ?",
+                (text, hashlib.sha256(text.encode("utf-8")).hexdigest()))
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = validate(self.ws.root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fold: BROKEN snapshot", result.stdout)
         self.assertIn("does not match the digest recorded in the event chain", result.stdout)
 
     # -- rebuild ----------------------------------------------------------

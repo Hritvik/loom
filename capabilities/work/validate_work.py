@@ -676,8 +676,11 @@ def main(argv: list[str] | None = None) -> int:
                 "no fold baseline; run `loom snapshot` so foldcheck can detect a field written "
                 "without an event")
         else:
-            from engine import compare_registries, describe_divergence, fold_registry
+            from engine import (compare_registries, describe_divergence, fold_registry,
+                                snapshot_baseline_problems)
 
+            for problem in snapshot_baseline_problems(baseline, records):
+                errors.append(f"fold: BROKEN {problem}")
             folded, fold_problems, _folded_deltas = fold_registry(
                 baseline["registry"], [record for _, record in records], baseline["seq"])
             for problem in fold_problems:

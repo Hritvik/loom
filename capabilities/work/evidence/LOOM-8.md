@@ -1,8 +1,8 @@
 # Evidence — LOOM-8 check the registry against a fold of the log
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-8-a1` (worktree `~/.local/state/loom/worktrees/loom-loom-8-a1`)
-Status: green, submitted for independent review
+Branch: `loom/loom-loom-8-a3` (worktree `~/.local/state/loom/worktrees/loom-loom-8-a3`)
+Status: green, submitted for independent review (round 2)
 
 ## The problem
 
@@ -15,6 +15,44 @@ what the state should have been.
 The log records transitions, not documents, so the registry cannot be rebuilt from the beginning
 without inventing history. The honest shape is therefore forward-only: a **baseline snapshot**, then
 a log that carries the state change it made.
+
+## Round 2 — the baseline is anchored to the chain, not to itself
+
+The first review found the hole the whole task turns on: `foldcheck` compared the `snapshots` body
+against the digest column **in the same row** (`latest_snapshot` → engine's old `fold_check`). It never
+read the digest from the `snapshot` event, so one raw `INSERT INTO snapshots` that agreed with itself
+— forged body and a recomputed `digest` — was accepted as the baseline, and `foldcheck` printed "no
+divergence", `events --verify` printed "event chain OK", and the validator exited 0. Because
+`fold_registry` starts *after* the baseline's `seq`, a high row `seq` also hid every real delta beneath
+it. That is exactly the "mutation with no event, forged field accepted silently" failure this task
+exists to detect, so it was blocking.
+
+Fixed by making the event the authority:
+
+- `snapshot_baseline_problems(snapshot, records)` requires an event at the baseline's `seq`, requires
+  it to be `event == "snapshot"`, reads the digest **from that event** and compares it with
+  `sha256(canonical_registry(body))`, and verifies the hash chain up to that sequence. A missing
+  event, a different event kind, a missing digest, a mismatched digest or a broken chain each produce
+  a `problem`, which `foldcheck` prints as `BROKEN` (exit 1) and a rebuild refuses.
+- `validate_work.py` calls the same helper, so a tampered baseline is reported as `fold: BROKEN …`
+  rather than as ordinary registry-vs-log field drift.
+- The misleading message is gone: it now really names the digest recorded in the event chain.
+
+Proven on a scratch store with the reviewer's repro (snapshot, claim, then one raw
+`INSERT INTO snapshots (seq=99, body=forged registry, digest=sha256(body))` plus the matching task
+row edits):
+
+```text
+foldcheck exit 1
+BROKEN snapshot 99: no event at that sequence in the log; the baseline is unanchored and any delta beneath it would go unchecked
+task demo/W-1: field 'claim' is in the registry with no event behind it
+…
+foldcheck: 6 divergence(s) from snapshot 99
+
+events --verify exit 0 | event chain OK        # the log itself was never touched — which is why
+validate exit 1                                 # the baseline, not the chain, had to anchor it
+ERROR fold: BROKEN snapshot 99: no event at that sequence …
+```
 
 ## Delivered
 
@@ -32,7 +70,9 @@ a log that carries the state change it made.
   it just appended to.
 - **`loom snapshot`** writes the baseline: the registry as a canonical JSON document in a `snapshots`
   table plus a `snapshot` event carrying its digest and counts. The digest sits inside the hash
-  chain, so an edited snapshot body is detectable (`foldcheck` reports `BROKEN`).
+  chain, and `foldcheck` reads it from the **event**, not from the row, so editing the body and the
+  row digest together is still reported `BROKEN`. A baseline row with no event at its sequence is
+  `BROKEN` too — otherwise its `seq` would silence every delta beneath it.
   A new baseline refuses to be written while the log and registry disagree; `--force --reason TEXT`
   is the deliberate escape hatch, and the reason is recorded.
 - **`loom foldcheck`** folds `snapshot + deltas` and compares it with the registry **field by field**
@@ -46,8 +86,9 @@ a log that carries the state change it made.
   changes nothing. The `rebuild` event records the snapshot, the restore point, the divergence count
   and a diff digest, and carries **no** `state_delta` — it restores what the log already says, so
   recording the change again would double-apply it on the next fold.
-- **`validate_work.py`** runs the same comparison when a baseline exists and reports each divergence
-  as an error with the field name; without a baseline it warns instead of passing silently.
+- **`validate_work.py`** runs the same baseline-anchor check and the same comparison when a baseline
+  exists, reporting a tampered baseline as `fold: BROKEN …` and each divergence as an error with the
+  field name; without a baseline it warns instead of passing silently.
 - **README** documents the three verbs and the forward-only rule (see Limits: the row is required by
   `tests/test_surface.py`).
 
@@ -62,17 +103,22 @@ a log that carries the state change it made.
 
 Supporting: `test_a_claim_carries_its_delta_and_the_attempt_does_not`,
 `test_a_batch_mutation_puts_its_remaining_delta_on_the_last_event`,
-`test_a_tampered_snapshot_body_is_reported`, `test_a_second_snapshot_refuses_to_bless_a_divergent_registry`,
+`test_a_tampered_snapshot_body_is_reported`,
+`test_a_baseline_whose_row_digest_was_forged_with_it_is_still_broken` (body **and** digest column
+forged, still `BROKEN` because the event names the digest),
+`test_a_snapshot_row_with_no_event_at_its_sequence_is_broken` (the reviewer's laundering path),
+`test_the_validator_reports_a_tampered_baseline`,
+`test_a_second_snapshot_refuses_to_bless_a_divergent_registry`,
 `test_the_validator_reports_a_dropped_field`.
 
 ## Verification
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s tests      # 293 tests, OK (2 skipped)
-python3 -m unittest discover -s tests -p "test_fold.py"   # 17 tests, OK
-python3 validate_work.py                   # same pre-existing error as the release, plus the new
-                                           # "no fold baseline" warning until the live DB snapshots
+python3 -m unittest discover -s tests      # 296 tests, OK (2 skipped)
+python3 -m unittest discover -s tests -p "test_fold.py"   # 20 tests, OK
+python3 validate_work.py --today 2026-11-16 # same pre-existing error as the release, plus the new
+                                            # "no fold baseline" warning until the live DB snapshots
 ./loom --help                              # snapshot, foldcheck, rebuild are routed engine verbs
 ```
 
@@ -103,6 +149,10 @@ foldcheck: no divergence from snapshot 3 (2 state delta(s) over 4 event(s))
 - **Batch attribution on the last event** matches the transaction: one event covers the batch it
   closes. The alternative was a synthetic state event per write, which doubles the log.
 - **The rebuild event does not carry a delta**, for the same reason a restore is not a change.
+- **The baseline is anchored by its event, not its row.** A digest stored beside the body it
+  describes only proves internal consistency; storing it in the hash-chained event is what makes the
+  body tamper-evident. Requiring an event at the baseline's `seq` also closes the second half of the
+  attack, where a high `seq` would hide the deltas the fold never reads.
 - **`unexplained` records fail the diff.** A task with no create event is evidence of a writer that
   bypassed the CLI; deleting it would destroy the evidence the check exists to surface.
 

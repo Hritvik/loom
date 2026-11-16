@@ -3658,6 +3658,41 @@ def describe_divergence(item: dict) -> str:
             f"registry {_short(item['registry'])}")
 
 
+def snapshot_baseline_problems(snapshot: dict, records: list[tuple[bytes, dict]]) -> list[str]:
+    """Prove the baseline body is the one the hash chain committed to.
+
+    The body is a row in `snapshots`; the digest that names it was written by a `snapshot` event at
+    the same sequence. Comparing the body against the row's own digest only proves that whoever
+    edited both agreed with themselves, so the digest is read from the event, an event is required
+    to exist at that sequence, and the chain is verified up to it. `fold_registry` starts after the
+    baseline's sequence, so an unanchored sequence would also hide every delta beneath it.
+    """
+    seq = snapshot["seq"]
+    record = next((candidate for _, candidate in records
+                   if int(candidate.get("seq") or 0) == seq), None)
+    if record is None:
+        return [f"snapshot {seq}: no event at that sequence in the log; the baseline is unanchored "
+                "and any delta beneath it would go unchecked"]
+    if record.get("event") != "snapshot":
+        return [f"snapshot {seq}: the log records a {record.get('event')!r} event there, not a "
+                "snapshot; the baseline is unanchored"]
+    problems: list[str] = []
+    digest = hashlib.sha256(canonical_registry(snapshot["registry"]).encode("utf-8")).hexdigest()
+    anchored = record.get("digest")
+    if not anchored:
+        problems.append(f"snapshot {seq}: the snapshot event carries no digest")
+    elif digest != anchored:
+        problems.append(
+            f"snapshot {seq} body digest {digest[:12]}… does not match the digest recorded in the "
+            f"event chain {anchored[:12]}…")
+    through = [pair for pair in records if int(pair[1].get("seq") or 0) <= seq]
+    chain = verify_event_chain(through)
+    if chain:
+        problems.append(
+            f"snapshot {seq}: the event chain does not verify up to the baseline ({chain[0]})")
+    return problems
+
+
 def fold_check(store: Store) -> dict:
     """Fold the log from its baseline and compare it with the registry on disk."""
     snapshot = store.latest_snapshot()
@@ -3666,15 +3701,10 @@ def fold_check(store: Store) -> dict:
             f"no snapshot in {store.describe()}: the log has no fold baseline, and this engine "
             "does not backfill one. Run `loom snapshot` and check forward from there.")
     registry, records = store.snapshot()
-    folded, problems, applied = fold_registry(
+    problems = snapshot_baseline_problems(snapshot, records)
+    folded, fold_problems, applied = fold_registry(
         snapshot["registry"], [record for _, record in records], snapshot["seq"])
-    digest = hashlib.sha256(canonical_registry(snapshot["registry"]).encode("utf-8")).hexdigest()
-    if digest != snapshot["digest"]:
-        # The body is a table row; the digest is inside the hash chain. If they disagree the
-        # baseline was edited, and everything folded from it is unverifiable.
-        problems.insert(0, (
-            f"snapshot {snapshot['seq']} body digest {digest[:12]}… does not match the digest "
-            f"recorded in the event chain {snapshot['digest'][:12]}…"))
+    problems.extend(fold_problems)
     return {
         "snapshot": snapshot,
         "registry": registry,
