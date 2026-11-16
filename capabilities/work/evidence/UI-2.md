@@ -22,7 +22,7 @@ claimability or its review with its integration.
 | `ui/tests/test_pages.py` | 23 HTTP/accessibility tests |
 | `ui/tests/support.py` | `ControlHome`: a fixture with one task in every queue and real review/receipt history |
 
-Suite total: **119 tests, OK** (62 from UI-1, 57 new).
+Suite total: **119 tests, OK** (63 existing, 56 new).
 
 ## Decisions and their reasons
 
@@ -79,12 +79,15 @@ All commands run from `capabilities/work` on this branch (`f9f0c27` before the e
 
 ```bash
 $ python3 -m unittest discover -s ui/tests -t ui/tests
-Ran 119 tests in 29.4s
+Ran 119 tests in 28.7s
 OK
 ```
 
-Coverage: `test_snapshot.py` (8), `test_model.py` (13), `test_version.py` (9),
-`test_provenance.py` (15), `test_server.py` (17), `test_control.py` (33), `test_pages.py` (23).
+Coverage by file: `test_snapshot.py` (9), `test_model.py` (14), `test_version.py` (8),
+`test_provenance.py` (16), `test_server.py` (16), `test_control.py` (33), `test_pages.py` (23).
+The 63 pre-existing tests pass unchanged: `support.py` only gains the richer `ControlHome`
+subclass and leaves `Home` untouched, and the control room keeps the index-page phrases UI-1's
+tests assert.
 The new tests assert, among others: one queue per task and counts that sum; owner routing from
 `HUMAN_IDENTITIES` and `--owner`; current vs stale vs superseded review requests; rework, rejected,
 agent-blocked and never-submitted stalls; bound vs incomplete receipts; approved-but-not-transitioned
@@ -98,7 +101,7 @@ three pages.
 
 ```bash
 $ python3 -m unittest discover -s tests
-Ran 276 tests in 89.1s
+Ran 276 tests in 90.0s
 OK (skipped=2)
 ```
 
