@@ -100,6 +100,25 @@ class ProvenanceTest(unittest.TestCase):
         self.assertEqual(signal.status, "degraded")
         self.assertEqual(signal.data["unreadable"], ["demo/W-2"])
 
+    def test_process_does_not_flag_a_claim_inside_the_start_grace(self):
+        # The claim opens the attempt; the spawn attaches the process a moment later. Reporting
+        # this as degraded would call a normal hand-off an unreadable run.
+        self.home.append(event="attempt", task="demo/W-2", agent="opencode/worker",
+                         role="implementer", attempt="demo/W-2#a1", state="starting",
+                         now=iso())
+        signal = self.sample()["process"]
+        self.assertEqual(signal.status, "ok")
+        self.assertEqual(signal.data["unreadable"], [])
+        self.assertEqual(signal.data["open"], 1)
+
+    def test_process_flags_a_claim_whose_start_grace_ran_out(self):
+        self.home.append(event="attempt", task="demo/W-2", agent="opencode/worker",
+                         role="implementer", attempt="demo/W-2#a1", state="starting",
+                         now="2026-11-15T12:00:00Z")
+        signal = self.sample()["process"]
+        self.assertEqual(signal.status, "degraded")
+        self.assertEqual(signal.data["unreadable"], ["demo/W-2"])
+
     def test_scheduler_is_degraded_without_a_launch_agent(self):
         signal = self.sample()["scheduler"]
         self.assertEqual(signal.status, "degraded")

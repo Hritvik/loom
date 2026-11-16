@@ -18,9 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import engine
+import store
 
 from .paths import front_door
-from .model import RegistryView
+from .model import RegistryView, attempt_start_grace_expired
 from .snapshot import Snapshot
 from .version import EngineVersion
 
@@ -79,12 +80,23 @@ def process(_source: str, sampled: str, snapshot: Snapshot) -> Signal:
     The engine stopped writing a state on `launch` records; the run's state lives on an `attempt`.
     Reading `state == "pending"` here would report zero live processes while workers run, which is
     the one thing this surface exists to catch.
+
+    A pid-less attempt is only unreadable once its start grace is spent: a claim that has not yet
+    been spawned is normal, and calling it unhealthy would disagree with the reaper's own window
+    (``engine.reconcile_launches``). A launch record that already claims to have spawned the run and
+    still carries no pid is unreadable immediately, because the hand-off itself is incomplete.
     """
     views = engine.attempt_views(snapshot.events)
     live = engine.live_attempts(views)
     open_attempts = [item for item in views.values()
                      if item.get("state") not in engine.ATTEMPT_TERMINAL]
-    unreadable = [item.get("task", "") for item in open_attempts if not item.get("pid")]
+    now = store.parse_time(snapshot.as_of)
+    grace = engine.parse_duration(engine.ATTEMPT_START_GRACE)
+    unreadable = [item.get("task", "") for item in open_attempts
+                  if not item.get("pid")
+                  and (any(launch.get("closes") is None
+                           for launch in item.get("launches") or ())
+                       or attempt_start_grace_expired(item, now, grace))]
     detail = f"{len(live)} live worker process(es) of {len(open_attempts)} open attempt(s)"
     status = OK
     if unreadable:

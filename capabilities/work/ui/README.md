@@ -168,16 +168,20 @@ They are never merged into one timestamp. Two sources sampled a second apart are
 | Stuck attempts | live attempts older than the configured `worker.stuck_after` | `loom tick` "Stuck attempts" |
 | Failed / stale / lost launches | terminal `failed` attempts; `starting` attempts past `ATTEMPT_START_GRACE`; open attempts whose process is gone | the attempt record |
 | Last tick pass | the last line of `~/.local/state/loom/tick.decisions.jsonl` (or `$LOOM_TICK_DECISIONS`) | the recorded `tick --apply` pass |
-| Schedule | the launch agent plist plus `launchctl list` | `loom schedule status` |
+| Schedule | the launch agent plist plus `launchctl list`; the interval is labelled `plist`, `config` or `default` | `loom schedule status` |
 | Release | `engine.release`, the running root and a recomputed tree digest | the UI gate verdict; `loom deploy status` additionally compares development HEAD, a different question |
 | Tick log | a bounded tail of `~/.local/state/loom/tick.log` | `loom schedule status` log tail |
 
 Every fact above belongs to one of seven independently sampled sources: `database`, `process`,
-`launches`, `tick`, `scheduler`, `release` and `logs`. Each has its own `as_of` and status. A tick
-record older than three schedule intervals is shown degraded, never as current health; a missing log
-or decision record is `unavailable`, not an empty success. The UI never executes `tick`, starts or
-stops a job, promotes or rolls back a release, or dispatches a worker. A page refresh runs only
-reads.
+`launches`, `tick`, `scheduler`, `release` and `logs`. Each has its own `as_of` and status. The start
+grace is one predicate (`model.attempt_start_grace_expired`): a claim inside `ATTEMPT_START_GRACE` is
+healthy in both `process` and `launches`, and only past it is the missing process a degradation.
+Failure rows are displayed at most `MAX_FAILURES` at a time but counted in full (`failures_total`).
+A tick record older than three schedule intervals is shown degraded, never as current health; when
+no plist supplies the interval, the view says which of `plist`, `config` or the installer default the
+threshold rests on. A missing log or decision record is `unavailable`, not an empty success. The UI
+never executes `tick`, starts or stops a job, promotes or rolls back a release, or dispatches a
+worker. A page refresh runs only reads.
 
 ## Tests
 

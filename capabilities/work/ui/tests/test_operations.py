@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import Home  # noqa: E402
 
 import engine  # noqa: E402
-from loom_ui import operations, server, snapshot, templates, version  # noqa: E402
+from loom_ui import operations, provenance, server, snapshot, templates, version  # noqa: E402
 
 SOURCES = ("database", "process", "launches", "tick", "scheduler", "release", "logs")
 
@@ -132,6 +132,46 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual([item.kind for item in ops.failures], ["stale-start"])
         self.assertIn("never attached", ops.failures[0].reason)
 
+    def test_a_claim_still_inside_the_start_grace_is_not_unhealthy(self):
+        # The claim opens the attempt; the spawn attaches the process. Inside the grace the missing
+        # pid is a hand-off in progress, so neither the process capacity nor the launch record may
+        # call the same attempt degraded.
+        self.home.append(event="attempt", task="demo/W-2", agent="opencode/worker",
+                         role="implementer", attempt="demo/W-2#a1", state="starting",
+                         now=iso())
+        _, ops = self.collect()
+        self.assertEqual(ops.source("process").status, "ok")
+        self.assertEqual(ops.source("launches").status, "ok")
+        self.assertEqual(ops.failures, ())
+        self.assertEqual(ops.capacity.open_attempts, 1)
+        self.assertEqual(ops.capacity.live_attempts, 0)
+
+    def test_a_stale_start_degrades_both_sources_about_the_same_attempt(self):
+        self.home.append(event="attempt", task="demo/W-2", agent="opencode/worker",
+                         role="implementer", attempt="demo/W-2#a1", state="starting",
+                         now="2026-11-15T12:00:00Z")
+        _, ops = self.collect()
+        self.assertEqual([item.kind for item in ops.failures], ["stale-start"])
+        self.assertEqual(ops.source("process").status, "degraded")
+        self.assertIn(engine.ATTEMPT_START_GRACE, ops.source("process").detail)
+        self.assertEqual(ops.source("launches").status, "degraded")
+
+    def test_the_failure_headline_counts_every_record_not_only_the_listed_ones(self):
+        for index in range(25):
+            self.home.append(event="attempt", task=f"demo/W-{index}", agent="opencode/worker",
+                             role="implementer", attempt=f"demo/W-{index}#a1", state="failed",
+                             reason="launch failed: worker exited 2", now=iso())
+        _, ops = self.collect()
+        self.assertEqual(len(ops.failures), operations.MAX_FAILURES)
+        self.assertEqual(ops.failures_total, 25)
+        self.assertEqual(ops.source("launches").data["failures"], 25)
+        self.assertEqual(ops.source("launches").data["shown"], operations.MAX_FAILURES)
+        self.assertEqual(ops.source("launches").data["not_shown"], 5)
+        self.assertIn("25 failed", ops.source("launches").detail)
+        self.assertIn("the most recent 20 are listed", ops.source("launches").detail)
+        page = templates.operations_page(ops, version.inspect())
+        self.assertIn("25 recorded; the most recent 20 are listed.", page)
+
     def test_a_run_whose_process_vanished_is_lost(self):
         child = subprocess.Popen(["sleep", "30"])
         self.home.append(event="attempt", task="demo/W-3", agent="opencode/worker",
@@ -207,6 +247,46 @@ class OperationsTest(unittest.TestCase):
             _, ops = self.collect()
         self.assertEqual(ops.schedule.job, "not loaded")
         self.assertEqual(ops.schedule.status, "degraded")
+
+    def test_the_schedule_interval_records_where_it_was_read_from(self):
+        self.home.launch_agent(interval=60)
+        with unittest.mock.patch.object(operations, "_launchctl_listing",
+                                        return_value=("PID\tStatus\tLabel\n-\t0\tlocal.loom-tick\n",
+                                                      None)):
+            _, ops = self.collect()
+        self.assertEqual((ops.schedule.interval_seconds, ops.schedule.interval_source),
+                         (60, "plist"))
+
+    def test_an_interval_no_plist_supplies_is_reported_with_its_source(self):
+        # The front door's DEFAULTS carry schedule.tick_interval, so without a plist the value is
+        # the engine's configured interval, not the plist's StartInterval. Name the source rather
+        # than presenting it as observed.
+        _, ops = self.collect()
+        self.assertEqual((ops.schedule.interval_seconds, ops.schedule.interval_source),
+                         (operations.DEFAULT_TICK_INTERVAL, "config"))
+        self.assertIn(f"assumed {operations.DEFAULT_TICK_INTERVAL}s", ops.schedule.detail)
+        self.assertIn("from the config", ops.schedule.detail)
+        self.assertEqual(ops.tick.stale_after_seconds,
+                         operations.DEFAULT_TICK_INTERVAL * operations.TICK_STALE_INTERVALS)
+
+    def test_the_tick_interval_prefers_the_plist_then_the_config_then_the_default(self):
+        plist = provenance.Signal(source="scheduler", status="ok", as_of=iso(), detail="",
+                                  data={"interval_seconds": 300})
+        bare = provenance.Signal(source="scheduler", status="degraded", as_of=iso(), detail="",
+                                 data={})
+        self.assertEqual(operations._tick_interval(plist, {}), (300, "plist"))
+        self.assertEqual(
+            operations._tick_interval(bare, {"schedule": {"tick_interval": 90}}), (90, "config"))
+        self.assertEqual(operations._tick_interval(bare, {}),
+                         (operations.DEFAULT_TICK_INTERVAL, "default"))
+
+    def test_a_stale_tick_says_where_its_interval_came_from(self):
+        self.decisions({"ts": "2026-11-15T12:00:00Z", "active": {}, "limits": {},
+                        "launched": [], "reviews": [], "held": {}, "problems": []})
+        _, ops = self.collect()
+        self.assertTrue(ops.tick.stale)
+        self.assertIn("config interval, not the installed plist", ops.tick.detail)
+        self.assertIn("older than", ops.tick.detail)
 
     def test_the_tick_log_is_tailed_and_escaped(self):
         path = self.home.home_dir / ".local/state/loom/tick.log"

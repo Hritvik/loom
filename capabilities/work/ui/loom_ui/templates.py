@@ -606,8 +606,8 @@ def _schedule(ops: OperationsView) -> str:
         ("plist", schedule.plist),
         ("launchd job", schedule.job),
         ("launchctl row", schedule.launchctl),
-        ("interval", (f"{schedule.interval_seconds}s"
-                      if schedule.interval_seconds else "unknown")),
+        ("interval", (f"{schedule.interval_seconds}s from the {schedule.interval_source}"
+                      if schedule.interval_seconds and schedule.interval_source else "unknown")),
         ("program", " ".join(schedule.program_arguments) or "unknown"),
         ("tick log", schedule.log),
         ("sampled", schedule.as_of),
@@ -644,8 +644,8 @@ def _log(ops: OperationsView) -> str:
     if not log.lines:
         return note
     body = "\n".join(log.lines)
-    return (note + '<div class="table-scroll" role="region" aria-label="Tick log tail" '
-                   f'tabindex="0"><pre>{esc(body)}</pre></div>')
+    return note + ('<pre tabindex="0" role="region" aria-label="Tick log tail">'
+                   f"{esc(body)}</pre>")
 
 
 def operations_page(ops: OperationsView, version: EngineVersion) -> str:
@@ -668,7 +668,7 @@ reads.</p>
 {_failures(ops.stuck, "No live attempt is over the stuck threshold.")}
 
 <h2>Failed, stale and lost launches</h2>
-{_failures(ops.failures, "No failed, stale or lost launch is recorded.")}
+{_failures(ops.failures, "No failed, stale or lost launch is recorded.", ops.failures_total)}
 
 <h2>Last recorded tick pass</h2>
 {_tick(ops)}

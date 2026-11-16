@@ -32,6 +32,7 @@ import engine
 import store
 
 from . import provenance
+from .model import attempt_start_grace_expired
 from .paths import front_door
 from .snapshot import Snapshot
 from .version import EngineVersion
@@ -46,6 +47,10 @@ MAX_LOG_LINES = 20
 MAX_TAIL_BYTES = 64 * 1024
 LAUNCHCTL_TIMEOUT = 5
 TICK_STALE_INTERVALS = 3
+# `loom schedule install` writes StartInterval from config schedule.tick_interval with this literal
+# default (front door, `loom:470`). The key is not in the front door's DEFAULTS, so a config without
+# it plus a plist we cannot read leaves the interval assumed rather than observed; callers record
+# which of the three it was.
 DEFAULT_TICK_INTERVAL = 120
 
 
@@ -187,6 +192,7 @@ class ScheduleView:
     job: str
     launchctl: str | None
     interval_seconds: int | None
+    interval_source: str | None
     program_arguments: tuple[str, ...]
     log: str
     status: str
@@ -238,6 +244,7 @@ class OperationsView:
     schedule: ScheduleView
     release: ReleaseView
     log: LogView
+    failures_total: int = 0
     sources: tuple[provenance.Signal, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
@@ -250,6 +257,7 @@ class OperationsView:
             "expired_leases": [item.to_dict() for item in self.expired_leases],
             "stuck": [item.to_dict() for item in self.stuck],
             "failures": [item.to_dict() for item in self.failures],
+            "failures_total": self.failures_total,
             "tick": self.tick.to_dict(),
             "schedule": self.schedule.to_dict(),
             "release": self.release.to_dict(),
@@ -321,14 +329,14 @@ def _process(snapshot: Snapshot, now: datetime, sampled: str, config: dict,
     attempts: list[AttemptView] = []
     stuck: list[FailureView] = []
     failures: list[FailureView] = []
-    # Failures are never truncated by the attempt limit: an old failed launch is still a fact.
+    # Failures are counted over every attempt and truncated only by the display limit, so a
+    # headline never reports a capped list as if it were the whole record.
     for item in ordered:
         started = _parse(item.get("started_at") or item.get("opened_at") or item.get("ts"))
         age = _seconds(now, started)
         alive = engine.attempt_is_live(item)
         state = str(item.get("state") or "")
-        stale = bool(state == "starting" and age is not None
-                     and age > grace.total_seconds())
+        stale = bool(state == "starting" and attempt_start_grace_expired(item, now, grace))
         if len(attempts) < MAX_ATTEMPTS:
             attempts.append(AttemptView(
                 attempt=str(item.get("attempt") or ""),
@@ -379,7 +387,11 @@ def _process(snapshot: Snapshot, now: datetime, sampled: str, config: dict,
                 at=item.get("started_at") or item.get("opened_at")))
 
     status = OK
-    unreadable = [item for item in open_attempts if not item.get("pid")]
+    # A pid-less open attempt is only unreadable once its start grace has run out: before that the
+    # claim is simply waiting for the spawn. Both this and the stale-start failure use the one age
+    # predicate, so the process and launches sources cannot disagree about the same attempt.
+    unreadable = [item for item in open_attempts
+                  if not item.get("pid") and attempt_start_grace_expired(item, now, grace)]
     detail = (f"{len(live)} live worker process(es) of {len(open_attempts)} open attempt(s); "
               f"capacity " + ", ".join(f"{role} {active[role]}/{limits[role]}" for role in roles))
     if config_error:
@@ -387,7 +399,8 @@ def _process(snapshot: Snapshot, now: datetime, sampled: str, config: dict,
         detail += f"; limits unavailable ({config_error})"
     if unreadable:
         status = DEGRADED
-        detail += f"; {len(unreadable)} open attempt(s) carry no pid"
+        detail += (f"; {len(unreadable)} open attempt(s) past the {engine.ATTEMPT_START_GRACE} "
+                   f"start grace carry no pid")
 
     capacity = CapacityView(limits=limits, active=active, available=available,
                             live_attempts=len(live), live_reviewers=live_reviewers,
@@ -398,22 +411,26 @@ def _process(snapshot: Snapshot, now: datetime, sampled: str, config: dict,
                                     "live": len(live), "open": len(open_attempts),
                                     "unreadable": [item.get("task") for item in unreadable]}),
             capacity, tuple(attempts), tuple(sorted(stuck, key=lambda item: item.task)),
-            tuple(sorted(failures, key=lambda item: (item.at or "", item.task),
-                         reverse=True)[:MAX_FAILURES]))
+            tuple(sorted(failures, key=lambda item: (item.at or "", item.task), reverse=True)))
 
 
 def _launches(sampled: str, stuck: tuple[FailureView, ...],
-              failures: tuple[FailureView, ...]
+              failures: tuple[FailureView, ...], shown: int
               ) -> tuple[provenance.Signal, provenance.Signal]:
     status = DEGRADED if (stuck or failures) else OK
-    detail = (f"{len(failures)} failed, stale or lost launch(es); "
+    total = len(failures)
+    detail = (f"{total} failed, stale or lost launch(es); "
               f"{len(stuck)} attempt(s) over the stuck threshold")
+    if shown < total:
+        detail += f"; the most recent {shown} are listed"
     signal = provenance.Signal(source="launches", status=status, as_of=sampled, detail=detail,
-                               data={"failures": len(failures), "stuck": len(stuck)})
+                               data={"failures": total, "shown": min(shown, total),
+                                     "not_shown": max(total - shown, 0), "stuck": len(stuck)})
     return signal, signal
 
 
-def _tick(now: datetime, sampled: str, interval: int) -> tuple[provenance.Signal, TickView]:
+def _tick(now: datetime, sampled: str, interval: int, interval_source: str | None
+          ) -> tuple[provenance.Signal, TickView]:
     path = _tick_decisions_path()
     stale_after = max(interval, 1) * TICK_STALE_INTERVALS
     if not path.is_file():
@@ -460,14 +477,19 @@ def _tick(now: datetime, sampled: str, interval: int) -> tuple[provenance.Signal
               f": {launched} launch(es), {reviews} review(s), {held} held, "
               f"{problems} problem(s)")
     if stale:
-        detail += f"; older than {stale_after}s (3 x the {interval}s schedule)"
+        basis = f"3 x the {interval}s schedule"
+        if interval_source != "plist":
+            basis += f" ({interval_source} interval, not the installed plist)"
+        detail += f"; older than {stale_after}s ({basis})"
     view = TickView(path=str(path), record=record, age_seconds=age, stale=stale,
                     stale_after_seconds=stale_after, status=status, as_of=str(record["ts"]),
                     detail=detail)
     return (provenance.Signal(source="tick", status=status, as_of=str(record["ts"]),
                               detail=detail,
                               data={"path": str(path), "record": record, "age_seconds": age,
-                                    "stale": stale, "stale_after_seconds": stale_after}),
+                                    "stale": stale, "stale_after_seconds": stale_after,
+                                    "interval_seconds": interval,
+                                    "interval_source": interval_source}),
             view)
 
 
@@ -496,6 +518,8 @@ def _schedule(sampled: str, config: dict) -> tuple[provenance.Signal, ScheduleVi
     else:
         job = "unknown"
 
+    interval, interval_source = _tick_interval(base, config)
+
     status = base.status
     detail = base.detail
     if job == "loaded":
@@ -506,14 +530,17 @@ def _schedule(sampled: str, config: dict) -> tuple[provenance.Signal, ScheduleVi
     else:
         status = DEGRADED
         detail += f"; cannot read launchctl list ({error})"
+    if interval_source != "plist":
+        detail += (f"; tick interval assumed {interval}s from the {interval_source}, "
+                   f"not read from the plist")
 
-    interval = base.data.get("interval_seconds")
     view = ScheduleView(
         label=label,
         plist=base.data.get("plist"),
         job=job,
         launchctl=row,
         interval_seconds=interval,
+        interval_source=interval_source,
         program_arguments=tuple(base.data.get("program_arguments") or ()),
         log=str(_tick_log_path()),
         status=status,
@@ -522,7 +549,32 @@ def _schedule(sampled: str, config: dict) -> tuple[provenance.Signal, ScheduleVi
     )
     return (provenance.Signal(source="scheduler", status=status, as_of=sampled, detail=detail,
                               data={**base.data, "job": job, "launchctl": row,
-                                    "log": view.log}), view)
+                                    "interval_seconds": interval,
+                                    "interval_source": interval_source, "log": view.log}), view)
+
+
+def _tick_interval(base: provenance.Signal, config: dict) -> tuple[int, str]:
+    """The tick interval and where it came from: the plist, the config, or the installer default.
+
+    ``loom schedule install`` writes ``StartInterval`` from the front door's
+    ``schedule.tick_interval``, so a plist that records one is the measured value. Without it the
+    engine's own configuration is the next best observation — and when the front door cannot be
+    read at all, the installer's literal 120s is an assumption. Naming which of the three the
+    threshold rests on keeps the tick's "3 x the schedule" freshness from reading as measured.
+    """
+    observed = base.data.get("interval_seconds")
+    if observed:
+        try:
+            return int(observed), "plist"
+        except (TypeError, ValueError):
+            pass
+    configured = (config.get("schedule", {}) or {}).get("tick_interval")
+    if configured:
+        try:
+            return int(configured), "config"
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_TICK_INTERVAL, "default"
 
 
 def _release(version: EngineVersion, sampled: str
@@ -587,8 +639,9 @@ def _empty_tick(sampled: str, interval: int) -> TickView:
 
 def _empty_schedule(sampled: str) -> ScheduleView:
     return ScheduleView(label=None, plist=None, job="unknown", launchctl=None,
-                        interval_seconds=None, program_arguments=(), log=str(_tick_log_path()),
-                        status=UNAVAILABLE, as_of=sampled, detail="not sampled")
+                        interval_seconds=None, interval_source=None, program_arguments=(),
+                        log=str(_tick_log_path()), status=UNAVAILABLE, as_of=sampled,
+                        detail="not sampled")
 
 
 def _empty_release(version: EngineVersion, sampled: str) -> ReleaseView:
@@ -640,7 +693,8 @@ def collect(snapshot: Snapshot, version: EngineVersion) -> OperationsView:
                            detail=f"could not sample: {config_error or 'no event log'}",
                            data={}), _empty_capacity(), (), (), ()))
     launches_signal, _ = _safe(
-        "launches", sampled, lambda: _launches(sampled, stuck, failures),
+        "launches", sampled, lambda: _launches(sampled, stuck, failures,
+                                               min(len(failures), MAX_FAILURES)),
         provenance.Signal(source="launches", status=UNAVAILABLE, as_of=sampled,
                           detail="could not sample the launch record", data={}))
     schedule_signal, schedule = _safe(
@@ -648,10 +702,10 @@ def collect(snapshot: Snapshot, version: EngineVersion) -> OperationsView:
         (provenance.Signal(source="scheduler", status=UNAVAILABLE, as_of=sampled,
                            detail="could not sample the schedule", data={}),
          _empty_schedule(sampled)))
-    interval = schedule.interval_seconds or int(
-        (config.get("schedule", {}) or {}).get("tick_interval", DEFAULT_TICK_INTERVAL))
+    interval = schedule.interval_seconds or DEFAULT_TICK_INTERVAL
+    interval_source = schedule.interval_source or "default"
     tick_signal, tick = _safe(
-        "tick", sampled, lambda: _tick(now, sampled, interval),
+        "tick", sampled, lambda: _tick(now, sampled, interval, interval_source),
         (provenance.Signal(source="tick", status=UNAVAILABLE, as_of=sampled,
                            detail="could not sample the tick record", data={}),
          _empty_tick(sampled, interval)))
@@ -673,11 +727,12 @@ def collect(snapshot: Snapshot, version: EngineVersion) -> OperationsView:
         attempts=attempts,
         expired_leases=leases,
         stuck=stuck,
-        failures=failures,
+        failures=tuple(failures[:MAX_FAILURES]),
         tick=tick,
         schedule=schedule,
         release=release,
         log=log,
+        failures_total=len(failures),
         sources=(database_signal, process_signal, launches_signal, tick_signal,
                  schedule_signal, release_signal, log_signal),
     )
