@@ -35,14 +35,18 @@ the eighth explicitly marked "not an artefact kind".
 
 ## Verification
 
-Run from `capabilities/work` at the commit that carries this file. It changes only this file, so the
-deliverable is the one the delta reviews inspected.
+Two working directories, because the pathspecs and the modules live in different ones. The git lines
+use `:/`, which resolves from the repository root wherever they are run: without it, running them
+from `capabilities/work` matches nothing and prints empty for any tree.
 
 ```bash
-git diff --stat 38dbdf3..HEAD -- docs/artifacts.md templates   # empty
-git diff --stat 8168ddc..HEAD -- docs/artifacts.md templates   # empty
-python3 -m unittest discover -s tests                          # passes, skips without the denylist
-python3 validate_work.py                                       # PASS; warnings are shared state
+# repository root (or anywhere: :/ makes the pathspec root-relative)
+git diff --stat 38dbdf3..HEAD -- :/docs/artifacts.md :/templates   # empty
+git diff --stat 8168ddc..HEAD -- :/docs/artifacts.md :/templates   # empty
+
+# capabilities/work
+python3 -m unittest discover -s tests   # passes; skips without the denylist
+python3 validate_work.py                # PASS; warnings are shared registry state
 ```
 
 No counts are recorded here on purpose. Every number in this file's earlier drafts was true when
@@ -52,11 +56,12 @@ anyway. Each line above prints its own current value; read it there.
 - **Suite.** Passes. The two skips are `test_boundary.PrivateDenylistTest`, which need
   `LOOM_BOUNDARY_DENYLIST`.
 - **Validator.** `PASS`. Warnings belong to the shared registry, not to this diff; the current list
-  is `python3 validate_work.py | grep '^WARN'`. The only warning that can name this task is the
-  program-board drift line, and it names it only while the board line and the registry status differ.
+  is `python3 validate_work.py | grep '^WARN'`. Three classes can name this task: program-board
+  drift while the board line and the registry status differ, a lease that has expired, and — while
+  the task sits in review — the reviewed-receipt warning. The "only" in an earlier draft was wrong.
 - **Templates.** Nine files under `templates/`: the eight starters above plus
   `linear-portfolio.example.json`. Every `../templates/` link in `docs/artifacts.md` resolves; no
-  program name from this portfolio appears under `templates/`; the two YAML files and the JSON parse.
+  private program name appears under `templates/` (the only `loom` there is the CLI invocation); the two YAML files and the JSON parse.
 - **Taxonomy.** `docs/artifacts.md` has a seven-row kind table and an eight-row template table whose
   last row is marked "not an artefact kind".
 
