@@ -6,8 +6,7 @@ acceptance live there, and nothing else does. Identity, status, claims, leases a
 live in the registry, where a change appends an event and a revision. A `**Status.**` line or a
 `Depends on …` sentence in a body is a second copy of that state with no transaction behind it, and
 it drifts. It drifted in this file: twelve sections claimed `Reviewed` or `Ready` while the registry
-recorded six of them integrated with receipts, and the validator named every one of the eight that
-disagreed.
+recorded six of them integrated with receipts, and the validator named every section that disagreed.
 
 Two claims are forbidden in a body, and each has a detector here:
 
@@ -80,8 +79,8 @@ DEPENDENCY_PHRASE = re.compile(
 )
 
 # A task reference: an optional `<program>/` prefix, then a name that starts uppercase, carries a
-# number and has at least one hyphen segment (`LOOM-5`, `W10-A`, `dutch-ref/W10-B`). Lowercase
-# hyphenated words and paths are not ids.
+# number and has at least one hyphen segment (`LOOM-5`, `W-2`, `demo/W-2`). Lowercase hyphenated
+# words and paths are not ids.
 TASK_REFERENCE = re.compile(
     r"(?<![A-Za-z0-9_])"
     r"(?:[a-z][a-z0-9.-]{0,62}/)?"
@@ -253,9 +252,23 @@ class ClaimDetectorTest(unittest.TestCase):
             with self.subTest(shape=label):
                 self.assertIn("dependency", self.kinds(body), f"{label} was not seen as a claim")
 
+    def test_a_dependency_row_without_a_task_reference_needs_the_row_detector(self):
+        """The one fixture only `DEPENDENCY_ROW` can catch, so that detector cannot become a no-op.
+
+        `| Dependencies | LOOM-4 |` proves nothing about the row detector: the phrase and reference
+        detectors catch it too, so the row detector could be replaced with a never-matching pattern
+        and the suite stayed green. A row with no task id in it is caught by nothing else, which is
+        what makes this fixture a test of the detector rather than of the words in it.
+        """
+        row = "| Dependencies | none |\n"
+        self.assertIsNone(TASK_REFERENCE.search(row),
+                          "the fixture names a task, so the phrase detector could catch it instead")
+        self.assertEqual(self.kinds(row), {"dependency"},
+                         "a dependency row with no task reference was not seen as a claim")
+
     def test_a_dependency_phrase_naming_a_task_is_a_claim(self):
         for body in ("This work depends on LOOM-8.\n",
-                     "The handler is blocked by dutch-ref/W10-B.\n",
+                     "The handler is blocked by demo/W-2.\n",
                      "It rests on nothing; see dependencies of LOOM-2.\n"):
             with self.subTest(body=body):
                 self.assertIn("dependency", self.kinds(body), f"{body!r} was not seen as a claim")
