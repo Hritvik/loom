@@ -5,7 +5,7 @@ Branch: `loom/loom-loom-2` (isolated worktree)
 Status: green, submitted for independent review
 
 This file states the claim at the commit that carries it and nothing else. The review history —
-thirteen asks and answers — is in the registry event log (`loom events | grep loom/LOOM-2`), which is
+eleven asks and ten answers — is in the registry event log (`loom events | grep loom/LOOM-2`), which is
 the audit record; duplicating it here is what kept this file wrong. Commands are runnable as written.
 
 ## Delivered
@@ -52,9 +52,10 @@ python3 validate_work.py                                       # PASS, 78 warnin
 - **Validator.** `PASS`, 78 warnings, 0 errors. Exactly one names this task:
   `loom/LOOM-2: registry says …, program says reviewed`. One more is LOOM-1's drift, which this
   task's board edit also caused; Limits records both. The remaining 76 are registry state:
-  11 board-central revisions, 40 status drifts on other boards, 12 ready-but-waiting, 6 expired
-  leases, 6 epoch-less claims, 1 event-line ordering warning, 2 aggregates (52 evidence-only
-  integrations; 21 digest-less reviewed receipts). The aggregates are single warning lines, not
+  11 board-central revisions, 38 status drifts on other boards (40 drift lines in all, of which the
+  two above are the loom ones), 12 ready-but-waiting, 6 expired leases, 6 epoch-less claims, 1
+  event-line ordering warning, 2 aggregates (52 evidence-only integrations; 21 digest-less reviewed
+  receipts). 11 + 38 + 12 + 6 + 6 + 1 + 2 = 76. The aggregates are single warning lines, not
   per-task counts.
 - **Templates.** Nine files under `templates/`: the eight starters above plus
   `linear-portfolio.example.json`. All eight `../templates/` links in `docs/artifacts.md` resolve;
