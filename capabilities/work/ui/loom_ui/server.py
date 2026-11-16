@@ -8,9 +8,10 @@ Three boundaries are enforced here rather than documented and hoped for:
 * **Read-only.** Only ``GET`` and ``HEAD`` exist. There is no dispatch, transition, tick or deploy
   route to forget to guard. Every other method is answered ``405`` with no body processing.
 * **Fail closed.** If the version gate is closed or the registry cannot be read, the response is
-  ``503`` and explains why. It never serves a partially trusted page.
+  ``503`` and explains why. It never serves a partially trusted page, and an unexpected error is
+  reported as an unavailable page rather than a traceback or a half-rendered view.
 
-No subprocess is invoked with a shell. The read model is produced from one snapshot.
+No subprocess is invoked with a shell. Each page is produced from one snapshot.
 """
 from __future__ import annotations
 
@@ -19,11 +20,15 @@ import json
 import sys
 import threading
 import time
+import traceback
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import model, provenance, templates
+import engine
+
+from . import control, model, pages, provenance, templates
 from .paths import default_db
 from .snapshot import SnapshotUnavailable, read
 from .version import EngineVersion, VersionGateClosed, inspect
@@ -33,23 +38,31 @@ SAFE_METHODS = {"GET", "HEAD"}
 ALLOWED_METHODS = "GET, HEAD"
 CSP = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'")
+MAX_FILTER_LENGTH = 80
 
 
 class ReadModel:
-    """Builds the page payload from one snapshot plus independently sampled sources."""
+    """Builds pages and payloads from one snapshot plus independently sampled sources."""
 
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None,
+                 owners: frozenset[str] | None = None):
         self.db_path = Path(db_path).expanduser() if db_path else default_db()
+        self.owners = frozenset(owners or engine.HUMAN_IDENTITIES)
 
     def version(self) -> EngineVersion:
         return inspect()
 
-    def build(self, version: EngineVersion | None = None) -> dict:
-        version = version or self.version()
+    def read(self) -> tuple:
+        """One snapshot and its read model; the caller shares both with every view."""
+        snapshot = read(self.db_path)
+        return snapshot, model.build(snapshot)
+
+    # -- payloads -----------------------------------------------------------
+
+    def snapshot_payload(self, version: EngineVersion) -> dict:
         if not version.ok:
             raise VersionGateClosed(version)
-        snapshot = read(self.db_path)
-        view = model.build(snapshot)
+        snapshot, view = self.read()
         signals = provenance.collect(snapshot, view, version)
         return {
             "version": version.to_dict(),
@@ -86,9 +99,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     def app(self) -> "Application":
         return self.server.app  # type: ignore[attr-defined]
 
-    def log_message(self, fmt: str, *args) -> None:
-        # Path only: never the query string, which could carry a task id chosen by a caller.
-        sys.stderr.write("%s %s\n" % (self.log_date_time_string(), fmt % args))
+    def log_request(self, code="-", size="-") -> None:
+        # Path only: never the query string, which can carry a task or program chosen by a caller.
+        self.log_message('"%s %s" %s %s', self.command, urlsplit(self.path).path, code, size)
 
     # -- request entry points -------------------------------------------------
 
@@ -118,9 +131,16 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _dispatch(self, body: bool = True) -> None:
         if not self._host_ok():
             return
-        path = urlsplit(self.path).path.rstrip("/") or "/"
+        split = urlsplit(self.path)
+        path = split.path.rstrip("/") or "/"
+        query = parse_qs(split.query, keep_blank_values=False)
+
         if path == "/":
             return self._index(body)
+        if path == "/tasks":
+            return self._tasks_page(query, body)
+        if path.startswith("/task/"):
+            return self._task_page(unquote(path[len("/task/"):]), body)
         if path == "/api/health":
             return self._health(body)
         if path == "/api/version":
@@ -129,31 +149,70 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._provenance(body)
         if path == "/api/boards":
             return self._boards(body)
+        if path == "/api/control":
+            return self._control(query, body)
         if path == "/api/tasks":
             return self._tasks(body)
         if path.startswith("/api/tasks/"):
-            task_id = path[len("/api/tasks/"):]
+            task_id = unquote(path[len("/api/tasks/"):])
             return self._task(task_id, body)
         if path == "/api/snapshot":
             return self._snapshot(body)
-        return self._json(404, {"error": "not_found", "message": f"no route for {path}"}, body=body)
+        return self._json(404, {"error": "not_found", "message": f"no route for {path}"},
+                          body=body)
 
-    # -- handlers -------------------------------------------------------------
+    # -- HTML pages -----------------------------------------------------------
 
     def _index(self, body: bool) -> None:
+        program = self._program()
+        loaded = self._load()
+        if loaded is None:
+            return
+        version, snapshot, view = loaded
         try:
-            version = self.app.versions.get()
-            if not version.ok:
-                raise VersionGateClosed(version)
-            snapshot = read(self.app.model.db_path)
-            view = model.build(snapshot)
+            room = control.build(snapshot, view, self.app.model.owners, program)
             signals = provenance.collect(snapshot, view, version)
-        except VersionGateClosed as exc:
-            return self._closed(exc.status, str(exc), body)
-        except SnapshotUnavailable as exc:
-            return self._closed(None, str(exc), body)
-        html = templates.page(view, version, signals)
-        self._send(200, "text/html; charset=utf-8", html.encode("utf-8"), body)
+            page = pages.control_page(room, view, version, signals, _now())
+        except Exception:  # a render bug must not become a traceback or a half page
+            return self._crash(body)
+        self._html(page, body)
+
+    def _tasks_page(self, query: dict, body: bool) -> None:
+        program = self._program(query)
+        loaded = self._load()
+        if loaded is None:
+            return
+        version, snapshot, view = loaded
+        try:
+            room = control.build(snapshot, view, self.app.model.owners, program)
+            signals = provenance.collect(snapshot, view, version)
+            page = pages.tasks_page(room, view, version, signals, _now())
+        except Exception:
+            return self._crash(body)
+        self._html(page, body)
+
+    def _task_page(self, task_id: str, body: bool) -> None:
+        if not task_id or "/" not in task_id or ".." in task_id:
+            page = templates.missing("That is not a task id.",
+                                     "A task id looks like <program>/<id>.")
+            return self._send(404, "text/html; charset=utf-8", page.encode("utf-8"), body)
+        loaded = self._load()
+        if loaded is None:
+            return
+        version, snapshot, view = loaded
+        try:
+            detail = control.detail(snapshot, view, task_id, self.app.model.owners)
+            if detail is None:
+                page = templates.missing(f"No task {task_id}.",
+                                         "It may have been renamed; search All tasks instead.")
+                return self._send(404, "text/html; charset=utf-8", page.encode("utf-8"), body)
+            signals = provenance.collect(snapshot, view, version)
+            page = pages.task_page(detail, view, version, signals, _now())
+        except Exception:
+            return self._crash(body)
+        self._html(page, body)
+
+    # -- JSON handlers --------------------------------------------------------
 
     def _health(self, body: bool) -> None:
         version = self.app.versions.get()
@@ -164,62 +223,124 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._json(200, self.app.versions.get().to_dict(), body=body)
 
     def _provenance(self, body: bool) -> None:
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        version, snapshot, view = loaded
+        signals = provenance.collect(snapshot, view, version)
+        self._json(200, {"provenance": [signal.to_dict() for signal in signals],
+                         "snapshot": snapshot.as_of}, body=body)
+
+    def _boards(self, body: bool) -> None:
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        _version, snapshot, view = loaded
+        self._json(200, {"boards": view.to_dict()["boards"], "as_of": snapshot.as_of},
+                   body=body)
+
+    def _tasks(self, body: bool) -> None:
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        _version, snapshot, view = loaded
+        self._json(200, {"tasks": view.to_dict()["tasks"], "as_of": snapshot.as_of}, body=body)
+
+    def _task(self, task_id: str, body: bool) -> None:
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        _version, snapshot, view = loaded
+        found = model.find(view, task_id)
+        if found is None:
+            return self._json(404, {"error": "unknown_task", "message": f"no task {task_id}"},
+                              body=body)
+        detail = control.detail(snapshot, view, task_id, self.app.model.owners)
+        self._json(200, {
+            "task": _task_payload(view, found.id),
+            "detail": detail.to_dict(),
+            "as_of": snapshot.as_of,
+        }, body=body)
+
+    def _control(self, query: dict, body: bool) -> None:
+        program = self._program(query)
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        _version, snapshot, view = loaded
+        room = control.build(snapshot, view, self.app.model.owners, program)
+        self._json(200, {"control": room.to_dict(), "as_of": snapshot.as_of}, body=body)
+
+    def _snapshot(self, body: bool) -> None:
+        version = self.app.versions.get()
         try:
-            payload = self.app.build()
+            payload = self.app.model.snapshot_payload(version)
         except VersionGateClosed as exc:
             return self._json(503, {"error": "version_gate_closed", "version": exc.status.to_dict(),
                                     "message": str(exc)}, body=body)
         except SnapshotUnavailable as exc:
             return self._json(503, {"error": "registry_unavailable", "message": str(exc)},
                               body=body)
-        self._json(200, {"provenance": payload["provenance"],
-                         "snapshot": payload["snapshot"]["as_of"]}, body=body)
-
-    def _boards(self, body: bool) -> None:
-        payload = self._read_model()
-        if payload is None:
-            return
-        self._json(200, {"boards": payload["snapshot"]["boards"],
-                         "as_of": payload["snapshot"]["as_of"]}, body=body)
-
-    def _tasks(self, body: bool) -> None:
-        payload = self._read_model()
-        if payload is None:
-            return
-        self._json(200, {"tasks": payload["snapshot"]["tasks"],
-                         "as_of": payload["snapshot"]["as_of"]}, body=body)
-
-    def _task(self, task_id: str, body: bool) -> None:
-        payload = self._read_model()
-        if payload is None:
-            return
-        found = next((task for task in payload["snapshot"]["tasks"] if task["id"] == task_id), None)
-        if found is None:
-            return self._json(404, {"error": "unknown_task", "message": f"no task {task_id}"},
-                              body=body)
-        self._json(200, {"task": found, "as_of": payload["snapshot"]["as_of"]}, body=body)
-
-    def _snapshot(self, body: bool) -> None:
-        payload = self._read_model()
-        if payload is None:
-            return
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return self._json(500, {"error": "internal_error",
+                                    "message": "the read model could not be built"}, body=body)
         self._json(200, payload, body=body)
 
     # -- helpers --------------------------------------------------------------
 
-    def _read_model(self) -> dict | None:
-        try:
-            return self.app.build()
-        except VersionGateClosed as exc:
-            self._json(503, {"error": "version_gate_closed", "version": exc.status.to_dict(),
-                             "message": str(exc)})
-        except SnapshotUnavailable as exc:
-            self._json(503, {"error": "registry_unavailable", "message": str(exc)})
-        return None
+    def _program(self, query: dict | None = None) -> str | None:
+        parsed = query if query is not None else parse_qs(urlsplit(self.path).query)
+        values = parsed.get("program")
+        if not values:
+            return None
+        value = str(values[0]).strip()
+        if not value or len(value) > MAX_FILTER_LENGTH:
+            return None
+        return value
 
-    def _closed(self, version: EngineVersion | None, reason: str, body: bool) -> None:
-        page = templates.closed(version, reason, 503)
-        self._send(503, "text/html; charset=utf-8", page.encode("utf-8"), body)
+    def _load(self, json_response: bool = False, body: bool = True):
+        """The version gate and one read, or the right failure response and ``None``."""
+        try:
+            version = self.app.versions.get()
+            if not version.ok:
+                raise VersionGateClosed(version)
+            snapshot, view = self.app.model.read()
+            return version, snapshot, view
+        except VersionGateClosed as exc:
+            if json_response:
+                self._json(503, {"error": "version_gate_closed",
+                                 "version": exc.status.to_dict(), "message": str(exc)},
+                           body=body)
+            else:
+                page = templates.closed(exc.status, str(exc), 503)
+                self._send(503, "text/html; charset=utf-8", page.encode("utf-8"), body)
+            return None
+        except SnapshotUnavailable as exc:
+            if json_response:
+                self._json(503, {"error": "registry_unavailable", "message": str(exc)}, body=body)
+            else:
+                page = templates.unavailable(str(exc), 503)
+                self._send(503, "text/html; charset=utf-8", page.encode("utf-8"), body)
+            return None
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            if json_response:
+                self._json(500, {"error": "internal_error",
+                                 "message": "the read model could not be built"}, body=body)
+            else:
+                self._crash(body)
+            return None
+
+    def _crash(self, body: bool) -> None:
+        traceback.print_exc(file=sys.stderr)
+        page = templates.unavailable(
+            "The page could not be rendered. The failure was logged to the server's stderr; "
+            "no partial view is shown.", 500, title="Loom UI could not render this page")
+        self._send(500, "text/html; charset=utf-8", page.encode("utf-8"), body)
+
+    def _html(self, page: str, body: bool) -> None:
+        self._send(200, "text/html; charset=utf-8", page.encode("utf-8"), body)
 
     def _host_ok(self) -> bool:
         header = (self.headers.get("Host") or "").strip().lower()
@@ -278,14 +399,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
 
 
+def _task_payload(view: model.RegistryView, task_id: str) -> dict:
+    """The same task shape ``/api/snapshot`` publishes, for one task."""
+    return next(item for item in view.to_dict()["tasks"] if item["id"] == task_id)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class Application:
-    def __init__(self, db_path: Path | None = None, version_ttl: float = 60.0):
-        self.model = ReadModel(db_path)
+    def __init__(self, db_path: Path | None = None, version_ttl: float = 60.0,
+                 owners: frozenset[str] | None = None):
+        self.model = ReadModel(db_path, owners)
         self.versions = VersionCache(version_ttl)
 
     def build(self) -> dict:
         """One read model, using the cached gate decision."""
-        return self.model.build(self.versions.get())
+        return self.model.snapshot_payload(self.versions.get())
 
 
 class Server(ThreadingHTTPServer):
@@ -309,8 +440,8 @@ def _loopback(address: str) -> str:
 
 
 def make_server(host: str = "127.0.0.1", port: int = 0, db_path: Path | None = None,
-                version_ttl: float = 60.0) -> Server:
-    return Server((_loopback(host), int(port)), Application(db_path, version_ttl))
+                version_ttl: float = 60.0, owners: frozenset[str] | None = None) -> Server:
+    return Server((_loopback(host), int(port)), Application(db_path, version_ttl, owners))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -323,15 +454,20 @@ def main(argv: list[str] | None = None) -> int:
                                                    "~/.local/state/loom/work.db)")
     parser.add_argument("--version-ttl", type=float, default=60.0,
                         help="seconds to cache the version gate (default 60)")
+    parser.add_argument("--owner", action="append", default=None, metavar="IDENTITY",
+                        help="extra identity treated as the owner for queue routing; repeatable "
+                             "(the engine's human identities are always included)")
     args = parser.parse_args(argv)
 
+    owners = frozenset(engine.HUMAN_IDENTITIES) | frozenset(args.owner or ())
     try:
-        server = make_server(args.host, args.port, args.db, args.version_ttl)
+        server = make_server(args.host, args.port, args.db, args.version_ttl, owners)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     host, port = server.server_address[:2]
     print(f"loom ui listening on http://{host}:{port} (read-only, loopback only)")
+    print(f"owner identities: {', '.join(sorted(owners))}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

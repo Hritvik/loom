@@ -10,6 +10,8 @@ Layout:
 ``version``     front-door resolution and the fail-closed version gate
 ``snapshot``    one consistent, read-only SQLite read (registry + event head)
 ``model``       typed read models; claimability from shared engine logic
+``control``     owner queues and per-task inspection, folded from one snapshot's events
+``pages``       the control room, task index and task inspector
 ``provenance``  independent source signals, each with its own ``as_of`` and degraded state
 ``server``      loopback-only HTTP shell; GET/HEAD only, no mutation route exists
 """
@@ -24,4 +26,4 @@ ENGINE_HOME = Path(__file__).resolve().parents[2]
 if str(ENGINE_HOME) not in sys.path:
     sys.path.insert(0, str(ENGINE_HOME))
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
