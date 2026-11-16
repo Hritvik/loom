@@ -5025,6 +5025,10 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
 # A derivation raises `EvidenceClaimError` when it cannot answer. An unknown derivation, an
 # unclosed span and a stray close are all problems, never silent passes: a typo in a marker has to
 # fail rather than quietly turn the claim into prose again.
+#
+# A claim is worth marking only if the **tree** can answer it. The validator derivations read the
+# portfolio registry, which is shared state outside the repository, so they are listed in
+# `SHARED_STATE_DERIVATIONS`; a committed evidence file must not use them (see that name).
 
 EVIDENCE_MARKER = re.compile(
     r"<!--\s*(?:/(?P<close>loom)|loom:(?P<claim>[a-z][a-z0-9_.-]*)(?::(?P<argument>[^\n]*?))?)\s*-->"
@@ -5146,27 +5150,63 @@ def derive_tests_count(root: Path, argument: str, cache: dict) -> str:
         start = Path(root) / (argument or "tests")
         if not start.is_dir():
             raise EvidenceClaimError(f"no test directory at {start}")
-        suite = unittest.defaultTestLoader.discover(str(start))
+        try:
+            # A fresh loader: `unittest -k` sets a filter on the shared one, and a count that
+            # depends on how this process was launched is a property of the invocation, not of
+            # the tree.
+            suite = unittest.TestLoader().discover(str(start))
+        except Exception as exc:  # a module that will not import is not a count
+            raise EvidenceClaimError(
+                f"the suite under {start} could not be collected: {exc}") from exc
+        broken = [case for case in _walk_suite(suite)
+                  if type(case).__name__ == "_FailedTest"]
+        if broken:
+            # 3.14 discovery does not raise on a module that will not import; it substitutes one
+            # placeholder per failed module, so counting it would report a plausible number.
+            raise EvidenceClaimError(
+                f"the suite under {start} could not be collected: {len(broken)} module(s) "
+                "failed to import")
         return str(suite.countTestCases())
 
     return _cached(cache, key, build)
 
 
+def _walk_suite(suite):
+    """Every test case in a suite, however the loader nested it."""
+    import unittest
+
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from _walk_suite(item)
+        else:
+            yield item
+
+
 def _validator_run(root: Path, cache: dict) -> tuple[int, str]:
-    """Run the repository's validator once per root and keep its status and output."""
+    """Run the repository's validator once per root and keep its status and output.
+
+    The registry is passed explicitly rather than left to the validator's default, so what a claim
+    is about is the registry this call named: `WORK_DB` when set, otherwise the store under the
+    user's home.
+    """
     key = ("validator", str(root))
 
     def build() -> tuple[int, str]:
         script = Path(root) / "validate_work.py"
         if not script.is_file():
             raise EvidenceClaimError(f"no validate_work.py under {root}")
+        registry = os.environ.get("WORK_DB") or str(
+            Path.home() / ".local/state/loom/work.db")
         process = subprocess.run(
-            [sys.executable, str(script), "--root", str(root)],
+            [sys.executable, str(script), "--root", str(root), "--db", registry],
             capture_output=True, text=True, timeout=300,
         )
         return process.returncode, (process.stdout or "") + (process.stderr or "")
 
     return _cached(cache, key, build)
+
+
+NO_REGISTRY = re.compile(r"no registry", re.IGNORECASE)
 
 
 def derive_validator_verdict(root: Path, argument: str, cache: dict) -> str:
@@ -5201,6 +5241,11 @@ def derive_validator_errors(root: Path, argument: str, cache: dict) -> str:
             tally = int(match.group("errors"))
             break
     if tally is None:
+        if NO_REGISTRY.search(output):
+            raise EvidenceClaimError(
+                "the validator found no registry to read, so it cannot report anything about "
+                "this task; this claim needs the portfolio store, which a clone does not have "
+                "— state the result in prose instead of claiming it")
         raise EvidenceClaimError(
             "the validator failed without a `FAIL (n errors, n warnings)` line, so its output "
             "cannot be counted")
@@ -5238,6 +5283,14 @@ register_evidence_derivation("tests.count", derive_tests_count)
 register_evidence_derivation("validator.verdict", derive_validator_verdict)
 register_evidence_derivation("validator.errors", derive_validator_errors)
 register_evidence_derivation("tracked.count", derive_tracked_count)
+
+# Some derivations answer only on a machine. The validator reads the portfolio registry at
+# `~/.local/state/loom/work.db` — shared state a clone does not have and another board's edit can
+# change — so a claim that uses one is a statement about the environment, not about the commit.
+# A committed evidence file therefore may not carry one: the guard would fail in a fresh clone, or
+# turn red under a change this diff never made. They stay registered for interactive use and for a
+# repository whose evidence is deliberately about a known registry.
+SHARED_STATE_DERIVATIONS = frozenset({"validator.verdict", "validator.errors"})
 
 
 def _derive_claim(claim: dict, root: Path, table: dict, cache: dict) -> str:
@@ -5375,12 +5428,18 @@ Two kinds of line live in this file, and the difference matters to a reviewer.
   is a claim on the author, so if a sentence states something a machine can re-derive, mark it
   instead of typing the value twice.
 
-| Derivation | Re-derived from | Example |
+Only mark what the **tree** can answer. `validator.verdict` and `validator.errors` read the
+portfolio registry: shared state that a clone does not have and that another board's edit can
+change. A committed evidence file must not claim them, or the guard fails in a fresh clone or goes
+red under a change this diff never made. State a validator result as prose, and say in Limits what
+it depends on.
+
+| Derivation | Re-derived from | Answers from the tree |
 |---|---|---|
-| `tests.count` | the suite `unittest` collects under `tests/` | `<!-- loom:tests.count --><!-- /loom -->` |
-| `validator.verdict` | the validator's exit status | `<!-- loom:validator.verdict --><!-- /loom -->` |
-| `validator.errors` | its `ERROR` lines, optionally filtered by a substring | `<!-- loom:validator.errors:{task} --><!-- /loom -->` |
-| `tracked.count` | `git ls-files` under a pathspec | `<!-- loom:tracked.count:tests --><!-- /loom -->` |
+| `tests.count` | the suite `unittest` collects under `tests/` | yes |
+| `tracked.count:<pathspec>` | `git ls-files` under a pathspec | yes |
+| `validator.verdict` | the validator's exit status | no — the registry |
+| `validator.errors:<substring>` | its `ERROR` lines, optionally filtered | no — the registry |
 
 A repository may register more (a sweep, a schema count) with `register_evidence_derivation`; an
 unknown derivation fails the check rather than passing as prose.
@@ -5392,9 +5451,6 @@ unknown derivation fails the check rather than passing as prose.
 ## Verification
 
 The suite collects <!-- loom:tests.count --><!-- /loom --> tests.
-
-The validator reports <!-- loom:validator.errors:{task} --><!-- /loom --> error(s) naming this
-task, and no others are this task's to fix.
 
 <!-- Prose. Paste the commands, not their output: a command can be run at any commit, a pasted
 block persuades and then rots. -->

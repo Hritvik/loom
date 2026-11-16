@@ -24,6 +24,13 @@ The checks here prove three things the task asks for:
 3. The template marks machine-checked lines and prose as different things — `EvidenceTemplateTest`,
    which also checks that the rendered starter is current instead of a snapshot of some past tree.
 
+And one thing the first round of this work got wrong: a committed claim has to be a property of
+the **commit**. The validator reads the portfolio registry, which a clone does not have and another
+board can change, so the validator derivations are declared in `engine.SHARED_STATE_DERIVATIONS`
+and no committed evidence file may claim them. `RepositoryEvidenceTest` fails if one does, and
+runs the guard in a subprocess with an empty HOME to prove the documented `unittest` command is
+green in a fresh clone rather than only on a machine with a registry.
+
 A *prose* number is not checked, by construction. The boundary is worth saying plainly: if a
 sentence states something a machine can re-derive, mark it, or accept that a reviewer is being
 asked to believe it.
@@ -36,6 +43,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,12 +51,18 @@ import textwrap
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest import mock
 
 WORK = Path(__file__).resolve().parents[1]
 REPO = WORK.parents[1]
 
 sys.path.insert(0, str(WORK))
 import engine  # noqa: E402 — sibling module, resolved from the work home
+import store as work_store  # noqa: E402 — the fixture registry below is a real store
+
+# The derivations the engine itself registers, captured before this module adds the repository's
+# own sweep below, so the template can be held to documenting exactly the built-ins.
+ENGINE_DERIVATIONS = frozenset(engine.EVIDENCE_DERIVATIONS)
 
 REFRESH = "LOOM_EVIDENCE_REFRESH"
 
@@ -259,6 +273,40 @@ class StaleClaimTest(unittest.TestCase):
         self.assertIn("no such sweep", changes[0])
 
 
+class TestsCountTest(unittest.TestCase):
+    """The count is a property of the tree, not of how this process was launched."""
+
+    def test_the_count_ignores_a_test_name_filter_on_the_shared_loader(self):
+        before = collected_tests()
+        loader = unittest.defaultTestLoader
+        had = hasattr(loader, "testNamePatterns")
+        original = getattr(loader, "testNamePatterns", None)
+        loader.testNamePatterns = ["nothing-matches-this-pattern"]
+        try:
+            self.assertEqual(collected_tests(), before,
+                             "the derivation used the loader that `unittest -k` filters")
+        finally:
+            if had:
+                loader.testNamePatterns = original
+            else:
+                del loader.testNamePatterns
+
+    def test_a_test_module_that_will_not_import_is_a_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "tests/test_broken.py", "def unclosed(:\n")
+            derive = engine.EVIDENCE_DERIVATIONS["tests.count"]
+            with self.assertRaises(engine.EvidenceClaimError) as caught:
+                derive(root, "", {})
+        self.assertIn("could not be collected", str(caught.exception))
+
+    def test_a_missing_test_directory_is_a_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            derive = engine.EVIDENCE_DERIVATIONS["tests.count"]
+            with self.assertRaises(engine.EvidenceClaimError):
+                derive(Path(tmp), "", {})
+
+
 VALIDATOR_STUB = '''\
 import pathlib
 import sys
@@ -325,11 +373,31 @@ class ValidatorClaimTest(unittest.TestCase):
 
     def test_a_validator_that_cannot_count_is_not_reported_as_zero(self):
         """A `FAIL` with no ERROR lines is a broken run, not a clean one."""
-        self.stub("import sys\nprint('FAIL: no registry in the store')\nsys.exit(1)\n")
+        self.stub("import sys\nprint('FAIL: could not load schemas/task.schema.json')\n"
+                  "sys.exit(1)\n")
         result = engine.check_evidence(
             "<!-- loom:validator.errors -->0<!-- /loom -->", root=self.root)
         self.assertFalse(result["ok"])
         self.assertIn("cannot be counted", result["problems"][0]["problem"])
+
+    def test_a_validator_with_no_registry_says_what_is_missing(self):
+        """The registry is shared state a clone does not have; say so instead of counting it."""
+        self.stub("import sys\nprint('FAIL: no registry in sqlite:/nowhere/work.db')\n"
+                  "sys.exit(1)\n")
+        result = engine.check_evidence(
+            "<!-- loom:validator.errors -->0<!-- /loom -->", root=self.root)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["claims"][0]["derived"])
+        self.assertIn("no registry", result["problems"][0]["problem"])
+        self.assertIn("clone does not have", result["problems"][0]["problem"])
+
+    def test_the_validator_derivations_are_declared_as_shared_state(self):
+        """A claim only the machine can settle is named, so committed evidence can refuse it."""
+        self.assertEqual(engine.SHARED_STATE_DERIVATIONS,
+                         frozenset({"validator.verdict", "validator.errors"}))
+        for name in engine.SHARED_STATE_DERIVATIONS:
+            with self.subTest(derivation=name):
+                self.assertIn(name, engine.EVIDENCE_DERIVATIONS)
 
     def test_a_tally_that_disagrees_with_the_error_lines_is_a_problem(self):
         self.stub("import sys\nprint('ERROR only-one: x')\nprint('FAIL (2 errors, 0 warnings)')\n"
@@ -349,6 +417,82 @@ class ValidatorClaimTest(unittest.TestCase):
     def test_the_verdict_takes_no_argument(self):
         with self.assertRaises(engine.EvidenceClaimError):
             engine.EVIDENCE_DERIVATIONS["validator.verdict"](self.root, "extra", {})
+
+
+def build_validator_fixture(root: Path) -> Path:
+    """The repository's own validator over a real, empty registry, all under `root`.
+
+    Copying the validator rather than stubbing it is what makes the claim end to end; building the
+    registry under `root` is what makes the answer a property of the fixture rather than of this
+    machine's store.
+    """
+    root = Path(root)
+    for name in ("validate_work.py", "store.py"):
+        shutil.copyfile(WORK / name, root / name)
+    shutil.copytree(WORK / "schemas", root / "schemas")
+    (root / "program.md").write_text("# Fixture programme\n\n## Fixture board\n", encoding="utf-8")
+    db = root / "work.db"
+    fixture = work_store.make_store(root, "sqlite", str(db))
+    fixture.registry = {
+        "kind": work_store.REGISTRY_KIND,
+        "version": 1,
+        "updated": "2026-01-01",
+        "boards": [{"id": "fixture.board", "kind": "program", "role": "provider",
+                    "repo": str(root), "path": "program.md"}],
+        "tasks": [], "edges": [], "claims": [],
+    }
+    with fixture.lock():
+        fixture.commit(event="genesis", agent="fixture",
+                       registry_sha256="0" * 64, tasks=0)
+    connection = getattr(fixture, "connection", None)
+    if connection is not None:
+        connection.close()
+    return db
+
+
+class RealValidatorFixtureTest(unittest.TestCase):
+    """A claimed validator result against the repository's own validator and a real registry.
+
+    The stub in `ValidatorClaimTest` proves the wiring; this proves it end to end without touching
+    this machine's store: `validate_work.py` and `store.py` are copied into a temporary root, the
+    registry is built there, and `WORK_DB` points the run at it. A verdict is then re-derived from
+    the fixture, and breaking the fixture moves it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db = build_validator_fixture(self.root)
+        self.env = mock.patch.dict(os.environ, {
+            "WORK_DB": str(self.db), "WORK_PROGRAMS": "", "WORK_CONTRACTS": ""})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    @staticmethod
+    def verdict(recorded: str) -> str:
+        return f"The validator reports <!-- loom:validator.verdict -->{recorded}<!-- /loom -->."
+
+    def test_the_real_validator_verdict_is_re_derived_both_ways(self):
+        current = engine.check_evidence(self.verdict("PASS"), root=self.root)
+        self.assertTrue(current["ok"], engine.evidence_report([current]))
+        self.assertEqual(current["claims"][0]["derived"], "PASS")
+        (self.root / "program.md").unlink()
+        stale = engine.check_evidence(self.verdict("PASS"), root=self.root)
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["stale"][0]["derived"], "FAIL")
+        self.assertTrue(engine.check_evidence(self.verdict("FAIL"), root=self.root)["ok"])
+
+    def test_the_real_validator_error_count_is_re_derived(self):
+        text = "<!-- loom:validator.errors -->0<!-- /loom -->"
+        self.assertTrue(engine.check_evidence(text, root=self.root)["ok"])
+        (self.root / "program.md").unlink()
+        stale = engine.check_evidence(text, root=self.root)
+        self.assertFalse(stale["ok"])
+        self.assertEqual(stale["stale"][0]["derived"], "1",
+                         "the missing board file is exactly one ERROR line")
 
 
 class TrackedCountTest(unittest.TestCase):
@@ -400,20 +544,34 @@ class EvidenceTemplateTest(unittest.TestCase):
         self.assertIn("## Verification", template)
         self.assertIn("## Limits", template)
 
-    def test_every_example_in_the_template_table_is_a_real_derivation(self):
+    def test_every_engine_derivation_is_named_in_the_template(self):
+        for name in sorted(ENGINE_DERIVATIONS):
+            with self.subTest(derivation=name):
+                self.assertIn(name, engine.EVIDENCE_TEMPLATE)
+
+    def test_the_template_names_which_derivations_need_more_than_the_tree(self):
+        template = engine.EVIDENCE_TEMPLATE
+        self.assertIn("no — the registry", template)
+        self.assertIn("clone does not have", template)
+
+    def test_the_template_claims_only_what_the_tree_can_answer(self):
+        """A starter file is checkable in a fresh clone, or it is a starter that cannot be used."""
         claims, problems = engine.parse_evidence_claims(engine.EVIDENCE_TEMPLATE)
         self.assertEqual(problems, [])
-        self.assertGreaterEqual(len(claims), 4, "the derivation table lost its examples")
-        known = engine.evidence_derivations()
-        for claim in claims:
-            with self.subTest(claim=engine.evidence_spec(claim)):
-                self.assertIn(claim["claim"], known)
+        self.assertTrue(claims, "the template shows no machine-checked span to copy")
+        shared = [engine.evidence_spec(claim) for claim in claims
+                  if claim["claim"] in engine.SHARED_STATE_DERIVATIONS]
+        self.assertEqual(
+            shared, [],
+            "a committed evidence file is checked in a fresh clone, so it cannot claim "
+            f"{', '.join(sorted(engine.SHARED_STATE_DERIVATIONS))}; "
+            "state that result as prose and say in Limits what it depends on")
 
     def test_the_rendered_template_is_current_and_not_empty(self):
         text = engine.render_evidence_template(root=WORK)
         result = engine.check_evidence(text, root=WORK)
         self.assertTrue(result["ok"], engine.evidence_report([result]))
-        self.assertGreaterEqual(len(result["claims"]), 4)
+        self.assertGreaterEqual(len(result["claims"]), 1)
         for claim in result["claims"]:
             with self.subTest(claim=engine.evidence_spec(claim)):
                 self.assertNotEqual(claim["recorded"], "",
@@ -430,6 +588,12 @@ class EvidenceTemplateTest(unittest.TestCase):
         twice, changes = engine.refresh_evidence_text(once, root=WORK)
         self.assertEqual(twice, once)
         self.assertEqual(changes, [])
+
+    def test_rendering_a_starter_never_runs_the_validator(self):
+        """The fresh-clone path: a template that needed the registry could not start a file."""
+        text = engine.render_evidence_template(root=WORK)
+        claims, _problems = engine.parse_evidence_claims(text)
+        self.assertEqual([claim["claim"] for claim in claims], ["tests.count"])
 
     def test_the_worker_brief_points_at_the_template(self):
         self.assertIn("EVIDENCE_TEMPLATE", engine.WORKER_BRIEF)
@@ -475,6 +639,42 @@ class BoundarySweepTest(unittest.TestCase):
 
 class RepositoryEvidenceTest(unittest.TestCase):
     """The live guard: every machine-checked claim in this repository is current right now."""
+
+    def test_the_guard_does_not_read_shared_state(self):
+        """A committed claim is a property of the commit, not of the machine that checks it."""
+        paths = sorted((WORK / "evidence").glob("*.md"))
+        self.assertTrue(paths, "there is no evidence to check")
+        offenders = []
+        for path in paths:
+            claims, _problems = engine.parse_evidence_claims(
+                path.read_text(encoding="utf-8"))
+            for claim in claims:
+                if claim["claim"] in engine.SHARED_STATE_DERIVATIONS:
+                    offenders.append(f"{path.name}:{claim['line']}  {engine.evidence_spec(claim)}")
+        self.assertEqual(
+            offenders, [],
+            "these claims read the portfolio registry: a clone does not have it and another "
+            "board's edit can change it, so the guard fails for reasons this diff never made. "
+            "State the result as prose instead:\n  " + "\n  ".join(offenders))
+
+    def test_the_guard_passes_in_a_fresh_clone(self):
+        """Empty HOME and no registry: the committed evidence must still check clean."""
+        with tempfile.TemporaryDirectory() as empty:
+            env = dict(os.environ)
+            env["HOME"] = empty
+            env["WORK_DB"] = str(Path(empty) / "absent.db")
+            for name in ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", REFRESH):
+                env.pop(name, None)
+            process = subprocess.run(
+                [sys.executable, "-m", "unittest",
+                 "test_evidence.RepositoryEvidenceTest"
+                 ".test_every_claim_in_the_evidence_is_current"],
+                cwd=str(WORK / "tests"), env=env, capture_output=True, text=True, timeout=300,
+            )
+        self.assertEqual(
+            process.returncode, 0,
+            "the evidence guard depends on the machine rather than the commit:\n"
+            + (process.stdout or "") + (process.stderr or ""))
 
     def test_every_claim_in_the_evidence_is_current(self):
         paths = sorted((WORK / "evidence").glob("*.md"))

@@ -1,7 +1,7 @@
 # Evidence — LOOM-12 make evidence claims executable
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-12-a1`
+Branch: `loom/loom-loom-12-a3`
 Commit under review: the tip of this branch; the registry ask binds the full commit
 
 ## What changed
@@ -26,33 +26,74 @@ and the correction was always another sentence. This task makes the assertion ex
   validator's exit status), `validator.errors` (its `ERROR` lines, optionally filtered) and
   `tracked.count` (files in the git index under a pathspec). `register_evidence_derivation` lets a
   repository add a derivation such as a sweep without copying its detector into the engine.
+- A claim is only worth marking if the **tree** can answer it. The validator reads the portfolio
+  registry, which is shared state a clone does not have and another board's edit can change, so
+  `engine.SHARED_STATE_DERIVATIONS` names `validator.*` and a committed evidence file may not use
+  one. The derivations stay registered for interactive use, and the registry is passed to the run
+  explicitly (`WORK_DB`, else the store in the home) so what a claim is about is the database the
+  check named. The template states the rule.
 - Nothing fails quietly. An unknown derivation, a marker with no span, a stray closing marker, an
   unclosed code fence and a derivation that cannot answer are all problems, so a typo in a marker
   fails instead of quietly demoting the claim back to prose. `<!--` and `-->` inside a fenced code
   block are a quotation, not a claim, which is how this file may show the syntax at all; the fence
   itself has to close, because an open one would exempt everything below it.
-- A derivation cannot invent a zero. `validator.errors` refuses to answer when the validator fails
-  without printing a `FAIL (n errors, …)` tally, and refuses when its tally disagrees with the
-  `ERROR` lines it printed. A validator that cannot load a registry prints `FAIL` with no error
-  lines, and counting that as zero would make every claim about it pass vacuously — the exact
-  failure this task exists to remove.
+- A derivation cannot invent a number. `validator.errors` refuses to answer when the validator
+  fails without printing a `FAIL (n errors, …)` tally, refuses when its tally disagrees with the
+  `ERROR` lines it printed, and says plainly when the validator found no registry at all. A
+  validator that cannot load a registry is a broken run, and counting it as zero would make every
+  claim about it pass vacuously — the exact failure this task exists to remove.
+- `tests.count` collects with its own `unittest.TestLoader()`, so a `-k` filter set by whatever
+  process runs the check cannot change the answer, and it refuses to count a module that would not
+  import: discovery substitutes one placeholder test per broken module, and counting that would
+  report a plausible number for a suite that never loaded.
 - `EVIDENCE_TEMPLATE` is the starter an author fills in, and `render_evidence_template` fills every
   span for the current tree, so a new evidence file begins current instead of beginning wrong.
 
-`tests/test_evidence.py` adds one test module, in seven groups:
+`tests/test_evidence.py` adds one test module, in nine groups:
 
 | Group | What it proves |
 |---|---|
 | `SpanParsingTest` | a span yields its claim, argument and line; prose is not a claim; a fenced example is a quotation; an unclosed span, a stray close, an unknown derivation and an unclosed fence are problems, never silent passes |
 | `StaleClaimTest` | a test count wrong by one fails, names the file and line, and refresh repairs it without touching prose |
-| `ValidatorClaimTest` | a claim follows a stub validator's exit status in both directions, so the value is re-derived and not copied; `ERROR` lines are counted and filterable; a missing validator, a missing tally, a tally that disagrees and an exit-0-with-errors run are problems |
+| `TestsCountTest` | the count ignores a `-k` filter on the shared loader, a missing test directory is a problem, and a module that will not import is a problem rather than one test |
+| `ValidatorClaimTest` | a claim follows a stub validator's exit status in both directions, so the value is re-derived and not copied; `ERROR` lines are counted and filterable; a missing validator, a missing registry, a missing tally, a tally that disagrees and an exit-0-with-errors run are problems |
+| `RealValidatorFixtureTest` | the same claim against this repository's own `validate_work.py` and a registry built under a temporary root, so the verdict is re-derived end to end without this machine's store |
 | `TrackedCountTest` | a tracked count comes from the index, not from the working tree; a pathspec cannot escape the repository |
 | `BoundarySweepTest` | the derivation this repository registers outside the engine counts a planted home path and a planted mailbox, so the sweep is not a no-op |
-| `EvidenceTemplateTest` | the template marks machine-checked lines and prose as different things, every example in it is a real derivation, and the rendered starter is current |
-| `RepositoryEvidenceTest` | the live guard: every claim in `evidence/` is current now, and the guard fails if no evidence file carries one |
+| `EvidenceTemplateTest` | the template marks machine-checked lines and prose as different things, names every engine derivation and which of them need the registry, claims nothing from shared state, and renders a current starter |
+| `RepositoryEvidenceTest` | the live guard: every claim in `evidence/` is current; no file claims shared state; and the guard is green in a fresh clone |
 
 `WORKER_BRIEF` now points each worker at the template and at the marker rule, so the format arrives
 with the task rather than with a review finding.
+
+## Rework after review 2214
+
+The blocking finding was that the guard was not hermetic. `RepositoryEvidenceTest` ran the real
+`validate_work.py` against the ambient store, and the rendered template did the same, so the
+verdict depended on the machine. With no `~/.local/state/loom/work.db` — a fresh clone, before
+`loom init` — the validator prints `FAIL: no registry in …` with no tally and three tests failed;
+with a registry, the claim moved when another board's errors changed.
+
+The fix is at the root rather than in a skip: a committed claim is a property of the commit.
+
+- `engine.SHARED_STATE_DERIVATIONS` names the derivations that read state outside the repository.
+  `RepositoryEvidenceTest.test_the_guard_does_not_read_shared_state` fails if any file under
+  `evidence/` claims one, and `EvidenceTemplateTest.test_the_template_claims_only_what_the_tree_can_answer`
+  holds the starter to the same rule.
+- `RepositoryEvidenceTest.test_the_guard_passes_in_a_fresh_clone` runs the guard in a subprocess
+  with `HOME` and `WORK_DB` pointed at an empty directory, so the documented `unittest` command is
+  proved green on a clone that has no registry — the reviewer's repro, as a test.
+- This file no longer claims a validator result. The mechanism is still proved end to end: a stub
+  validator whose exit status and tally the test controls, and this repository's own
+  `validate_work.py` over a registry built under a temporary root, both require the claim to follow
+  the run. The engine keeps both derivations for a repository whose evidence is deliberately about
+  a known registry.
+- `tests.count` now uses a fresh loader and refuses a module that will not import, so the count is
+  the tree's rather than the invocation's. The first draft's guard read `1` when run under
+  `unittest -k`, because the filter lives on the shared loader.
+- The pasted `FAIL (1 errors, … warnings)` tally and the pasted `OK, … tests` line are gone from
+  this file. Both are prose, neither is checked, and the tally was already stale one commit later —
+  which is the failure mode this task exists to remove. Only commands are pasted now.
 
 ## This file's own claims
 
@@ -60,62 +101,71 @@ Each row below is machine-checked, and the check is the suite:
 
 | Claim | Marker | What it asserts |
 |---|---|---|
-| Suite size | `<!-- loom:tests.count -->316<!-- /loom -->` | the tests `unittest` collects under `tests/` |
+| Suite size | `<!-- loom:tests.count -->328<!-- /loom -->` | the tests `unittest` collects under `tests/` |
 | Test files | `<!-- loom:tracked.count:tests -->12<!-- /loom -->` | files in the git index under `tests/` |
 | Boundary sweep | `<!-- loom:sweep.boundary-tree -->0<!-- /loom -->` | tracked files carrying an absolute home path or a personal mailbox |
-| Validator | `<!-- loom:validator.errors:loom/LOOM-12 -->0<!-- /loom -->` | `ERROR` lines the validator prints naming this task |
 
 Everything else in this file is prose. That is the honest split the template states: a sentence
-that no machine reads is a claim on the author, and the four values above are the ones a machine can
-settle.
+that no machine reads is a claim on the author, and the three values above are the ones a machine
+can settle from the tree. The validator's answer about this task is stated in Limits instead,
+because it belongs to the registry and not to this commit.
 
 ## Red run, then green
 
-The claim was wrong by one before it was true. With the suite-size span edited from 316 to 315, from
+The claim was wrong by one before it was true. With the suite-size span edited one low, from
 `capabilities/work`:
 
 ```
 python3 -m unittest discover -s tests -p test_evidence.py
 AssertionError:
-  evidence/LOOM-12.md:63  tests.count  recorded 315  derived 316  STALE
+  evidence/LOOM-12.md:104  tests.count  recorded 327  derived 328  STALE
     refresh: the value above is what the tree says now; rewrite the span instead of retyping it
-  evidence/LOOM-12.md:64  tracked.count:tests  recorded 12  derived 12  current
-  evidence/LOOM-12.md:65  sweep.boundary-tree  recorded 0  derived 0  current
-  evidence/LOOM-12.md:66  validator.errors:loom/LOOM-12  recorded 0  derived 0  current
-evidence/LOOM-12.md: 4 machine-checked claim(s), 1 stale, 0 problem(s) — STALE
+  evidence/LOOM-12.md:105  tracked.count:tests  recorded 12  derived 12  current
+  evidence/LOOM-12.md:106  sweep.boundary-tree  recorded 0  derived 0  current
+evidence/LOOM-12.md: 3 machine-checked claim(s), 1 stale, 0 problem(s) — STALE
 Refresh instead of retyping, from capabilities/work:
   LOOM_EVIDENCE_REFRESH=1 python3 -m unittest discover -s tests -p test_evidence.py
 
-FAILED (failures=1)
-Ran 40 tests in 1.352s
+Ran 52 tests in 1.249s
+
+FAILED (failures=2)
 ```
+
+Two tests fail: the guard, and the fresh-clone guard that runs it in a subprocess. Both name the
+line, the recorded value and the derived one. (The line numbers are the ones that run printed.)
 
 Refresh rewrites the span and the same command passes:
 
 ```
 LOOM_EVIDENCE_REFRESH=1 python3 -m unittest discover -s tests -p test_evidence.py
-refreshed under LOOM_EVIDENCE_REFRESH=1: LOOM-12.md: tests.count: 315 -> 316
-Ran 40 tests in 1.517s
+....................................................
+Ran 52 tests in 1.325s
+
 OK
+
+refreshed under LOOM_EVIDENCE_REFRESH=1: LOOM-12.md: tests.count: 327 -> 328
 ```
 
 The fenced example at the top of this file still reads 276: refresh left it alone, because a marker
 inside a fenced block is a quotation and not a claim.
 
-The full tree, from `capabilities/work`:
+The whole tree, from `capabilities/work`:
 
+```bash
+python3 -m unittest discover -s tests
+python3 validate_work.py
 ```
-python3 -m unittest discover -s tests      # OK, 316 tests, 2 skipped
-python3 validate_work.py                   # FAIL (1 errors, 109 warnings) — see Limits
-```
+
+The suite's own verdict is the command's; the validator's is shared registry state and is not
+claimed here — see Limits.
 
 ## Acceptance
 
 | Criterion | Where it is proved |
 |---|---|
 | A stale test count in an evidence file fails the suite | `RepositoryEvidenceTest.test_every_claim_in_the_evidence_is_current` runs the checker over every file in `evidence/`; `StaleClaimTest.test_a_stale_test_count_fails_the_check` drives the same path with a count wrong by one, and the red run above is that failure on this file |
-| A claimed validator result is re-derived rather than copied | `ValidatorClaimTest.test_the_verdict_follows_the_validator_both_ways` and `…_a_flipped_validator_makes_a_current_claim_stale` flip a stub validator and require the claim to follow it; `test_errors_are_counted_and_filtered_by_name` re-derives counts. This file's own validator claim is the task-scoped one, for the reason under Limits |
-| The evidence template marks machine-checked lines and prose | `EVIDENCE_TEMPLATE`'s legend names both kinds and labels the prose sections; `EvidenceTemplateTest` asserts the legend, that every example in the derivation table resolves, that the rendered starter is current, and that rendering is idempotent |
+| A claimed validator result is re-derived rather than copied | `ValidatorClaimTest.test_the_verdict_follows_the_validator_both_ways` and `…_a_flipped_validator_makes_a_current_claim_stale` flip a stub validator and require the claim to follow it; `RealValidatorFixtureTest` does the same with this repository's own validator over a registry built under a temporary root, for both the verdict and the error count. No committed file claims a validator result — the rule and its reason are in Limits |
+| The evidence template marks machine-checked lines and prose | `EVIDENCE_TEMPLATE`'s legend names both kinds and labels the prose sections; `EvidenceTemplateTest` asserts the legend, that every engine derivation is named with whether it answers from the tree, that the starter claims nothing from shared state, and that the rendered starter is current and idempotent |
 
 ## Limits
 
@@ -128,12 +178,18 @@ python3 validate_work.py                   # FAIL (1 errors, 109 warnings) — s
   allowed to edit. Refresh is one command, but the count is still a claim about a tree, and the
   remedy is to refresh in the commit that changes the tree — or not to claim a count at all, which
   is what LOOM-2's evidence does.
-- **The validator's global verdict is deliberately not claimed here.** `validate_work.py` validates
-  shared registry state; on this tree it exits 1 because of a missing heading on a board outside
-  this task's write path (`midas/W-8`), and that can change under another board's edit rather than
-  under this diff. A `validator.verdict` claim in a committed evidence file would be a landmine, so
-  this file claims only what the validator says about this task. Both derivations exist and are
-  proved; the choice of what to claim is the author's.
+- **The validator is deliberately not claimed here.** `validate_work.py` validates shared registry
+  state, so its verdict is a property of the machine: on this tree it fails for boards outside this
+  task's write path, and that set changes under other boards' edits rather than under this diff. A
+  committed `validator.*` claim would fail in a fresh clone and go red for changes this diff never
+  made, so `SHARED_STATE_DERIVATIONS` names both derivations and the guard refuses them in
+  `evidence/`. They remain available for interactive use, and a repository whose evidence is
+  deliberately about a known registry can still claim them.
+- **A validator result is proved, not claimed.** `ValidatorClaimTest` runs a stub validator whose
+  exit status and tally it controls, and `RealValidatorFixtureTest` runs the repository's own
+  `validate_work.py` over a registry built under a temporary root. What is not proved is that the
+  real `validate_work.py` against this machine's registry today reports what a reviewer wants to
+  read — that is what the reviewer's own run is for, and it is not a claim about this commit.
 - **`sweep.boundary-tree` is registered by the suite, not the engine.** It reuses the detectors in
   `tests/test_boundary.py` rather than copying them, so it resolves only while the tests run. An
   engine-only check reports it as an unknown derivation — a failure, not a pass, but a reviewer
@@ -141,6 +197,10 @@ python3 validate_work.py                   # FAIL (1 errors, 109 warnings) — s
 - **`tests.count` counts loaded tests, it does not run them.** That is what keeps the guard
   non-recursive: a test cannot run the suite it is running inside. A stale count is caught; a
   failing suite is not, beyond the fact that a failing suite is already failing.
+- **The fresh-clone guard is a subprocess test.** It proves the documented command is green with an
+  empty `HOME` and no registry, which is the environment the review found broken. It is one
+  process spawn, so it asserts on the environment it constructs rather than on every environment a
+  reviewer might have; a registry path outside `HOME` and `WORK_DB` would not be covered.
 - **No CLI verb was added.** `tests/test_surface.py` requires every engine command to be documented
   in `capabilities/work/README.md`, which is outside this task's write path. The checker is a
   library entry point (`engine.check_evidence_file`, `engine.refresh_evidence_file`) plus the suite,
@@ -158,6 +218,7 @@ From `capabilities/work`:
 
 ```bash
 python3 -m unittest discover -s tests -p test_evidence.py            # the mechanism
+HOME=$(mktemp -d) python3 -m unittest discover -s tests              # a clone with no registry
 python3 -m unittest discover -s tests                                # the whole suite
 python3 validate_work.py                                             # registry, shared state
 LOOM_EVIDENCE_REFRESH=1 python3 -m unittest discover -s tests -p test_evidence.py   # refresh spans
@@ -165,4 +226,4 @@ LOOM_EVIDENCE_REFRESH=1 python3 -m unittest discover -s tests -p test_evidence.p
 
 `engine.check_evidence_file` resolves the three engine derivations on its own, but
 `sweep.boundary-tree` is registered by the test module, so a hand-run check reports that one claim
-as an unknown derivation. Run the evidence test when you want all four resolved.
+as an unknown derivation. Run the evidence test when you want all three resolved.
