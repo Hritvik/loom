@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import engine
 
-from . import control, graph, graph_page, model, pages, provenance, templates
+from . import control, graph, graph_page, model, operations, pages, provenance, templates
 from .paths import default_db
 from .snapshot import SnapshotUnavailable, read
 from .version import EngineVersion, VersionGateClosed, inspect
@@ -139,6 +139,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._index(body)
         if path == "/graph":
             return self._graph_page(query, body)
+        if path == "/operations":
+            return self._operations_page(body)
         if path == "/tasks":
             return self._tasks_page(query, body)
         if path.startswith("/task/"):
@@ -149,6 +151,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._version(body)
         if path == "/api/provenance":
             return self._provenance(body)
+        if path == "/api/operations":
+            return self._operations(body)
         if path == "/api/boards":
             return self._boards(body)
         if path == "/api/control":
@@ -230,6 +234,33 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._send(status, "text/html; charset=utf-8", page.encode("utf-8"), body)
 
     # -- JSON handlers --------------------------------------------------------
+
+    def _operations_page(self, body: bool) -> None:
+        loaded = self._load(body=body)
+        if loaded is None:
+            return
+        version, snapshot, _view = loaded
+        try:
+            ops = operations.collect(snapshot, version)
+            page = templates.operations_page(ops, version)
+        except Exception:
+            return self._crash(body)
+        self._html(page, body)
+
+    def _operations(self, body: bool) -> None:
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        version, snapshot, _view = loaded
+        try:
+            ops = operations.collect(snapshot, version)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return self._json(500, {"error": "internal_error",
+                                    "message": "the operations view could not be built"},
+                              body=body)
+        self._json(200, {"version": version.to_dict(), "operations": ops.to_dict(),
+                         "read_only": True}, body=body)
 
     def _health(self, body: bool) -> None:
         version = self.app.versions.get()

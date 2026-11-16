@@ -14,6 +14,7 @@ Layout:
 ``pages``       the control room, task index and task inspector
 ``graph``       program/focus-scoped dependency views derived from the engine's edges
 ``graph_page``  the drawn DAG and its complete table equivalent
+``operations``  attempts, capacity, leases, tick, schedule, release and log health
 ``provenance``  independent source signals, each with its own ``as_of`` and degraded state
 ``server``      loopback-only HTTP shell; GET/HEAD only, no mutation route exists
 """
@@ -28,4 +29,4 @@ ENGINE_HOME = Path(__file__).resolve().parents[2]
 if str(ENGINE_HOME) not in sys.path:
     sys.path.insert(0, str(ENGINE_HOME))
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

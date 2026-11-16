@@ -15,12 +15,13 @@ Every value passes through :func:`esc` before it reaches the page.
 from __future__ import annotations
 
 import html
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import store
 
 from . import __version__
+from .operations import OperationsView
 from .provenance import Signal
 from .version import EngineVersion
 
@@ -239,6 +240,7 @@ def _nav(current: str, program: str | None = None) -> str:
             + item("/", "Focus", "focus")
             + item("/tasks", "All tasks", "tasks")
             + item("/graph", "Graph", "graph")
+            + item("/operations", "Operations", "operations")
             + "</ul></nav>")
 
 
@@ -427,3 +429,267 @@ def version_table(version: EngineVersion | None) -> str:
         for name, value in rows)
     return (f'<div class="table-scroll" role="region" aria-label="Version gate" tabindex="0">'
             f'<table><caption>What the gate compared</caption><tbody>{body}</tbody></table></div>')
+
+
+# -- the operations view ------------------------------------------------------
+#
+# Read-only by construction: every block below renders what a recorded process, record or plist
+# said, and none of them offers a control. The extra classes are local to this page so the shared
+# shell keeps one stylesheet.
+
+OPERATIONS_CSS = """
+.on { color: var(--accent); font-weight: 650; }
+.off { color: var(--muted); }
+pre { margin: 0; padding: 12px 14px; overflow: auto; background: var(--panel);
+      border: 1px solid var(--line); border-radius: 10px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
+      white-space: pre-wrap; overflow-wrap: anywhere; }
+pre:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+"""
+
+
+def _age(seconds: int | None) -> str:
+    if seconds is None:
+        return "unknown"
+    if seconds < 0:
+        return f"{-seconds}s ahead"
+    return duration(seconds)
+
+
+def _pairs(value) -> list:
+    return list(value.items()) if isinstance(value, dict) else []
+
+
+def _items(value) -> list:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value] if value else []
+
+
+def _capacity(ops: OperationsView) -> str:
+    capacity = ops.capacity
+    rows = "".join(
+        "<tr>"
+        f'<th scope="row">{esc(role)}</th>'
+        f'<td class="num">{esc(capacity.active.get(role, 0))}</td>'
+        f'<td class="num">{esc(capacity.limits.get(role, 0))}</td>'
+        f'<td class="num">{esc(capacity.available.get(role, 0))}</td>'
+        "</tr>"
+        for role in capacity.limits)
+    return (
+        f"<p>{esc(capacity.live_attempts)} live worker process(es) of "
+        f"{esc(capacity.open_attempts)} open attempt(s); "
+        f"{esc(capacity.live_reviewers)} reviewer process(es) live.</p>"
+        '<div class="table-scroll" role="region" aria-label="Role capacity" tabindex="0">'
+        "<table><caption>Active work against the configured limit, per role.</caption>"
+        '<thead><tr><th scope="col">Role</th><th scope="col" class="num">Active</th>'
+        '<th scope="col" class="num">Limit</th><th scope="col" class="num">Free</th></tr>'
+        f"</thead><tbody>{rows}</tbody></table></div>")
+
+
+def _attempts(ops: OperationsView) -> str:
+    if not ops.attempts:
+        return '<p class="empty">No worker attempt has been recorded.</p>'
+    rows = []
+    for item in ops.attempts:
+        live = ('<span class="on">live</span>' if item.live
+                else '<span class="off">no</span>')
+        place = item.branch or item.worktree or ""
+        rows.append(
+            "<tr>"
+            f'<td class="mono">{esc(item.attempt)}</td>'
+            f'<td class="mono">{esc(item.task)}</td>'
+            f"<td>{esc(item.role)}</td>"
+            f"<td>{esc(item.state)}</td>"
+            f"<td>{live}</td>"
+            f'<td class="num mono">{esc(item.pid if item.pid is not None else "")}</td>'
+            f'<td class="num">{esc(_age(item.age_seconds))}</td>'
+            f'<td class="mono">{esc(place)}</td>'
+            "</tr>")
+    return (
+        '<div class="table-scroll" role="region" aria-label="Worker attempts" tabindex="0">'
+        "<table><caption>Attempts recorded in this registry; a live pid is probed, not "
+        "inferred from a launch state.</caption>"
+        '<thead><tr><th scope="col">Attempt</th><th scope="col">Task</th>'
+        '<th scope="col">Role</th><th scope="col">State</th><th scope="col">Live</th>'
+        '<th scope="col" class="num">Pid</th><th scope="col" class="num">Age</th>'
+        '<th scope="col">Branch / worktree</th></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table></div>")
+
+
+def _leases(ops: OperationsView) -> str:
+    if not ops.expired_leases:
+        return '<p class="empty">No expired lease.</p>'
+    rows = "".join(
+        "<tr>"
+        f'<td class="mono">{esc(item.task)}</td>'
+        f"<td>{esc(item.agent or '')}</td>"
+        f'<td class="num">{esc(item.epoch if item.epoch is not None else "")}</td>'
+        f'<td class="mono">{esc(item.expired_at or "no expiry recorded")}</td>'
+        f'<td class="num">{esc(_age(item.overdue_seconds))}</td>'
+        "</tr>"
+        for item in ops.expired_leases)
+    return (
+        '<div class="table-scroll" role="region" aria-label="Expired leases" tabindex="0">'
+        "<table><caption>A lease past its expiry is what a policy pass would reclaim; this "
+        "page reclaims nothing.</caption>"
+        '<thead><tr><th scope="col">Task</th><th scope="col">Agent</th>'
+        '<th scope="col" class="num">Epoch</th><th scope="col">Expired at</th>'
+        '<th scope="col" class="num">Overdue</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>")
+
+
+def _failures(items, empty: str, total: int | None = None) -> str:
+    if not items:
+        return f'<p class="empty">{esc(empty)}</p>'
+    rows = "".join(
+        "<tr>"
+        f"<td>{esc(item.kind)}</td>"
+        f'<td class="mono">{esc(item.task)}</td>'
+        f'<td class="mono">{esc(item.attempt)}</td>'
+        f"<td>{esc(item.role)}</td>"
+        f"<td>{esc(item.reason or '')}</td>"
+        f'<td class="mono">{esc(item.at or "")}</td>'
+        "</tr>"
+        for item in items)
+    note = ""
+    if total is not None and total > len(items):
+        note = (f'<p class="note">{esc(total)} recorded; the most recent '
+                f"{esc(len(items))} are listed.</p>")
+    return (
+        '<div class="table-scroll" role="region" aria-label="Failed and stale launches" '
+        'tabindex="0">'
+        "<table><caption>Each row is a launch that did not stay healthy, with the record it "
+        "left behind.</caption>"
+        '<thead><tr><th scope="col">Kind</th><th scope="col">Task</th>'
+        '<th scope="col">Attempt</th><th scope="col">Role</th><th scope="col">Reason</th>'
+        '<th scope="col">At</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>{note}")
+
+
+def _tick(ops: OperationsView) -> str:
+    tick = ops.tick
+    if not tick.record:
+        return (f'<p class="empty">{esc(tick.detail)}</p>'
+                f'<p class="mono">record: {esc(tick.path)}</p>')
+    record = tick.record
+    held = _pairs(record.get("held"))
+    problems = _items(record.get("problems"))
+    rows = [
+        ("recorded at", record.get("ts")),
+        ("age at snapshot", _age(tick.age_seconds)),
+        ("stale after", f"{tick.stale_after_seconds}s"),
+        ("active", ", ".join(f"{role} {count}" for role, count in
+                             _pairs(record.get("active")))),
+        ("limits", ", ".join(f"{role} {count}" for role, count in
+                             _pairs(record.get("limits")))),
+        ("launched", ", ".join(str(item) for item in _items(record.get("launched"))) or "none"),
+        ("reviews launched", ", ".join(str(item) for item in
+                                       _items(record.get("reviews"))) or "none"),
+        ("held", "; ".join(f"{task}: {reason}" for task, reason in held) or "none"),
+        ("problems", "; ".join(str(item) for item in problems) or "none"),
+    ]
+    body = "".join(
+        f'<tr><th scope="row">{esc(name)}</th><td class="mono">{esc(value)}</td></tr>'
+        for name, value in rows)
+    note = ('<p class="note">This is the last pass the scheduler recorded. The UI never runs a '
+            "tick; a recorded pass can be older than the page.</p>")
+    return (f'<div class="table-scroll" role="region" aria-label="Last recorded tick pass" '
+            f'tabindex="0"><table><tbody>{body}</tbody></table></div>'
+            f'<p class="mono">record: {esc(tick.path)}</p>{note}')
+
+
+def _schedule(ops: OperationsView) -> str:
+    schedule = ops.schedule
+    rows = [
+        ("label", schedule.label),
+        ("plist", schedule.plist),
+        ("launchd job", schedule.job),
+        ("launchctl row", schedule.launchctl),
+        ("interval", (f"{schedule.interval_seconds}s"
+                      if schedule.interval_seconds else "unknown")),
+        ("program", " ".join(schedule.program_arguments) or "unknown"),
+        ("tick log", schedule.log),
+        ("sampled", schedule.as_of),
+        ("detail", schedule.detail),
+    ]
+    body = "".join(
+        f'<tr><th scope="row">{esc(name)}</th><td class="mono">{esc(value)}</td></tr>'
+        for name, value in rows)
+    return (f'<div class="table-scroll" role="region" aria-label="Schedule" tabindex="0">'
+            f"<table><tbody>{body}</tbody></table></div>")
+
+
+def _release(ops: OperationsView) -> str:
+    release = ops.release
+    rows = [
+        ("UI gate verdict", release.gate_verdict),
+        ("front door", release.front_door),
+        ("running root", release.running_root),
+        ("release commit", release.commit or "none"),
+        ("release digest", release.digest or "none"),
+        ("sampled", release.as_of),
+        ("detail", release.detail),
+    ]
+    body = "".join(
+        f'<tr><th scope="row">{esc(name)}</th><td class="mono">{esc(value)}</td></tr>'
+        for name, value in rows)
+    return (f'<div class="table-scroll" role="region" aria-label="Release" tabindex="0">'
+            f"<table><tbody>{body}</tbody></table></div>")
+
+
+def _log(ops: OperationsView) -> str:
+    log = ops.log
+    note = (f'<p class="mono">{esc(log.path)} &middot; {esc(log.detail)}</p>')
+    if not log.lines:
+        return note
+    body = "\n".join(log.lines)
+    return (note + '<div class="table-scroll" role="region" aria-label="Tick log tail" '
+                   f'tabindex="0"><pre>{esc(body)}</pre></div>')
+
+
+def operations_page(ops: OperationsView, version: EngineVersion) -> str:
+    now = datetime.now(timezone.utc)
+    body = f"""<h1>Loom — operations</h1>
+<p class="lede">What is running, what ran, and what is stale. Read-only; a refresh runs only
+reads.</p>
+{degraded_banner(ops.sources)}
+
+<h2>Capacity</h2>
+{_capacity(ops)}
+
+<h2>Worker attempts</h2>
+{_attempts(ops)}
+
+<h2>Expired leases</h2>
+{_leases(ops)}
+
+<h2>Stuck attempts</h2>
+{_failures(ops.stuck, "No live attempt is over the stuck threshold.")}
+
+<h2>Failed, stale and lost launches</h2>
+{_failures(ops.failures, "No failed, stale or lost launch is recorded.")}
+
+<h2>Last recorded tick pass</h2>
+{_tick(ops)}
+
+<h2>Schedule</h2>
+{_schedule(ops)}
+
+<h2>Release</h2>
+{_release(ops)}
+
+<h2>Tick log</h2>
+{_log(ops)}
+
+<h2>Source provenance</h2>
+{signals_table(ops.sources, now)}"""
+    footer = (
+        f"<p>Operations sampled {stamp(ops.as_of, now)} &middot; "
+        f"registry snapshot {stamp(ops.snapshot_as_of, now)}</p>"
+        '<p class="note">This view has no apply, dispatch, schedule mutation, promotion, '
+        "rollback or reanchor control. Those remain CLI operations on "
+        '<span class="mono">loom</span>; refreshing this page runs nothing. Each source keeps '
+        "its own sample time, so a fresh page can still show a stale source.</p>")
+    return shell(title="Loom — operations", current="operations", version=version, body=body,
+                 footer=footer, extra_css=OPERATIONS_CSS)
