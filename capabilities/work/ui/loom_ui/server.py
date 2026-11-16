@@ -28,7 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import engine
 
-from . import control, model, pages, provenance, templates
+from . import control, graph, graph_page, model, pages, provenance, templates
 from .paths import default_db
 from .snapshot import SnapshotUnavailable, read
 from .version import EngineVersion, VersionGateClosed, inspect
@@ -133,10 +133,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         split = urlsplit(self.path)
         path = split.path.rstrip("/") or "/"
-        query = parse_qs(split.query, keep_blank_values=False)
+        query = parse_qs(split.query, keep_blank_values=True)
 
         if path == "/":
             return self._index(body)
+        if path == "/graph":
+            return self._graph_page(query, body)
         if path == "/tasks":
             return self._tasks_page(query, body)
         if path.startswith("/task/"):
@@ -151,6 +153,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._boards(body)
         if path == "/api/control":
             return self._control(query, body)
+        if path == "/api/graph":
+            return self._graph(query, body)
         if path == "/api/tasks":
             return self._tasks(body)
         if path.startswith("/api/tasks/"):
@@ -212,6 +216,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._crash(body)
         self._html(page, body)
 
+    def _graph_page(self, query: dict, body: bool) -> None:
+        loaded = self._load(body=body)
+        if loaded is None:
+            return
+        version, snapshot, _view = loaded
+        try:
+            view = self._graph_view(snapshot, query)
+            page = graph_page.page(view, version)
+        except Exception:
+            return self._crash(body)
+        status = 404 if view.mode == "missing" else 200
+        self._send(status, "text/html; charset=utf-8", page.encode("utf-8"), body)
+
     # -- JSON handlers --------------------------------------------------------
 
     def _health(self, body: bool) -> None:
@@ -270,6 +287,23 @@ class RequestHandler(BaseHTTPRequestHandler):
         _version, snapshot, view = loaded
         room = control.build(snapshot, view, self.app.model.owners, program)
         self._json(200, {"control": room.to_dict(), "as_of": snapshot.as_of}, body=body)
+
+    def _graph(self, query: dict, body: bool) -> None:
+        loaded = self._load(json_response=True, body=body)
+        if loaded is None:
+            return
+        _version, snapshot, _view = loaded
+        try:
+            view = self._graph_view(snapshot, query)
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return self._json(500, {"error": "internal_error",
+                                    "message": "the graph could not be built"}, body=body)
+        if view.mode == "missing":
+            return self._json(404, {"error": "unknown_scope", "message": view.message,
+                                    "as_of": view.as_of}, body=body)
+        self._json(200, {"graph": view.to_dict(), "as_of": view.as_of, "read_only": True},
+                   body=body)
 
     def _snapshot(self, body: bool) -> None:
         version = self.app.versions.get()
@@ -341,6 +375,15 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def _html(self, page: str, body: bool) -> None:
         self._send(200, "text/html; charset=utf-8", page.encode("utf-8"), body)
+
+    def _graph_view(self, snapshot, query: dict):
+        """One graph view from an already-read snapshot; a bad scope is data, not an exception."""
+        program = _param(query, "program")
+        focus = _param(query, "task") or _param(query, "focus")
+        try:
+            return graph.build(snapshot, program=program, focus=focus)
+        except graph.GraphScopeError as exc:
+            return graph.missing(snapshot, str(exc))
 
     def _host_ok(self) -> bool:
         header = (self.headers.get("Host") or "").strip().lower()
@@ -426,6 +469,13 @@ class Server(ThreadingHTTPServer):
     def __init__(self, address, app: Application):
         self.app = app
         super().__init__(address, RequestHandler)
+
+
+def _param(query: dict, name: str) -> str | None:
+    """One query parameter, stripped, or ``None``. Repeated values use the first."""
+    values = query.get(name) or []
+    value = str(values[0]).strip() if values else ""
+    return value or None
 
 
 def _loopback(address: str) -> str:

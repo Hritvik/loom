@@ -1,9 +1,9 @@
-# Loom UI — owner control room and task inspector
+# Loom UI — owner control room, task inspector and dependency graph
 
-A local, loopback-only, read-only view of the work registry. This is the UI-2 slice: the owner
-control room, the task index and the task inspector, on top of UI-1's app shell, version gate and
-per-source provenance. It has **no** mutation, dispatch or policy route — those are later,
-separately reviewed slices.
+A local, loopback-only, read-only view of the work registry. UI-1 built the app shell, version
+gate, consistent read model and per-source provenance; UI-2 added the owner control room, the task
+index and the task inspector; this branch adds the UI-3 dependency graph on top of both. It has
+**no** mutation, dispatch or policy route — those are later, separately reviewed slices.
 
 ## Run
 
@@ -66,6 +66,7 @@ The inspector shows, as **separate** facts:
 | Read-only | only `GET`/`HEAD` are routed; every other method is `405` without reading a body |
 | One snapshot | registry documents, edges, claims and all events are read inside one `BEGIN DEFERRED` transaction on a `mode=ro` connection |
 | Shared rules | claimability, dependencies, path conflicts, review currency, receipts and attempts come from `engine`, not a copy |
+| Graph parity | every drawn graph edge comes from `engine.task_edges`; the graph tests compare the view to the engine's own closures |
 | Fail closed | a version mismatch or drifted release returns `503` and explains why; an unreadable registry returns a distinct `503`; a render failure returns `500` with no partial page |
 | No script | the shell is server-rendered; every value is escaped and the CSP forbids everything but inline style |
 | No file serving | evidence paths are shown, never served — there is no path-traversal surface |
@@ -92,17 +93,48 @@ no colour perception: state, claimability and queue are all spelled out.
 | Route | Returns |
 |---|---|
 | `GET /` | the owner control room (`?program=` filters) |
+| `GET /graph?program=<program>`, `GET /graph?task=<id>` | program-scoped dependency graph, or a focus on one task's upstream/downstream paths, with a complete table equivalent |
 | `GET /tasks` | every task (`?program=` filters) |
 | `GET /task/<id>` | the task inspector; `404` HTML when unknown |
 | `GET /api/health` | gate state; `503` when closed |
 | `GET /api/version` | front door, release commit, digests, verdict |
 | `GET /api/control` | the queues and rows as JSON (`?program=` filters) |
+| `GET /api/graph?program=<program>`, `GET /api/graph?task=<id>` | the same graph view as JSON |
 | `GET /api/tasks`, `GET /api/tasks/<id>` | task views; the single-task form adds `detail` (review, receipt, questions, attempts, events, evidence, dependencies) |
 | `GET /api/boards` | boards with task counts |
 | `GET /api/provenance` | source signals only |
 | `GET /api/snapshot` | full read model plus every provenance signal |
 
-Unknown routes are `404`; unsupported methods are `405` with `Allow: GET, HEAD`.
+Unknown routes are `404`; unsupported methods are `405` with `Allow: GET, HEAD`. An unknown program
+or focus task is a `404` that names what was missing, not an empty graph.
+
+## Dependency graph
+
+The graph is a projection of the engine's dependency data, not a second graph:
+
+| Question | Answered by |
+|---|---|
+| which tasks does this one depend on | `engine.task_edges` (the same call `loom claim` uses to refuse) |
+| what does this one transitively gate | `engine.dependents_index` + `engine.transitive_dependents` |
+| what must finish before this one | the same edges walked in reverse, breadth-first |
+| what is claimable | `model.claimability`, which is the engine's own predicate |
+
+Rules that keep the picture honest:
+
+- **No portfolio-wide default.** `/graph` lists programs and their task counts; it never draws every
+  task. A program over 60 nodes is listed as a table with no diagram, and the page asks for a focus.
+- **Focus wins, and is always complete in text.** `/graph?task=<id>` shows every transitive
+  prerequisite and dependent. Only the drawing is bounded at 60 nodes; the table lists all of them
+  and says how many were not drawn.
+- **Advisory edges are labelled, not hidden.** `provider-parity` edges come from the registry and are
+  drawn dashed, marked "advisory, does not block". Only `depends-on` edges gate a claim.
+- **Scoping cannot hide a blocker.** A prerequisite outside the program becomes a listed boundary
+  edge; a dependency naming no task becomes a "data problems" entry; a cycle is named rather than
+  walked forever.
+- **Accessible without the drawing.** The SVG is `role="img"` with `<title>`/`<desc>` and its scroll
+  container is keyboard focusable; the table below carries every node, every edge, and each path in
+  prerequisite → dependent order, with `<caption>` and `scope` headers. There is still no script, so
+  task text cannot become executable.
 
 ## Provenance
 

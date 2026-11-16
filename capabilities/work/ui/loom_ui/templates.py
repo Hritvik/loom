@@ -238,6 +238,7 @@ def _nav(current: str, program: str | None = None) -> str:
     return ('<nav class="views" aria-label="Views"><ul>'
             + item("/", "Focus", "focus")
             + item("/tasks", "All tasks", "tasks")
+            + item("/graph", "Graph", "graph")
             + "</ul></nav>")
 
 
@@ -252,7 +253,7 @@ def header_shell(current: str, version: EngineVersion, program: str | None = Non
 
 
 def shell(*, title: str, current: str, version: EngineVersion, body: str,
-          footer: str, program: str | None = None) -> str:
+          footer: str, program: str | None = None, extra_css: str = "") -> str:
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -260,7 +261,7 @@ def shell(*, title: str, current: str, version: EngineVersion, body: str,
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>{esc(title)}</title>
-<style>{CSS}</style>
+<style>{CSS}{extra_css}</style>
 </head>
 <body>
 <a class="skip" href="#main">Skip to main content</a>
