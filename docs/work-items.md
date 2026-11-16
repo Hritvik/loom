@@ -1,22 +1,22 @@
 # Work items — loom
 
-The engine's own backlog. Bodies live here; identity, state and claims live in the registry.
+The engine's own backlog. Bodies live here; identity, state, claims and dependency edges live in the
+registry, so a section carries the problem and its acceptance and nothing else.
+`capabilities/work/tests/test_body_claims.py` fails the suite when a section carries either.
 
 ## LOOM-1 — Remove portfolio content from the public engine
 
-**Status.** Reviewed.
+The public engine must not name or embed this portfolio's programs, maps or identifiers.
 
 ## LOOM-2 — Publish the artifact taxonomy and templates
 
-**Status.** Reviewed.
+Every artifact kind needs a template an adopter can copy instead of inventing.
 
 ## LOOM-3 — Write the adopting guide and a worked example
 
-**Status.** Reviewed.
+A stranger must be able to run the protocol end to end without reading this portfolio.
 
 ## LOOM-4 — Prove the public boundary with a test
-
-**Status.** Ready.
 
 The engine must fail its own suite when it carries a private program namespace, an absolute home
 path or a personal email, so the boundary is a test rather than a claim in an evidence file. A
@@ -28,8 +28,6 @@ checkout without the list entering the public repository.
 
 ## LOOM-5 — Model an attempt, and reap the ones that are gone
 
-**Status.** Ready.
-
 One agent run is one attempt with a stable identity, created inside the claim transaction. Capacity,
 reconcile, the worker list and review launch currently invent four different keys for the same run,
 which is how a relaunch shadowed a live worker and how two agents ended up in one worktree.
@@ -40,8 +38,6 @@ A relaunch leaves the prior attempt intact and queryable.
 
 ## LOOM-6 — Report health as an artifact
 
-**Status.** Ready. Depends on LOOM-5.
-
 A stopped dispatcher, a stopped schedule and a wedged cursor are currently indistinguishable from an
 idle engine. The idle-looking-but-dead failure is what started this work.
 
@@ -49,8 +45,6 @@ idle engine. The idle-looking-but-dead failure is what started this work.
 and the last error. `loom health` exits non-zero when the last pass is older than three intervals.
 
 ## LOOM-7 — Bind an integration receipt to the content it approved
-
-**Status.** Ready.
 
 A receipt records the paths and blobs it covered, so integration verifies exact content instead of
 re-diffing a history that may have moved.
@@ -60,8 +54,6 @@ fails with the exact path list when the approved paths changed on the ref. Legac
 null digest and are reported as incomplete rather than silently repaired.
 
 ## LOOM-8 — Check the registry against a fold of the log
-
-**Status.** Ready. Depends on LOOM-5.
 
 The registry becomes a checked projection from a snapshot forward, so a mutation without an event or
 a forged field is detected instead of argued about. The log is a journal of changes, not a record of
@@ -73,8 +65,6 @@ restore point and a passing diff. Historical tasks arrive through the snapshot.
 
 ## LOOM-9 — Run the review and receipt phases as event handlers
 
-**Status.** Ready. Depends on LOOM-8.
-
 Derive handlers own one event each and survive being run twice, in shadow first, so the order of the
 tick's phases stops being load-bearing.
 
@@ -84,8 +74,6 @@ The rework handler sets a flag only and never releases or takes over a claim.
 
 ## LOOM-10 — Deduplicate agent launches with an intent record
 
-**Status.** Ready. Depends on LOOM-5 and LOOM-9.
-
 Spawning is not idempotent, so it is gated by a unique intent written with the cursor rather than by
 a head check that races the next event.
 
@@ -94,8 +82,6 @@ lock is not held across a spawn. An attempt in `starting` with no launch is retr
 skipped.
 
 ## LOOM-11 — Write only the documents a mutation changes
-
-**Status.** Ready.
 
 Every command rewrites the whole registry: `save` deletes and reinserts every task and board
 document. Commit cost therefore grows with registry size, and the event dispatcher cannot afford a
@@ -108,8 +94,6 @@ log, its chain and the external checkpoint are unchanged in shape.
 
 ## LOOM-12 — Make evidence claims executable
 
-**Status.** Ready. Depends on LOOM-4.
-
 An evidence file asserts test counts, validator results and sweeps; those assertions are believed and
 have already been wrong. Generate or re-derive them so a stale claim fails the build instead of
 persuading a reviewer.
@@ -117,3 +101,16 @@ persuading a reviewer.
 **Acceptance.** A stale test count in an evidence file fails the suite. A claimed validator result is
 re-derived rather than copied. The evidence template marks which lines are machine-checked and which
 are prose.
+
+## LOOM-13 — Make bodies carry no state, and enforce it with a test
+
+This file had become a second copy of registry state: sections carried a status label that the
+registry had moved past, and several carried a dependency sentence that no edge backed. A body is
+the problem statement and its acceptance. A status, a claim or an edge lives in the registry, where
+it is transactional, and the precedent for the rest is `capabilities/work/tests/test_boundary.py`: a
+rule the suite enforces is a rule that cannot drift.
+
+**Acceptance.** A suite test fails on a synthetic body section carrying a status claim or a
+dependency claim, and its detector is exercised on that fixture so it cannot become a no-op. This
+file carries no status or dependency claim, while every section keeps its problem statement and its
+acceptance. `python3 -m unittest discover -s tests` passes.
