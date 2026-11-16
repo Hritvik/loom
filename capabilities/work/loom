@@ -576,11 +576,11 @@ def health_interval(config: dict) -> int:
 def cmd_health(args: argparse.Namespace, config: dict) -> int:
     """Read the dispatcher's own artifact and say whether it is running and keeping up.
 
-    Exit 0 only when an applying pass finished within three intervals and consumed the log. A
-    stopped dispatcher (artifact older than three intervals), a stopped schedule (no applying pass
-    has ever run, however many previews there are), a failed pass (it died and left the cursor
-    behind) and a wedged cursor (the pass did not reach the log head) are the ways of being dead
-    that look like an idle engine from the registry.
+    Exit 0 only when an applying pass finished within three intervals and left no event behind. A
+    stopped dispatcher (its pass clock is older than three intervals), a stopped schedule (no
+    applying pass has ever run, however many previews there are) and a pass that died holding
+    events that arrived while it was running are the ways of being dead that look like an idle
+    engine from the registry.
     """
     interval = int(args.interval or health_interval(config))
     stale_after = 3 * interval
@@ -598,15 +598,24 @@ def cmd_health(args: argparse.Namespace, config: dict) -> int:
         try:
             age = (now - engine.parse_time(last.get("ts"))).total_seconds()
         except (TypeError, ValueError):
-            problems.append(f"the last pass time is unreadable: {last.get('ts')!r}")
+            problems.append(f"the last applying pass time is unreadable: {last.get('ts')!r}")
         if age is not None and age > stale_after:
-            problems.append(f"the last pass was {int(age)}s ago; stale after {stale_after}s "
-                            f"(3 x {interval}s interval)")
+            problems.append(f"the last applying pass was {int(age)}s ago; stale after "
+                            f"{stale_after}s (3 x {interval}s interval)")
+        elif age is not None and age < 0:
+            problems.append(f"the last applying pass is stamped {int(-age)}s in the future: "
+                            "the clock or the artifact is wrong")
         cursor = int(last.get("cursor") or 0)
         head = int((last.get("logHead") or {}).get("seq") or 0)
-        if cursor < head:
-            problems.append(f"cursor {cursor} is behind log head {head}: the pass did not "
-                            f"consume {head - cursor} event(s)")
+        # readFrom is where this pass found the log; an artifact written before the field existed
+        # falls back to the cursor, which is the same position for a completed pass.
+        read_from = last.get("readFrom")
+        read_from = cursor if read_from is None else int(read_from)
+        pending = head - max(cursor, read_from)
+        if pending > 0:
+            problems.append(f"{pending} event(s) were never consumed by the last applying pass: "
+                            f"it read from {read_from}, its cursor is {cursor}, the log ends "
+                            f"at {head}")
         if not last.get("complete", True):
             problems.append("the last applying pass did not finish: "
                             + str(report.get("lastError") or "no error was recorded"))
@@ -625,11 +634,18 @@ def cmd_health(args: argparse.Namespace, config: dict) -> int:
     print(f"health: {'OK' if ok else 'UNHEALTHY'}")
     print(f"  artifact: {engine.health_path()}")
     if report:
-        print(f"  last pass: {report.get('ts')} ({report.get('mode')})"
-              + (f", {int(age)}s ago" if age is not None else ""))
+        print(f"  last pass: {report.get('ts')} ({report.get('mode')})")
     if last:
         head = last.get("logHead") or {}
-        print(f"  dispatch:  {last.get('ts')}  cursor {last.get('cursor')}"
+        if age is None:
+            aged = ""
+        elif age < 0:
+            aged = f", {int(-age)}s in the future"
+        else:
+            aged = f", {int(age)}s ago"
+        from_seq = last.get("readFrom")
+        print(f"  dispatch:  {last.get('ts')}{aged}  read from "
+              f"{'?' if from_seq is None else from_seq} -> cursor {last.get('cursor')}"
               f" / log head {head.get('seq')}  {str(head.get('hash') or '')[:12]}")
     live = report.get("liveAttempts") or []
     named = ", ".join(str(item.get("attempt")) for item in live)
