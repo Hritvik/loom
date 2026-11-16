@@ -1,15 +1,16 @@
 # Evidence — LOOM-13 make bodies carry no state
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-13-a1` (isolated worktree)
-Change under review: `b9d387e` (the test and the body). The evidence commit that follows it on this
-branch changes only this file.
+Branch: `loom/loom-loom-13-a3` (isolated worktree)
+Change under review: `22100c3..d347430` — the body and the first version of the test landed at
+`b9d387e`; `d347430` is the rework after review. The evidence commit that follows it on this branch
+changes only this file.
 Status: green, submitted for independent review
 
-This file states the claim at the commit above and nothing else. The review history is in the
-registry event log (`./loom events | grep loom/LOOM-13`), which is the audit record; duplicating it
-here is what kept the LOOM-2 evidence wrong. Commands below are runnable as written from
-`capabilities/work` unless they say otherwise.
+This file states the claim at that range and nothing else. The review history is in the registry
+event log (`./loom events | grep loom/LOOM-13`), which is the audit record; duplicating it here is
+what kept the LOOM-2 evidence wrong. Commands below are runnable as written from `capabilities/work`
+unless they say otherwise.
 
 ## Delivered
 
@@ -17,18 +18,21 @@ here is what kept the LOOM-2 evidence wrong. Commands below are runnable as writ
 `test_boundary.py`:
 
 - **Status claim.** A `Status`/`State` label (`**Status.** Reviewed.`, `Status: integrated`,
-  `- State: claimed`) or a line that is nothing but a registry status (`Reviewed.`). The vocabulary
-  is read from `schemas/task.schema.json`, so the detector cannot drift from the statuses the
-  registry accepts.
-- **Dependency claim.** A `Depends on`/`Dependencies`/`Blocked by`/`Blocks` label, or a dependency
-  phrase that names a task (`… depends on LOOM-5`). A bare reference (`See LOOM-5 …`) is allowed:
-  it asserts no relation.
+  `- State: claimed`, a `| Status | Ready |` table row) or a line that is nothing but a registry
+  status (`Reviewed.`). The vocabulary is read from `schemas/task.schema.json`, so the detector
+  cannot drift from the statuses the registry accepts.
+- **Dependency claim.** A `Depends on`/`Dependencies`/`Blocked by`/`Blocks` label, a
+  `| Dependencies | LOOM-4 |` table row, or a dependency phrase that names a task
+  (`… depends on LOOM-5`). A bare reference (`See LOOM-5 …`) is allowed: it asserts no relation.
 - **Fixtures.** Every detector is exercised on synthetic sections, so a detector that stopped
   biting fails a test instead of looking like a clean body. The precedence is `test_boundary.py`,
   where review of `eb3deed` found a never-matching pattern that the suite could not see.
 - **The document itself.** `docs/work-items.md` is parsed into sections; no section may carry either
-  claim, every section keeps a problem statement, and every `**Acceptance.**` keeps criteria under
-  it.
+  claim, every section keeps at least one prose line before any `**Acceptance.**`, and every
+  `**Acceptance.**` keeps criteria under it. The problem-statement check cuts the section at its
+  acceptance instead of skipping only the acceptance line, and is itself exercised on an
+  acceptance-only section: a filter that counted acceptance continuation lines as prose passed on a
+  section with no problem statement at all, which review of `9f5d540` found.
 
 `docs/work-items.md`:
 
@@ -36,7 +40,8 @@ here is what kept the LOOM-2 evidence wrong. Commands below are runnable as writ
   claims and five dependency sentences.
 - LOOM-1, LOOM-2 and LOOM-3 had only a status line; they gain a problem statement transcribed from
   the registry's own `goal` for each. Nothing was invented: none of the three defines an
-  `acceptance` in the registry, so none gains one.
+  `acceptance` in the registry, so none gains one. LOOM-2's goal says `artefact`; its body says
+  `artifact`, which is the spelling the rest of this file uses.
 - LOOM-13 gains its section. `validate_work.py` reported
   `ERROR loom/LOOM-13: heading LOOM-13 missing from loom.program` at the merge base, and that error
   is this task's to close.
@@ -56,6 +61,39 @@ git -C ../.. show 22100c3:docs/work-items.md \
 # the body as it is now
 python3 -c "import sys; sys.path.insert(0,'tests'); import test_body_claims as t; print(len(t.body_claims(open('../../docs/work-items.md').read())), 'claims')"
 #   prints 0 claims
+
+# every section has prose before its acceptance; the least of them
+python3 - <<'EOF'
+import sys; sys.path.insert(0, "tests")
+import test_body_claims as t
+text = t.BODY.read_text(encoding="utf-8")
+print("least prose lines:", min(len(t.problem_statement(lines)) for _, lines in t.sections(text)))
+EOF
+#   prints least prose lines: 1
+
+# the problem-statement check bites: delete LOOM-7's prose from a copy and run that test alone
+python3 - <<'EOF'
+import pathlib, sys, tempfile, unittest
+sys.path.insert(0, "tests")
+import test_body_claims as t
+text = t.BODY.read_text(encoding="utf-8")
+breaking = text.replace(
+    "A receipt records the paths and blobs it covered, so integration verifies exact content instead of\n"
+    "re-diffing a history that may have moved.\n", "")
+assert breaking != text, "the LOOM-7 prose was not found; this check no longer tests anything"
+with tempfile.TemporaryDirectory() as tmp:
+    copy = pathlib.Path(tmp, "work-items.md"); copy.write_text(breaking, encoding="utf-8")
+    t.BODY = copy
+    result = unittest.TextTestRunner(verbosity=0).run(
+        unittest.defaultTestLoader.loadTestsFromName(
+            "test_body_claims.WorkItemsBodyTest.test_every_section_keeps_its_problem_statement"))
+print("failures:", len(result.failures), "errors:", len(result.errors))
+EOF
+#   prints failures: 1 errors: 0
+
+# the table shape a status claim is also caught (the fixtures cover it; this is the detector)
+python3 -c "import sys; sys.path.insert(0,'tests'); import test_body_claims as t; print(t.body_claims('## X\n\n| Status | Ready |\n\n| Dependencies | LOOM-4 |\n'))"
+#   prints two claims: status and dependency
 
 # what validate_work.py will read from this file, using its own parsers
 python3 - <<'EOF'
