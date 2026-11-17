@@ -1,8 +1,8 @@
 # Evidence — LOOM-12 make evidence claims executable
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-12-a3`
-Commit under review: the tip of this branch; the registry ask binds the full commit
+Branch: `loom/loom-loom-12-a5`, rebased onto the current `main`; the registry ask binds the full
+commit, and this branch is the integration candidate rather than a pre-merge branch.
 
 ## What changed
 
@@ -95,14 +95,33 @@ The fix is at the root rather than in a skip: a committed claim is a property of
   this file. Both are prose, neither is checked, and the tally was already stale one commit later —
   which is the failure mode this task exists to remove. Only commands are pasted now.
 
+## Rework after integration (revision 9)
+
+Approved at revision 8 against a main that had since moved. The coordinator merged the reviewed
+commit, the merged tree carried more tests and more test files than the branch did, the guard
+failed on the two spans that count them, and the merge was reverted.
+
+The remedy at the registry is the one this file already named in Limits: rebase onto current main
+and refresh, which is what the spans in this revision record. Both values changed: the suite grew,
+and four test files arrived with LOOM-13 and others. The claim about the sweep did not move, which
+is the useful half of the same fact — a span invents nothing and a span about a stable property
+stays true across merges.
+
+What the revert also showed is that this is not a one-off. A whole-tree count is a claim about
+whatever tree it is measured in, so the next task that adds a test or a test file makes this file
+stale again — and that task cannot refresh it, because `evidence/LOOM-12.md` is not its write
+path. That hazard is stated in Limits with the two ways out; it is a property of claiming a
+tree-wide number in a file other trees merge into, not a defect in the checker, which is why the
+checker refused to let it pass.
+
 ## This file's own claims
 
 Each row below is machine-checked, and the check is the suite:
 
 | Claim | Marker | What it asserts |
 |---|---|---|
-| Suite size | `<!-- loom:tests.count -->328<!-- /loom -->` | the tests `unittest` collects under `tests/` |
-| Test files | `<!-- loom:tracked.count:tests -->12<!-- /loom -->` | files in the git index under `tests/` |
+| Suite size | `<!-- loom:tests.count -->380<!-- /loom -->` | the tests `unittest` collects under `tests/` |
+| Test files | `<!-- loom:tracked.count:tests -->16<!-- /loom -->` | files in the git index under `tests/` |
 | Boundary sweep | `<!-- loom:sweep.boundary-tree -->0<!-- /loom -->` | tracked files carrying an absolute home path or a personal mailbox |
 
 Everything else in this file is prose. That is the honest split the template states: a sentence
@@ -172,12 +191,19 @@ claimed here — see Limits.
 - **Prose is unchecked by construction.** The mechanism covers what an author marks. A number
   written as prose is still believed, and this file still contains prose claims. Marking is a
   choice the author makes, and the template states the choice; it cannot make the choice for them.
-- **A suite-size claim belongs to one tree.** Adding a test makes it stale in every evidence file
-  that records one, on every branch. That is the intended alarm and it is a cost: a worker whose
-  branch adds tests will see this repository's suite red through a shared file it may not be
-  allowed to edit. Refresh is one command, but the count is still a claim about a tree, and the
-  remedy is to refresh in the commit that changes the tree — or not to claim a count at all, which
-  is what LOOM-2's evidence does.
+- **A suite-size claim belongs to one tree, and this one has already cost a merge.** The first
+  integration attempt was reverted because the two tree-wide counts here were stale in the merged
+  tree, not because anything in the diff was wrong. The same thing will happen again: the next
+  branch that adds a test under `capabilities/work/tests` changes both counts, the guard turns
+  main red, and that branch cannot refresh this file because `evidence/LOOM-12.md` is not in its
+  write path. There are two ways out and this submission takes neither, because both need a
+  decision that is not a worker's: refresh this file as part of integrating any branch that moves
+  the counts, which means the integration pass would have to run the refresh or refuse a candidate
+  whose evidence is stale (a change to `engine.py`'s integration path, not made here); or drop the
+  tree-wide counts from committed evidence and keep them for interactive use, which is what
+  LOOM-2's evidence does and would leave only the sweep span, a claim about a property that does
+  not move when an unrelated test lands. What is proved either way is the mechanism: a stale value
+  fails, loudly, and refresh is one command.
 - **The validator is deliberately not claimed here.** `validate_work.py` validates shared registry
   state, so its verdict is a property of the machine: on this tree it fails for boards outside this
   task's write path, and that set changes under other boards' edits rather than under this diff. A
