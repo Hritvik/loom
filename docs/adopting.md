@@ -8,7 +8,7 @@ Fifteen minutes from nothing to a claimed task.
 git clone https://github.com/Hritvik/loom.git ~/repositories/loom
 cd ~/repositories/loom
 git config core.hooksPath .githooks
-git config --global coordination.home ~/repositories/loom   # required: the guard fails closed without it        # the coordination pre-commit guard
+git config --global coordination.home ~/repositories/loom   # the guard fails closed without it
 python3 -m unittest discover -s capabilities/work/tests
 ```
 
@@ -25,11 +25,39 @@ export WORK_DB=~/.local/state/loom/work.db
 `WORK_CONTENT_HOME` is where maps, plans and specs live. `WORK_CONTRACTS` is only needed if you
 validate a contract registry; without it that check is skipped.
 
-## 3. Register a board, then a task
+## 3. Create the board file, register the board, then a task
 
-A board is configuration, not an event: it names a repository and the file that holds the packet
-detail. Create the registry and its first board with `loom init`, then use the CLI for everything
-else.
+A board is configuration, not an event: it names a repository and the file inside it that holds the
+task detail. Both commands read that file from disk, so create the repository and the file
+**before** you register the board. A program board file is plain Markdown: each
+`## <ID> — <title>` heading is a task, and the `**Status.**` line beneath it is the state a reader
+sees.
+
+```bash
+mkdir -p ~/repositories/alpha/docs ~/repositories/beta/docs
+cat > ~/repositories/alpha/docs/work-items.md <<'EOF'
+# Work items — alpha
+
+## W-1 — First task
+
+**Status.** ready
+EOF
+cat > ~/repositories/beta/docs/work-items.md <<'EOF'
+# Work items — beta
+EOF
+```
+
+A file holding only a title is a valid board; headings appear as you add tasks. Nothing writes this
+file for you — `loom create` records the task in the registry only, and `loom board sync` refuses a
+program board — so the heading and its status line are yours to keep, and `python3 validate_work.py`
+reports a registered task whose heading is missing. (`loom board sync` is for `--kind board`
+packets.)
+
+`loom init` does not check that `--path` exists, while `loom board add` refuses a missing file.
+Creating the file first makes the two commands behave alike, and a typo surfaces now instead of at
+the next `loom list`.
+
+Create the registry and its first board with `loom init`, then use the CLI for everything else:
 
 ```bash
 cd ~/repositories/loom/capabilities/work
@@ -38,7 +66,15 @@ cd ~/repositories/loom/capabilities/work
 ```
 
 `loom init` writes the registry and the genesis event atomically. It refuses a database that
-already holds a registry; use `loom board add` for later boards.
+already holds a registry; use `loom board add` for later boards. `--board` is mandatory there — it is
+the new board's id, not a selection of an existing one:
+
+```bash
+./loom board add --board beta.program --kind program --role consumer \
+  --repo ~/repositories/beta --path docs/work-items.md --agent you/alpha-agent
+```
+
+Add a task to a registered board with `loom create`:
 
 ```bash
 cd ~/repositories/loom/capabilities/work
@@ -96,7 +132,11 @@ repository.
 python3 examples/walkthrough/walkthrough.py
 ```
 
-Two synthetic programs, three tasks, one complete cycle in a throwaway database.
+Two synthetic programs, three tasks, one complete cycle in a throwaway database. It creates its two
+board files and registers them the way §3 did — `loom init`, then `loom board add` — then claims,
+runs red/green, asks an independent reviewer, records the approval, integrates, watches the
+dependency gate open, and verifies the chain. It ends with `event chain OK`; anything else means the
+example and the engine have drifted apart.
 
 ## Where things live afterwards
 
