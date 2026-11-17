@@ -213,18 +213,36 @@ def git(_source: str, sampled: str, view: RegistryView) -> Signal:
     )
 
 
+def evidence_location(task: dict) -> tuple[Path | None, str | None]:
+    """Where a task's evidence locator resolves, and why it cannot when it cannot.
+
+    One rule for the whole UI: an absolute locator is used as is, a relative one is resolved
+    against the owning repository, and a relative locator with no owner repository is unreadable
+    rather than guessed. Both the portfolio-wide evidence signal and a single task's inspector
+    call this, so they cannot disagree about where a file is or why it is missing.
+    """
+    locator = task.get("evidence")
+    if not locator:
+        return None, "no evidence locator recorded"
+    location = Path(str(locator)).expanduser()
+    if location.is_absolute():
+        return location, None
+    owner = task.get("owner_repo")
+    if not owner:
+        return None, "relative path with no owner repository"
+    return Path(str(owner)).expanduser() / location, None
+
+
 def evidence(_source: str, sampled: str, view: RegistryView) -> Signal:
     present, missing = [], []
     for task in view.tasks:
         if not task.evidence:
             continue
-        location = Path(task.evidence).expanduser()
-        if not location.is_absolute():
-            if not task.owner_repo:
-                missing.append({"task": task.id, "path": task.evidence,
-                                "error": "relative path with no owner repository"})
-                continue
-            location = Path(task.owner_repo).expanduser() / location
+        location, error = evidence_location({"evidence": task.evidence,
+                                             "owner_repo": task.owner_repo})
+        if location is None:
+            missing.append({"task": task.id, "path": task.evidence, "error": error})
+            continue
         if location.is_file():
             present.append({"task": task.id, "path": str(location)})
         else:

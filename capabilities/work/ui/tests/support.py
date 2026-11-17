@@ -200,3 +200,188 @@ class Home:
         }
         path.write_bytes(plistlib.dumps(payload))
         return path
+
+
+SOURCE_A = "a" * 40
+SOURCE_B = "b" * 40
+SOURCE_C = "c" * 40
+DIGEST_A = "d" * 64
+REVIEW_PATHS = [{"path": "src/twelve.py", "blob": "f" * 40},
+                {"path": "tests/test_twelve.py", "blob": "0" * 40}]
+
+
+class ControlHome(Home):
+    """A work home with one task in every owner queue, and real review/receipt history.
+
+    ``Home`` stays the smallest fixture the foundation tests need. This one adds the states the
+    control room and inspector must tell apart: a human-addressed review request, a review verdict,
+    an integration receipt, rework, a stale request, a missing evidence file and a live run.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.add_task("demo/W-11", "green", ["src/eleven"],
+                      evidence="evidence/demo-W-11.md")
+        self.add_task("demo/W-12", "reviewed", ["src/twelve"],
+                      evidence="evidence/demo-W-12.md")
+        self.add_task("demo/W-13", "integrated", ["src/thirteen"],
+                      evidence="evidence/demo-W-13.md")
+        self.add_task("demo/W-14", "released")
+        self.add_task("demo/W-15", "blocked", blocked_needs="human")
+        self.add_task("demo/W-16", "blocked", blocked_needs="agent")
+        self.add_task("demo/W-17", "rejected")
+        self.add_task("demo/W-18", "green", ["src/eighteen"])
+        self.add_task("demo/W-19", "planned")
+        self.add_task("demo/W-20", "ready", ["src/twenty"], deps=["demo/W-19"])
+        self.add_task("demo/W-21", "green", ["src/twentyone"])
+        self.add_task("demo/W-22", "ready", ["src/twentytwo"])
+        self.add_task("demo/W-23", "claimed", ["src/twentythree"], claim={
+            "agent": "opencode/worker",
+            "epoch": 5,
+            "base_revision": 1,
+            "lease_expires": "2030-01-01T00:00:00Z",
+            "heartbeat": T0,
+        })
+        self.add_task("demo/W-24", "reviewed", ["src/twentyfour"],
+                      evidence="evidence/missing-W-24.md")
+        self.add_task("demo/W-25", "reviewed", ["src/twentyfive"],
+                      evidence="evidence/demo-W-25.md")
+        self.add_task("demo/W-26", "integrated", evidence="evidence/demo-W-26.md")
+        self.add_task("demo/W-27", "ready", ["src/twentyseven"])
+        self.add_task("demo/W-28", "green", ["src/twentyeight"])
+        self.add_task("demo/W-29", "green", ["src/twentynine"])
+        self.add_task("demo/W-30", "ready", ["src/thirty"], program="other",
+                      board="demo.other")
+        self.add_task("demo/W-31", "green", ["src/thirtyone"])
+        self.add_task("demo/W-32", "green", ["src/thirtytwo"], claim={
+            "agent": "opencode/old-worker",
+            "epoch": 2,
+            "base_revision": 1,
+            "lease_expires": "2026-11-15T09:00:00Z",
+            "heartbeat": "2026-11-15T08:00:00Z",
+        })
+        for name in ("W-11", "W-12", "W-13", "W-25", "W-26"):
+            path = self.repo / "evidence" / f"demo-{name}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {name} evidence\n")
+
+        self._history()
+        self.save()
+
+    # -- fixture helpers ------------------------------------------------------
+
+    def add_task(self, task_id, status, paths=None, **extra):
+        record = task(task_id, status, paths, **extra)
+        record.setdefault("owner_repo", str(self.repo))
+        self.registry["tasks"].append(record)
+        return record
+
+    def record(self, task_id: str) -> dict:
+        return next(item for item in self.registry["tasks"] if item["id"] == task_id)
+
+    def review(self, task_id: str, *, evidence: str, source: str = SOURCE_B,
+               decision: str = "approve", note: str = "Approved.") -> dict:
+        """A review request, the reviewer's answer, and the verdict the task carries."""
+        ask = self.ask(task_id, to="opencode/reviewer-agent", question=f"Review {task_id}",
+                       review_source=source, review_evidence=evidence)
+        answer = self.append(event="answer", task=task_id, agent="opencode/reviewer-agent",
+                             to="opencode/worker", in_reply_to=ask["seq"], decision=decision,
+                             note=note, revision=3, status="green", review_source=source,
+                             now=T0)
+        verdict = {"reviewer": "opencode/reviewer-agent", "decision": decision,
+                   "source": source, "base": SOURCE_A, "evidence": evidence,
+                   "answer": answer["seq"]}
+        self.record(task_id)["review"] = verdict
+        return verdict
+
+    def ask(self, task_id, *, to, question, revision=3, status="green",
+            review_source=None, review_evidence=None) -> dict:
+        fields = {"event": "ask", "task": task_id, "agent": "opencode/worker", "to": to,
+                  "question": question, "revision": revision, "status": status, "now": T0}
+        if review_source:
+            fields.update({"review_source": review_source,
+                           "review_base": SOURCE_A,
+                           "review_evidence": review_evidence or "evidence/demo-W-5.md"})
+        return self.append(**fields)
+
+    def _history(self) -> None:
+        # A green task with a current review request addressed to the owner.
+        self.ask("demo/W-11", to="owner", question="Is this the right cut?",
+                 review_source=SOURCE_B, review_evidence="evidence/demo-W-11.md")
+
+        # Reviewed with a bound approval: the integration queue, receipt complete.
+        verdict = self.review("demo/W-12", evidence="evidence/demo-W-12.md")
+        verdict.update({"paths": list(REVIEW_PATHS), "digest": DIGEST_A})
+        self.append(event="transition", task="demo/W-12", agent="opencode/worker",
+                    status="reviewed", previous_status="green", revision=3,
+                    reviewer=verdict["reviewer"], decision="approve",
+                    review_answer=verdict["answer"], review_source=SOURCE_B,
+                    review_digest=DIGEST_A, review_path_count=2, now=T0)
+
+        # Integrated with a real receipt: the acceptance queue.
+        verdict = self.review("demo/W-13", evidence="evidence/demo-W-13.md")
+        verdict.update({"paths": list(REVIEW_PATHS), "digest": DIGEST_A})
+        self.append(event="transition", task="demo/W-13", agent="opencode/worker",
+                    status="integrated", previous_status="reviewed", revision=3,
+                    evidence="evidence/demo-W-13.md", integrated_source=SOURCE_B,
+                    integration_tip=SOURCE_C, approved_digest=DIGEST_A,
+                    approved_path_count=2, now=T0)
+
+        # Review passed but the evidence file is missing: partial data, not a healthy row.
+        verdict = self.review("demo/W-24", evidence="evidence/missing-W-24.md")
+        verdict.update({"paths": list(REVIEW_PATHS), "digest": DIGEST_A})
+
+        # Review passed with no approved content: the engine calls this receipt incomplete.
+        self.review("demo/W-25", evidence="evidence/demo-W-25.md")
+
+        # Two decisions that only a person can make, and one that needs an agent.
+        self.append(event="transition", task="demo/W-15", agent="opencode/worker",
+                    status="blocked", previous_status="green", revision=3, needs="human",
+                    reason="Choose between option A and option B", now=T0)
+        self.append(event="transition", task="demo/W-16", agent="opencode/worker",
+                    status="blocked", previous_status="green", revision=3, needs="agent",
+                    reason="waiting for an upstream credential", now=T0)
+        self.append(event="transition", task="demo/W-17", agent="opencode/worker",
+                    status="rejected", previous_status="green", revision=3,
+                    reason="gate failed", now=T0)
+
+        # Rework: the reviewer asked for changes and nobody has started.
+        ask = self.ask("demo/W-18", to="opencode/reviewer-agent", question="Review demo/W-18",
+                       review_source=SOURCE_C, review_evidence="evidence/demo-W-5.md")
+        self.append(event="answer", task="demo/W-18", agent="opencode/reviewer-agent",
+                    to="opencode/worker", in_reply_to=ask["seq"],
+                    decision="changes requested", note="Handle the empty case.", revision=3,
+                    status="green", review_source=SOURCE_C, now=T0)
+
+        # A stale request: it names revision 2, so it cannot be re-asked for revision 3.
+        self.ask("demo/W-29", to="opencode/reviewer-agent", question="Review revision 2",
+                 revision=2, review_source=SOURCE_C)
+
+        # Ordinary questions, one is not addressed to a configured owner identity.
+        self.ask("demo/W-22", to="owner", question="Which program owns this change?")
+        self.ask("demo/W-27", to="hritvik",
+                 question="Can you confirm the acceptance wording?")
+
+        # A current request to an agent reviewer: waiting, not stalled.
+        self.ask("demo/W-28", to="opencode/reviewer-agent", question="Review demo/W-28",
+                 review_source=SOURCE_C, review_evidence="evidence/demo-W-5.md")
+
+        # Review approved but the coordinator has not recorded `reviewed` yet.
+        ask = self.ask("demo/W-31", to="opencode/reviewer-agent", question="Review demo/W-31",
+                       review_source=SOURCE_C, review_evidence="evidence/demo-W-5.md")
+        self.append(event="answer", task="demo/W-31", agent="opencode/reviewer-agent",
+                    to="opencode/worker", in_reply_to=ask["seq"], decision="approve",
+                    note="Looks right.", revision=3, status="green", review_source=SOURCE_C,
+                    now=T0)
+
+        # A green task whose worker's lease lapsed after submitting: review still stands.
+        self.ask("demo/W-32", to="opencode/reviewer-agent", question="Review demo/W-32",
+                 review_source=SOURCE_C, review_evidence="evidence/demo-W-5.md")
+
+        # A live run: an attempt opened by a claim, with a real process attached.
+        self.append(event="attempt", task="demo/W-23", attempt="demo/W-23#a1",
+                    agent="opencode/worker", role="implementer", state="starting", epoch=5,
+                    revision=1, now=T0)
+        self.append(event="launch", task="demo/W-23", attempt="demo/W-23#a1",
+                    agent="opencode/worker", role="implementer", pid=os.getpid(),
+                    worktree=str(self.root / "worktree"), branch="loom/demo-w-23-a1", now=T0)
