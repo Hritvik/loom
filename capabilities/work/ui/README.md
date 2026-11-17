@@ -176,7 +176,9 @@ Every fact above belongs to one of seven independently sampled sources: `databas
 `launches`, `tick`, `scheduler`, `release` and `logs`. Each has its own `as_of` and status. The start
 grace is one predicate (`model.attempt_start_grace_expired`): a claim inside `ATTEMPT_START_GRACE` is
 healthy in both `process` and `launches`, and only past it is the missing process a degradation.
-Failure rows are displayed at most `MAX_FAILURES` at a time but counted in full (`failures_total`).
+Failure rows are displayed at most `MAX_FAILURES` at a time but counted in full (`failures_total`);
+attempt rows likewise display at most `MAX_ATTEMPTS` and are counted in full (`attempts_total`), so
+a bounded list never reads as the whole record.
 A tick record older than three schedule intervals is shown degraded, never as current health; when
 no plist supplies the interval, the view says which of `plist`, `config` or the installer default the
 threshold rests on. A missing log or decision record is `unavailable`, not an empty success. The UI

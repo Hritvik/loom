@@ -514,7 +514,8 @@ def _attempts(ops: OperationsView) -> str:
         '<th scope="col">Role</th><th scope="col">State</th><th scope="col">Live</th>'
         '<th scope="col" class="num">Pid</th><th scope="col" class="num">Age</th>'
         '<th scope="col">Branch / worktree</th></tr></thead>'
-        f"<tbody>{''.join(rows)}</tbody></table></div>")
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+        + _truncation_note(ops.attempts_total, len(ops.attempts)))
 
 
 def _leases(ops: OperationsView) -> str:
@@ -539,6 +540,14 @@ def _leases(ops: OperationsView) -> str:
         f"<tbody>{rows}</tbody></table></div>")
 
 
+def _truncation_note(total: int, shown: int) -> str:
+    """A bounded list never reads as the whole record: say what was left out."""
+    if total <= shown:
+        return ""
+    return (f'<p class="note">{esc(total)} recorded; the most recent '
+            f"{esc(shown)} are listed.</p>")
+
+
 def _failures(items, empty: str, total: int | None = None) -> str:
     if not items:
         return f'<p class="empty">{esc(empty)}</p>'
@@ -552,10 +561,7 @@ def _failures(items, empty: str, total: int | None = None) -> str:
         f'<td class="mono">{esc(item.at or "")}</td>'
         "</tr>"
         for item in items)
-    note = ""
-    if total is not None and total > len(items):
-        note = (f'<p class="note">{esc(total)} recorded; the most recent '
-                f"{esc(len(items))} are listed.</p>")
+    note = _truncation_note(total, len(items)) if total is not None else ""
     return (
         '<div class="table-scroll" role="region" aria-label="Failed and stale launches" '
         'tabindex="0">'
@@ -595,7 +601,8 @@ def _tick(ops: OperationsView) -> str:
     note = ('<p class="note">This is the last pass the scheduler recorded. The UI never runs a '
             "tick; a recorded pass can be older than the page.</p>")
     return (f'<div class="table-scroll" role="region" aria-label="Last recorded tick pass" '
-            f'tabindex="0"><table><tbody>{body}</tbody></table></div>'
+            f'tabindex="0"><table><caption>The last policy pass the scheduler wrote, with its '
+            f'age at this snapshot.</caption><tbody>{body}</tbody></table></div>'
             f'<p class="mono">record: {esc(tick.path)}</p>{note}')
 
 
@@ -617,7 +624,8 @@ def _schedule(ops: OperationsView) -> str:
         f'<tr><th scope="row">{esc(name)}</th><td class="mono">{esc(value)}</td></tr>'
         for name, value in rows)
     return (f'<div class="table-scroll" role="region" aria-label="Schedule" tabindex="0">'
-            f"<table><tbody>{body}</tbody></table></div>")
+            f"<table><caption>The installed launch agent and where its interval came "
+            f"from.</caption><tbody>{body}</tbody></table></div>")
 
 
 def _release(ops: OperationsView) -> str:
@@ -635,7 +643,8 @@ def _release(ops: OperationsView) -> str:
         f'<tr><th scope="row">{esc(name)}</th><td class="mono">{esc(value)}</td></tr>'
         for name, value in rows)
     return (f'<div class="table-scroll" role="region" aria-label="Release" tabindex="0">'
-            f"<table><tbody>{body}</tbody></table></div>")
+            f"<table><caption>The UI gate verdict on the promoted tree; this page cannot "
+            f"promote.</caption><tbody>{body}</tbody></table></div>")
 
 
 def _log(ops: OperationsView) -> str:

@@ -48,9 +48,9 @@ MAX_TAIL_BYTES = 64 * 1024
 LAUNCHCTL_TIMEOUT = 5
 TICK_STALE_INTERVALS = 3
 # `loom schedule install` writes StartInterval from config schedule.tick_interval with this literal
-# default (front door, `loom:470`). The key is not in the front door's DEFAULTS, so a config without
-# it plus a plist we cannot read leaves the interval assumed rather than observed; callers record
-# which of the three it was.
+# default (front door, `loom:472`). The key is in the front door's DEFAULTS (`loom:55`), so a config
+# with nothing set still reports `config`; `default` is only reachable when the front door itself
+# cannot be read. Callers record which of the three it was.
 DEFAULT_TICK_INTERVAL = 120
 
 
@@ -245,6 +245,7 @@ class OperationsView:
     release: ReleaseView
     log: LogView
     failures_total: int = 0
+    attempts_total: int = 0
     sources: tuple[provenance.Signal, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
@@ -254,6 +255,7 @@ class OperationsView:
             "read_only": True,
             "capacity": self.capacity.to_dict(),
             "attempts": [item.to_dict() for item in self.attempts],
+            "attempts_total": self.attempts_total,
             "expired_leases": [item.to_dict() for item in self.expired_leases],
             "stuck": [item.to_dict() for item in self.stuck],
             "failures": [item.to_dict() for item in self.failures],
@@ -304,7 +306,7 @@ def _leases(snapshot: Snapshot, now: datetime,
 def _process(snapshot: Snapshot, now: datetime, sampled: str, config: dict,
              config_error: str | None
              ) -> tuple[provenance.Signal, CapacityView, tuple[AttemptView, ...],
-                        tuple[FailureView, ...], tuple[FailureView, ...]]:
+                        tuple[FailureView, ...], tuple[FailureView, ...], int]:
     views = engine.attempt_views(list(snapshot.events))
     live = engine.live_attempts(views)
     open_attempts = [item for item in views.values()
@@ -405,13 +407,19 @@ def _process(snapshot: Snapshot, now: datetime, sampled: str, config: dict,
     capacity = CapacityView(limits=limits, active=active, available=available,
                             live_attempts=len(live), live_reviewers=live_reviewers,
                             open_attempts=len(open_attempts))
+    if len(attempts) < len(ordered):
+        detail += (f"; the most recent {len(attempts)} of {len(ordered)} attempt(s) are listed")
     return (provenance.Signal(source="process", status=status, as_of=sampled, detail=detail,
                               data={"capacity": capacity.to_dict(),
                                     "derived_at": _iso(now),
                                     "live": len(live), "open": len(open_attempts),
+                                    "attempts_total": len(ordered),
+                                    "attempts_shown": len(attempts),
+                                    "attempts_not_shown": len(ordered) - len(attempts),
                                     "unreadable": [item.get("task") for item in unreadable]}),
             capacity, tuple(attempts), tuple(sorted(stuck, key=lambda item: item.task)),
-            tuple(sorted(failures, key=lambda item: (item.at or "", item.task), reverse=True)))
+            tuple(sorted(failures, key=lambda item: (item.at or "", item.task), reverse=True)),
+            len(ordered))
 
 
 def _launches(sampled: str, stuck: tuple[FailureView, ...],
@@ -686,12 +694,12 @@ def collect(snapshot: Snapshot, version: EngineVersion) -> OperationsView:
 
     database_signal, leases = _safe(
         "database", sampled, lambda: _leases(snapshot, now, sampled), ())
-    process_signal, capacity, attempts, stuck, failures = _safe(
+    process_signal, capacity, attempts, stuck, failures, attempts_total = _safe(
         "process", sampled,
         lambda: _process(snapshot, now, sampled, config, config_error),
         (provenance.Signal(source="process", status=UNAVAILABLE, as_of=sampled,
                            detail=f"could not sample: {config_error or 'no event log'}",
-                           data={}), _empty_capacity(), (), (), ()))
+                           data={}), _empty_capacity(), (), (), (), 0))
     launches_signal, _ = _safe(
         "launches", sampled, lambda: _launches(sampled, stuck, failures,
                                                min(len(failures), MAX_FAILURES)),
@@ -733,6 +741,7 @@ def collect(snapshot: Snapshot, version: EngineVersion) -> OperationsView:
         release=release,
         log=log,
         failures_total=len(failures),
+        attempts_total=attempts_total,
         sources=(database_signal, process_signal, launches_signal, tick_signal,
                  schedule_signal, release_signal, log_signal),
     )

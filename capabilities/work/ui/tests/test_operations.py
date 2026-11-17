@@ -172,6 +172,22 @@ class OperationsTest(unittest.TestCase):
         page = templates.operations_page(ops, version.inspect())
         self.assertIn("25 recorded; the most recent 20 are listed.", page)
 
+    def test_the_attempts_headline_counts_every_record_not_only_the_listed_ones(self):
+        for index in range(30):
+            self.home.append(event="attempt", task=f"demo/W-{index}", agent="opencode/worker",
+                             role="implementer", attempt=f"demo/W-{index}#a1", state="failed",
+                             reason="launch failed: worker exited 2", now=iso())
+        _, ops = self.collect()
+        self.assertEqual(len(ops.attempts), operations.MAX_ATTEMPTS)
+        self.assertEqual(ops.attempts_total, 30)
+        self.assertEqual(ops.source("process").data["attempts_total"], 30)
+        self.assertEqual(ops.source("process").data["attempts_shown"], operations.MAX_ATTEMPTS)
+        self.assertEqual(ops.source("process").data["attempts_not_shown"], 5)
+        self.assertIn("the most recent 25 of 30 attempt(s) are listed",
+                      ops.source("process").detail)
+        page = templates.operations_page(ops, version.inspect())
+        self.assertIn("30 recorded; the most recent 25 are listed.", page)
+
     def test_a_run_whose_process_vanished_is_lost(self):
         child = subprocess.Popen(["sleep", "30"])
         self.home.append(event="attempt", task="demo/W-3", agent="opencode/worker",
@@ -350,6 +366,7 @@ class OperationsServerTest(unittest.TestCase):
                          list(SOURCES))
         self.assertIn("capacity", payload["operations"])
         self.assertIn("expired_leases", payload["operations"])
+        self.assertIn("attempts_total", payload["operations"])
 
     def test_operations_page_has_no_control_surface(self):
         status, headers, raw = self.request()
@@ -361,6 +378,9 @@ class OperationsServerTest(unittest.TestCase):
         self.assertIn("Expired leases", body)
         self.assertIn("read-only", body.lower())
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        # Every table carries a caption, including the key/value tick, schedule and release blocks.
+        self.assertGreater(body.count("<table"), 0)
+        self.assertEqual(body.count("<table"), body.count("<caption>"))
 
     def test_the_operations_page_is_get_only(self):
         for method in ("POST", "PUT", "PATCH", "DELETE"):

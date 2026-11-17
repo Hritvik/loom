@@ -1,20 +1,36 @@
 # UI-4 — Add read-only operations visibility
 
-Task `loom-ui/UI-4` · revision 10 · attempt `#a5` · epoch 3 · branch `loom/loom-ui-ui-4-a5` · write
+Task `loom-ui/UI-4` · revision 14 · attempt `#a7` · epoch 4 · branch `loom/loom-ui-ui-4-a7` · write
 path `capabilities/work/ui`
 Plan `plans/loom/2026-11-15-ui-plan.md` · items `wayfinder/loom-ui/work-items.md`
 
 The behaviour in this slice was reviewed and approved at revision 8 (review request 2364, answer
-2377). This attempt does the rework the coordinator asked for at revision 9: **rebase the slice onto
-main after UI-2 integrated, resolve the shared files, and put the resulting integration candidate up
-for review**, because UI-3 and UI-4 collide with UI-2 in the same four files and one resolution can
-serve both.
+2377). Attempt `#a5` reworked it into the integration candidate after the coordinator's note at
+revision 9, and the reviewer at revision 12 (request 2582, answer 2590) confirmed the integration —
+resolutions, one gate and one snapshot, read-only boundary, live parity — and requested three
+concrete inconsistencies. **This attempt (`#a7`) fixes only those three, on top of `896a6ba`:**
+
+1. **The attempts list was silently capped at `MAX_ATTEMPTS = 25`.** The caption read "Attempts
+   recorded in this registry" and the view exposed no total, so a 308-row record rendered as 25
+   rows with no note — the defect decision 6 already rules out for failures. Attempts are now
+   counted in full (`attempts_total`), the `process` signal exposes `attempts_shown` /
+   `attempts_not_shown` and says "the most recent 25 of 308 attempt(s) are listed", and the page
+   carries the same note under the table. `MAX_ATTEMPTS` now bounds rows only.
+2. **A stale constant comment.** `DEFAULT_TICK_INTERVAL` still claimed `schedule.tick_interval` was
+   absent from the front door's `DEFAULTS` and cited `loom:470`. On this base the key *is* in
+   `DEFAULTS` (`loom:55`) and the installer literal is at `loom:472`; the comment now says so, which
+   matches decision 8 and the two tests.
+3. **Two coverage claims were wider than the code.** The tick, schedule and release key/value tables
+   had no `<caption>` although the evidence said every operations block is captioned, and the
+   accessibility scaffold loops covered only `/`, `/tasks` and `/task/<id>` while the README said
+   every page. All three tables now carry a caption, `/operations` is in both scaffold loops, and
+   the operations page is asserted to have exactly one caption per table.
 
 | | |
 |---|---|
 | Base of this candidate | `163bc94` — UI-3's integration candidate, which is `489deb2` (main, UI-2 integrated) plus the UI-3 graph |
-| Commits under review | `e9e5e19` (feat: operations visibility), `a7470b4` (fix: start grace + failure counting), plus the integration commit that carries this file |
-| Registry base revision | 9 (`loom show loom-ui/UI-4`), claimed at 10 |
+| Commits under review | `e9e5e19` (feat: operations visibility), `a7470b4` (fix: start grace + failure counting), `896a6ba` (integration candidate), plus this attempt's commit (the three findings above) |
+| Registry base revision | 13 (`loom show loom-ui/UI-4`), claimed at 14 |
 
 The candidate is stacked on UI-3 deliberately: UI-3 is green and awaiting its own review, it already
 carries the `templates.shell` + `extra_css` + nav change UI-4 needs, and the coordinator's note said
@@ -85,7 +101,7 @@ keeps its own `as_of` and `ok`/`degraded`/`unavailable` status.
 | `ui/loom_ui/provenance.py` | the foundation's `process` source uses the same grace predicate |
 | `ui/loom_ui/templates.py` | the operations page inside the shared shell, plus the nav item; all values escaped, still no script |
 | `ui/loom_ui/server.py` | `GET /operations` and `GET /api/operations` through the shared gate and snapshot |
-| `ui/tests/test_operations.py` | 27 tests: front-door parity, start grace, failure counting, freshness, schedule/log, no-control HTTP surface |
+| `ui/tests/test_operations.py` | 28 tests: front-door parity, start grace, failure and attempt counting, freshness, schedule/log, one caption per table, no-control HTTP surface |
 | `ui/README.md` | routes, operations sources, parity and the no-control boundary |
 
 ## Decisions and their reasons
@@ -119,10 +135,12 @@ keeps its own `as_of` and `ok`/`degraded`/`unavailable` status.
    pid-less attempt past it is `degraded` in both. The foundation's `provenance.process` uses the
    same predicate, and still flags a `launch` record that claims to have spawned a run but recorded
    no pid immediately, because that hand-off is incomplete at any age.
-6. **A headline never reports a capped list as the whole record.** Every failure is counted; only
-   the display is limited to `MAX_FAILURES = 20`, and the view exposes `failures_total`, the
-   `launches` signal exposes `shown`/`not_shown`, its detail says "the most recent 20 are listed",
-   and the page carries the same note.
+6. **A headline never reports a capped list as the whole record.** Every failure *and* every
+   attempt is counted; only the display is limited (`MAX_FAILURES = 20`, `MAX_ATTEMPTS = 25`). The
+   view exposes `failures_total` and `attempts_total`, the `launches` and `process` signals expose
+   `shown`/`not_shown`, each detail says "the most recent N … are listed", and the page carries the
+   same note under both tables. The attempts cap was the one place this rule was not applied before
+   this attempt; the reviewer at revision 12 caught it (finding 1 of answer 2590).
 7. **The schedule is the plist *and* launchd.** `loom schedule status` reads the plist, the loaded
    job and the log. This view reads the same three: the plist (label, interval, arguments), the
    `launchctl list` row, and a bounded tail of `~/.local/state/loom/tick.log`. A plist that exists
@@ -151,30 +169,32 @@ keeps its own `as_of` and `ok`/`degraded`/`unavailable` status.
 
 All commands below were run on this branch unless a line says otherwise.
 
-### UI suite — 180 tests, `OK`
+### UI suite — 181 tests, `OK`
 
 ```console
 $ cd capabilities/work && python3 -m unittest discover -s ui/tests -t ui/tests
-Ran 180 tests in 39.9s
+Ran 181 tests in 39.9s
 OK
 ```
 
-That is UI-1/UI-2/UI-3's 151 plus UI-4's 27 in `test_operations.py` and the two grace tests in
+That is UI-1/UI-2/UI-3's 151 plus UI-4's 28 in `test_operations.py` and the two grace tests in
 `test_provenance.py`. `test_operations.py` covers parity with `loom tick --json` for capacity,
 limits, expired leases and live attempts; a claim with no expiry; a failed launch with its reason; a
 stale `starting` attempt; an in-grace start that must stay healthy; both sources agreeing on a stale
-start; the failure headline outliving the 20-row display limit; a run whose process vanished; a
-stuck attempt through the engine's own threshold; a healthy process source despite historical
-failures; tick record fresh/stale/missing/malformed; the interval's plist/config/default provenance;
-schedule loaded/not loaded; log tail escaping; every source's `as_of` and status; the release
-verdict; `/api/operations` shape; no control surface; and a closed version gate returning `503` on
-both operations routes.
+start; the failure headline outliving the 20-row display limit; the attempts headline outliving the
+25-row display limit; a run whose process vanished; a stuck attempt through the engine's own
+threshold; a healthy process source despite historical failures; tick record fresh/stale/missing/
+malformed; the interval's plist/config/default provenance; schedule loaded/not loaded; log tail
+escaping; every source's `as_of` and status; the release verdict; `/api/operations` shape including
+`attempts_total`; no control surface; one caption per table; and a closed version gate returning
+`503` on both operations routes. The scaffold tests in `test_pages.py` and `test_control.py` now
+include `/operations`.
 
 ### Engine suite — 328 tests, `OK (skipped=2)`
 
 ```console
 $ cd capabilities/work && python3 -m unittest discover -s tests
-Ran 328 tests in 97.8s
+Ran 328 tests in 95.7s
 OK (skipped=2)
 ```
 
@@ -198,32 +218,52 @@ WARN  loom-ui/UI-4: registry says claimed, program says planned
 
 ### Front-door parity, sampled on the live registry
 
-Read-only preview against the real registry at `2026-11-17T05:56Z`:
+Read-only sample against the real registry at `2026-11-17T06:17:25Z` (no apply; this attempt did not
+run `tick --apply`):
 
 ```console
-$ ./loom tick --json --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-limits       implementer 4, reviewer 3, integrator 1
-active       implementer 2, reviewer 0, integrator 0
-expired      jarvis/ARCH-09  opencode/jarvis-agent
-liveAttempts loom-ui/UI-4 pid 96689, teach/W-8 pid 6856
+$ python3 - <<'PY'  # capabilities/work/ui
+from loom_ui import operations, snapshot, version
+ops = operations.collect(snapshot.read(), version.inspect())
+...
+PY
+limits        implementer 4, reviewer 3, integrator 1
+active        implementer 1, reviewer 0, integrator 0
+expired       jarvis/ARCH-09  opencode/jarvis-agent
+live          loom-ui/UI-4 pid 21321
+attempts      25 shown of 309 recorded
 
 $ ./loom workers
-loom-ui/UI-4  implementer pid 96689  loom-ui/UI-4#a5
-teach/W-8     implementer pid 6856   teach/W-8#a3
+loom-ui/UI-4  implementer pid 21321  loom-ui/UI-4#a7  loom/loom-ui-ui-4-a7
 ```
 
-The field-by-field comparison of those four values against the operations view is asserted in the
-suite (`test_capacity_leases_and_live_attempts_match_tick_json`), which shells out to the real
-`loom` for the same `--now`.
+`active`, `limits`, `expired` and `liveAttempts` came out identical from `./loom tick --json --now
+2026-11-17T06:17:25Z` (a preview; it refreshes `health.json` with `mode: "preview"` and does not
+write a decision record or change `lastApply`). The field-by-field comparison of those four values
+against the operations view is asserted in the suite
+(`test_capacity_leases_and_live_attempts_match_tick_json`), which shells out to the real `loom` for
+the same `--now`.
+
+### The rendered page, from this checkout
+
+The gate is closed (see below), so the page was rendered in-process from the same read the server
+does:
+
+```console
+tables 8  captions 8      # one caption per table, including tick, schedule and release
+<script false  <form false  <button false  <input false
+h1 1  aria-current="page" true  note "309 recorded; the most recent 25 are listed." true
+```
 
 ### Live page smoke — the gate closed, and that is the finding
 
-Serving this checkout on `127.0.0.1:8799` returns `503` on every route, including `/operations`:
+Serving this checkout on `127.0.0.1:8811` returns `503` on every route, including `/operations`
+(re-run in this attempt; the drift below is unchanged):
 
 ```console
-$ python3 capabilities/work/ui/serve.py --port 8799
+$ python3 capabilities/work/ui/serve.py --port 8811
 GET /             -> 503    GET /operations        -> 503
-GET /graph        -> 503    GET /api/operations    -> 503
+GET /api/operations -> 503  (GET /graph, same gate)
 <h1>Loom UI is not serving</h1>
 Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; …; form-action 'none'
 ```
@@ -272,6 +312,10 @@ from a freshly promoted tree; nothing in this branch depends on the drift.
   counted in full (`failures_total`) and not time-windowed; old failed attempts remain visible until
   the audit record is understood. This is deliberate (failures are facts), but an operator may want
   a recency filter later.
+- **Attempt rows are bounded at `MAX_ATTEMPTS = 25` for display only.** The live registry holds 309
+  attempt views and the page lists the most recent 25, saying so and exposing `attempts_total` /
+  `attempts_not_shown`. Each attempt is one audit event, so the record grows forever; if an operator
+  needs older rows the answer is a filtered view (a follow-on), not raising the cap.
 - **Release health is the UI gate verdict, not `deploy status`.** The two answer different
   questions; the field is labelled accordingly and no promotion or rollback control is exposed.
 - **No actions.** Claim/renew/release/ask/answer and transitions remain UI-5, and dispatch/`tick
@@ -284,7 +328,7 @@ from a freshly promoted tree; nothing in this branch depends on the drift.
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s ui/tests -t ui/tests     # 180 tests
+python3 -m unittest discover -s ui/tests -t ui/tests     # 181 tests
 python3 -m unittest discover -s tests                    # 328 engine tests
 python3 validate_work.py                                 # 2 errors, both outside ui/
 python3 ui/serve.py --port 8788                          # browse /, /graph, /operations
@@ -293,20 +337,20 @@ python3 ui/serve.py --port 8788                          # browse /, /graph, /op
 
 ## Review asks
 
-1. **The integration, not just the slice.** Are the four resolutions right — in particular, does
-   `/operations` rendering inside `templates.shell` (rather than its own shell) keep everything UI-2
-   promised, and is routing both operations handlers through `_load()` the correct single-snapshot
-   and single-gate shape?
-2. **The stack.** Is reviewing UI-4 on top of UI-3's candidate the right way to land one resolution
-   for both, given UI-3 is green and awaiting review? If UI-3's blob moves, is re-parenting enough?
-3. **The corrected interval source.** On this base `schedule.tick_interval` *is* in the front door's
-   `DEFAULTS`, so an interval with no plist reports `config`, not `default`. Is that the right
-   reading for an operator, or should the view treat the front door's DEFAULTS value as "default"
-   anyway because nobody configured it?
-4. **Start grace and failure counting** (unchanged from the approved revision 8): a claim inside the
+1. **The three findings, one by one.** (a) Attempts are counted in full (`attempts_total`), the
+   `process` signal exposes `attempts_shown`/`attempts_not_shown`, and both detail and page say how
+   many are listed — is that the right shape, or should the cap go entirely? (b) The
+   `DEFAULT_TICK_INTERVAL` comment now matches `loom:55` and `loom:472`; check the line references.
+   (c) The tick, schedule and release tables are captioned, `/operations` is in the scaffold loops in
+   both test files, and one caption per table is asserted on the served page.
+2. **The integrated candidate, unchanged.** The four resolutions, the shared `_load()` gate and
+   snapshot, and the read-only boundary all come from `896a6ba`, which the review at revision 12
+   verified; this attempt touches only the three items above. Flag anything the fix introduced.
+3. **Start grace and failure counting** (unchanged from the approved revision 8): a claim inside the
    window is `ok` and past it is `degraded` in both `process` and `launches` through one predicate;
-   three schedule intervals is the recorded-tick staleness threshold; the 20-row display bound is
-   never presented as the total.
-5. **The drifted release.** The gate closing on `~/.local/state/loom/engine` is a real finding about
-   the environment, not this branch. Does the coordinator want it promoted so the page-level smoke
-   can be re-run, or is the in-suite front-door parity enough for this review?
+   three schedule intervals is the recorded-tick staleness threshold; neither the 20-row failure
+   bound nor the 25-row attempt bound is presented as the total.
+4. **The drifted release.** The gate still closes on `~/.local/state/loom/engine` (same digest
+   mismatch as at revision 12), so the HTTP smoke verifies the fail-closed path and the page was
+   rendered in-process from the same read. Is that enough for this review, or does the coordinator
+   want a promotion first?
