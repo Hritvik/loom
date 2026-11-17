@@ -226,6 +226,82 @@ def event_chain_warnings(records: list[tuple[bytes, dict]]) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+def git_read(repo: Path, *args: str) -> subprocess.CompletedProcess | None:
+    """Run a read-only Git command in a repository, without inherited GIT_* overrides."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        return subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(repo), *args],
+            capture_output=True, text=True, errors="surrogateescape", timeout=10, check=False,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def integration_tip(repo: Path, ref: str) -> tuple[str | None, str]:
+    """The commit at a board's integration ref, or None and the reason it cannot be read."""
+    if not ref.startswith("refs/heads/"):
+        return None, f"{ref} does not name a local branch"
+    if not (repo / ".git").exists():
+        return None, f"{repo} is not a Git checkout"
+    result = git_read(repo, "rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
+    if result is None or result.returncode:
+        return None, f"{ref} is missing from {repo}"
+    return result.stdout.strip(), ""
+
+
+def check_reviewed_sources(tasks: list[dict], boards: dict[str, dict],
+                           errors: list[str], warnings: list[str]) -> None:
+    """Report a reviewed task whose approved source cannot reach the integration branch.
+
+    Integration requires the approved commit to be an ancestor of the board's integration ref at
+    transition time, so a candidate reviewed against an older ref can never integrate as reviewed —
+    and a clean merge of it still leaves main red because its evidence went stale. Neither the
+    review nor the merge can see that, so the impossibility is reported here, before an integrator
+    spends one. A source that is on the ref reports nothing.
+    """
+    tips: dict[tuple[str, str], tuple[str | None, str]] = {}
+    reported: set[tuple[str, str]] = set()
+    for task in tasks:
+        if task.get("status") != "reviewed":
+            continue
+        source = (task.get("review") or {}).get("source")
+        if not source:
+            continue  # the incomplete-receipt warning already names this task
+        if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", str(source)):
+            warnings.append(
+                f"{task['id']}: reviewed source {str(source)[:12]!r} is not a full commit hash;"
+                " it cannot be verified against the integration branch")
+            continue
+        board = boards.get(task.get("board")) or {}
+        ref = board.get("integration_ref") or "refs/heads/main"
+        repo = Path(str(task.get("owner_repo", ""))).expanduser()
+        key = (str(repo), ref)
+        if key not in tips:
+            tips[key] = integration_tip(repo, ref)
+        tip, problem = tips[key]
+        if tip is None:
+            if key not in reported:
+                reported.add(key)
+                warnings.append(f"cannot verify the integration branch: {problem}")
+            continue
+        ancestry = git_read(repo, "merge-base", "--is-ancestor", source, tip)
+        if ancestry is not None and ancestry.returncode == 0:
+            continue
+        if ancestry is not None and ancestry.returncode == 1:
+            errors.append(
+                f"{task['id']}: reviewed source {source[:12]} is not in the history of {ref}"
+                f" ({repo}); this receipt cannot integrate as reviewed — merge the candidate,"
+                " review the merge commit, and integrate that exact commit")
+        else:
+            if key not in reported:
+                reported.add(key)
+                detail = ((ancestry.stderr if ancestry else "") or "").strip()[:120]
+                warnings.append(
+                    f"cannot verify a reviewed source in {repo} ({ref}): {detail}")
+
+
 def cross_check_capabilities(root: Path, explicit: str | None, errors: list[str],
                              warnings: list[str]) -> dict:
     """Cross-check the capability-steward registry that sits beside the work home.
@@ -598,6 +674,9 @@ def main(argv: list[str] | None = None) -> int:
                     warnings.append(
                         f"write-path overlap within {repo}: {write_path} in {previous[1]} and {owner}")
                 owners[write_path] = (repo, owner)
+
+    # ---- reviewed sources against the integration branch ----------------
+    check_reviewed_sources(tasks, boards, errors, warnings)
 
     # ---- integration plans ----------------------------------------------
     plan_count = 0

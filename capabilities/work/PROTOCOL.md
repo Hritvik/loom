@@ -168,6 +168,15 @@ loom answer <id> --question <ask-seq> --decision "approve|changes requested" --n
   when the approved source is already an ancestor of the board's integration ref and its recorded
   paths are unchanged; everything else is reported as merge-needed, paths-diverged,
   receipt-incomplete or receipt-missing.
+- **Sequencing.** Integration requires the approved commit to be an ancestor of the board's
+  integration ref **at transition time**, so the order is fixed: the integrator merges the
+  candidate into the integration ref, the reviewer reviews that merge commit, and the integrator
+  records that exact commit as integrated. No other candidate merges between the review and the
+  integration. A candidate reviewed against an older ref can never integrate as reviewed: a clean
+  merge of it produces a different commit, so the approved commit is still absent from the ref,
+  and the paths the approval covered may have moved at the tip. `validate_work.py` therefore
+  reports every reviewed task whose approved source is not in the history of its board's
+  integration ref, naming the task and the ref, before an integrator spends a merge on it.
 - Requests addressed to a human are never answered by a worker.
 
 ## Event log

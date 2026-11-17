@@ -185,6 +185,16 @@ cannot promote tasks into a reviewed or completed state.
 Git verification uses the owner repository's local `refs/heads/main` by default, or the
 board's configured `integration_ref`. Checking out a review branch does not change the gate.
 The board does not establish that a commit landed on a remote branch.
+
+**Sequence the merge, the review and the integration.** The approved commit must be in the history
+of the integration ref when `integrated` is recorded, so a candidate reviewed against an older ref
+can never integrate as reviewed: the merge succeeds and produces a different commit. The order is
+therefore fixed. The integrator merges the candidate into the integration ref first; the reviewer
+reviews that merge commit, and the approval covers what the branch now contains at it; the integrator
+records that exact commit. No other candidate merges between the review and the integration.
+`python3 validate_work.py` names every reviewed task whose approved source is not in the history of
+its board's integration ref, so this is visible before an integrator spends a merge on it.
+
 Agent IDs are local audit labels and depend on trusted callers. Remote or authenticated review
 requires an identity and branch-protection policy outside this gate.
 
