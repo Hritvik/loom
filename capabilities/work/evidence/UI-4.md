@@ -1,10 +1,77 @@
 # UI-4 — Add read-only operations visibility
 
-Task: `loom-ui/UI-4` · revision 6 · branch `loom/loom-ui-ui-4-a3` · write path `capabilities/work/ui`
-Plan: `plans/loom/2026-11-15-ui-plan.md` (private planning repo) · items:
-`wayfinder/loom-ui/work-items.md`
+Task `loom-ui/UI-4` · revision 10 · attempt `#a5` · epoch 3 · branch `loom/loom-ui-ui-4-a5` · write
+path `capabilities/work/ui`
+Plan `plans/loom/2026-11-15-ui-plan.md` · items `wayfinder/loom-ui/work-items.md`
 
-## What was built
+The behaviour in this slice was reviewed and approved at revision 8 (review request 2364, answer
+2377). This attempt does the rework the coordinator asked for at revision 9: **rebase the slice onto
+main after UI-2 integrated, resolve the shared files, and put the resulting integration candidate up
+for review**, because UI-3 and UI-4 collide with UI-2 in the same four files and one resolution can
+serve both.
+
+| | |
+|---|---|
+| Base of this candidate | `163bc94` — UI-3's integration candidate, which is `489deb2` (main, UI-2 integrated) plus the UI-3 graph |
+| Commits under review | `e9e5e19` (feat: operations visibility), `a7470b4` (fix: start grace + failure counting), plus the integration commit that carries this file |
+| Registry base revision | 9 (`loom show loom-ui/UI-4`), claimed at 10 |
+
+The candidate is stacked on UI-3 deliberately: UI-3 is green and awaiting its own review, it already
+carries the `templates.shell` + `extra_css` + nav change UI-4 needs, and the coordinator's note said
+UI-4 contains UI-3 so one conflict resolution serves both. If UI-3's blob changes before it lands,
+this stack is re-parented onto the new UI-3 commit; the resolutions below do not change.
+
+## What this rework changed
+
+1. **Rebased onto the integrated tree.** `git rebase --onto 163bc94 22100c3` replayed both UI-4
+   commits. Content conflicts appeared in exactly the four files the coordinator named — `README.md`,
+   `loom_ui/__init__.py`, `server.py`, `templates.py` — and in nothing else.
+2. **The page renders inside the shared shell instead of its own.** The pre-rebase branch carried a
+   private `page()` shell, `_nav`, `_badge` and the UI-1 `CSS`. UI-2 replaced all of that. The
+   resolved `templates.py` keeps UI-2's shell, primitives (`esc`, `badge`, `stamp`,
+   `signals_table`, `degraded_banner`) and fail-closed pages, keeps UI-3's `extra_css` hook and Graph
+   nav item, and grafts the operations view on as one appended section with its own `OPERATIONS_CSS`
+   and a `/operations` nav item. Every operations block is escaped, captioned, `scope`-headered and
+   inside a focusable scroll region, like the rest of the app.
+3. **One gate and one snapshot, not two.** Before integration `GET /operations` went through
+   `Application.operations()`, which re-inspected the version and re-read the database — a second
+   snapshot path that UI-2's `_load()` exists to replace. Both operations handlers now take
+   `(version, snapshot)` from `_load()`, so a closed gate or an unreadable registry produces the same
+   distinct `503`s as every other page, and the numbers match the task list because they come from
+   the same read. `Application.operations()` was removed rather than left as a second door.
+4. **Version.** UI-2 shipped `0.2.0`, UI-3 `0.3.0`; with both present this branch is `0.4.0`.
+
+### Resolutions, file by file
+
+| File | Resolution |
+|---|---|
+| `ui/README.md` | Kept UI-2's control-room, inspector, graph, empty/stale/partial states and accessibility sections; added the `/operations` and `/api/operations` route rows and the **No controls** boundary row; merged the two "what the suite covers" paragraphs instead of choosing one |
+| `ui/loom_ui/__init__.py` | Layout docstring lists `control`, `pages`, `graph`, `graph_page` and `operations`; `__version__ = "0.4.0"` |
+| `ui/loom_ui/server.py` | UI-2's imports, `_load`, `_crash`, `_graph_page` and route table kept; `/operations` added to the page routes; `_operations_page`/`_operations` rewritten onto `_load()`; `Application.operations()` deleted |
+| `ui/loom_ui/templates.py` | UI-2's shell/CSS/primitives kept verbatim; UI-3's `extra_css` and Graph item kept; operations section appended (`OPERATIONS_CSS`, `_age`, `_capacity`, `_attempts`, `_leases`, `_failures`, `_tick`, `_schedule`, `_release`, `_log`, `operations_page`) and rendered through `shell(...)`. The old private shell, `_nav`, `_badge`, `_counts`, `_claimable`, `_attention` are gone — `pages.py`/`frame` own that now |
+
+### One engine-side change the rebase exposed
+
+`loom schedule install` writes `StartInterval` from `schedule.tick_interval`. On the tree this branch
+was cut from (`22100c3`) that key was **absent from `loom.DEFAULTS`**, so with no readable plist the
+only value left was the installer's literal 120s and the view called it `default`. Main has since
+added it:
+
+```console
+$ git show main:capabilities/work/loom | sed -n '54,55p'
+    "schedule": {"tick_label": "local.loom-tick", "linear_label": "local.loom-linear",
+                 "tick_interval": 120, "linear_interval": 300},
+```
+
+So on the integration base the honest source without a plist is `config`, and `default` now means
+only "the front door could not be read at all". The two tests that asserted `default` were updated to
+say `config` (`test_an_interval_no_plist_supplies_is_reported_with_its_source`,
+`test_a_stale_tick_says_where_its_interval_came_from`), and `_tick_interval`'s docstring now
+describes the three cases in that order. This is a correction to decision 8 below, not a behaviour
+change: the view still publishes `interval_source` and still refuses to present an assumption as a
+measurement.
+
+## What was built (unchanged by the rework)
 
 A read-only operations view at `/operations` (`/api/operations` for JSON) that explains attempts,
 capacity, expired leases, stuck runs, failed/stale/lost launches, the last recorded tick pass, the
@@ -16,8 +83,8 @@ keeps its own `as_of` and `ok`/`degraded`/`unavailable` status.
 | `ui/loom_ui/operations.py` | typed operations read model; engine folds, front-door config, tick record, launchd, log tail |
 | `ui/loom_ui/model.py` | `attempt_start_grace_expired` — the one start-grace predicate the process and launch views share |
 | `ui/loom_ui/provenance.py` | the foundation's `process` source uses the same grace predicate |
-| `ui/loom_ui/templates.py` | the operations page plus a nav link from the control room; all values escaped, still no script |
-| `ui/loom_ui/server.py` | `GET /operations` and `GET /api/operations`; same loopback, read-only and fail-closed gates |
+| `ui/loom_ui/templates.py` | the operations page inside the shared shell, plus the nav item; all values escaped, still no script |
+| `ui/loom_ui/server.py` | `GET /operations` and `GET /api/operations` through the shared gate and snapshot |
 | `ui/tests/test_operations.py` | 27 tests: front-door parity, start grace, failure counting, freshness, schedule/log, no-control HTTP surface |
 | `ui/README.md` | routes, operations sources, parity and the no-control boundary |
 
@@ -60,12 +127,13 @@ keeps its own `as_of` and `ok`/`degraded`/`unavailable` status.
    job and the log. This view reads the same three: the plist (label, interval, arguments), the
    `launchctl list` row, and a bounded tail of `~/.local/state/loom/tick.log`. A plist that exists
    but is not loaded is `degraded`.
-8. **The tick interval records whether it was observed or assumed.** `loom schedule install` writes
-   `StartInterval` from `schedule.tick_interval` with a literal 120s default, and that key is not in
-   the front door's `DEFAULTS`. The view therefore reports `interval_source` as `plist`, `config` or
-   `default`; a stale tick whose threshold rests on the default says
-   "3 x the 120s schedule (default interval, not the installed plist)" instead of presenting an
-   assumption as a measurement.
+8. **The tick interval records whether it was observed, configured or assumed.** The order is the
+   plist's `StartInterval` (`plist`), then the front door's `schedule.tick_interval` (`config`),
+   then the installer's literal 120s (`default`, reachable only when the front door cannot be read).
+   A stale tick whose threshold rests on anything but the plist says so —
+   "3 x the 120s schedule (config interval, not the installed plist)" — instead of presenting an
+   assumption as a measurement. *(Corrected in this rework: `schedule.tick_interval` is now in the
+   front door's `DEFAULTS`, so `config` is the normal no-plist answer, not `default`.)*
 9. **Release health is labelled as the UI gate verdict.** The `release` source is sampled through
    the same `provenance.release` function as the foundation: `PINNED`/`UNPINNED`/closed verdict,
    release commit, tree digest verification and running root. `loom deploy status` additionally
@@ -79,126 +147,111 @@ keeps its own `as_of` and `ok`/`degraded`/`unavailable` status.
     because the scheduler appends to `tick.log` without rotation. Malformed bytes are replaced
     rather than failing the whole page.
 
-## Rework after review request 2330
-
-The reviewer requested changes on `83c6298` (review request 2330, answer seq 2344). All three
-findings are fixed, each with a test that fails on the old code and passes now.
-
-1. **`process` degraded for an in-grace start (was `operations.py:382`).**
-   `unreadable` was every open attempt without a pid, with no gate, so a fresh `starting` attempt
-   made `process` `degraded` while `launches` was `ok`. Now `model.attempt_start_grace_expired`
-   applies the same age check the stale-start branch uses (a start time that cannot be read counts
-   as expired, matching `engine.reconcile_launches`), and both sources ask it. Tests:
-   `test_a_claim_still_inside_the_start_grace_is_not_unhealthy` (process `ok`, launches `ok`, no
-   failure), `test_a_stale_start_degrades_both_sources_about_the_same_attempt`, and in
-   `test_provenance.py`: `test_process_does_not_flag_a_claim_inside_the_start_grace`,
-   `test_process_flags_a_claim_whose_start_grace_ran_out`; the existing
-   `test_process_flags_a_pending_launch_without_a_pid` still passes, so a launch that never recorded
-   a pid is still flagged immediately.
-2. **The failure headline was capped at 20 before counting.**
-   `_process` no longer slices; `collect` counts the full record (`failures_total`) and displays at
-   most `MAX_FAILURES`. `_launches` now describes the total and the shown subset. Test:
-   `test_the_failure_headline_counts_every_record_not_only_the_listed_ones` seeds 25 failures and
-   asserts 20 rows, `failures_total == 25`, `data["failures"] == 25`, `data["not_shown"] == 5`, the
-   detail "25 failed … the most recent 20 are listed", and the rendered note
-   "25 recorded; the most recent 20 are listed."
-3. **The tick staleness fallback read a key the front door does not default.**
-   Confirmed: `schedule.tick_interval` is absent from `loom:37 DEFAULTS`; `loom:470` uses a literal
-   120. `_schedule` now resolves the interval from the plist, then `schedule.tick_interval`, then the
-   installer default, and publishes `interval_source` on the schedule view/signal and the tick
-   signal. Tests: `test_the_schedule_interval_records_where_it_was_read_from`,
-   `test_an_interval_no_plist_supplies_is_reported_as_assumed`,
-   `test_the_tick_interval_prefers_the_plist_then_the_config_then_the_default`,
-   `test_a_stale_tick_says_when_its_interval_was_assumed`.
-4. **Evidence accuracy.** The previous Verification section said `validate_work.py` failed on one
-   error plus a UI-3/UI-4 write-path warning. The current run fails on two errors and the UI-4
-   warning is a registry/program drift warning. Corrected below, and the live numbers were
-   re-sampled on this branch rather than reused.
-
 ## Verification
 
-All commands run from `capabilities/work` on this branch.
+All commands below were run on this branch unless a line says otherwise.
 
-### UI suite — 92 tests, `OK`
+### UI suite — 180 tests, `OK`
 
-```bash
-python3 -m unittest discover -s ui/tests -t ui/tests
-# Ran 92 tests in 14.2s — OK
+```console
+$ cd capabilities/work && python3 -m unittest discover -s ui/tests -t ui/tests
+Ran 180 tests in 39.9s
+OK
 ```
 
-`test_operations.py` (27) covers: parity with `loom tick --json` for capacity, limits, expired leases
-and live attempts; a claim with no expiry; a failed launch with its reason; a stale `starting`
-attempt; an in-grace start that must stay healthy; both sources agreeing on a stale start; the
-failure headline outliving the 20-row display limit; a run whose process vanished; a stuck attempt
-through the engine's own threshold; a healthy process source despite historical failures; tick
-record fresh/stale/missing/malformed; the interval's plist/config/default provenance; schedule
-loaded/not loaded; log tail escaping; every source's `as_of` and status; the release verdict;
-`/api/operations` shape; no control surface; and a closed version gate returning `503` on both
-operations routes. `test_provenance.py` gained the two grace tests above.
+That is UI-1/UI-2/UI-3's 151 plus UI-4's 27 in `test_operations.py` and the two grace tests in
+`test_provenance.py`. `test_operations.py` covers parity with `loom tick --json` for capacity,
+limits, expired leases and live attempts; a claim with no expiry; a failed launch with its reason; a
+stale `starting` attempt; an in-grace start that must stay healthy; both sources agreeing on a stale
+start; the failure headline outliving the 20-row display limit; a run whose process vanished; a
+stuck attempt through the engine's own threshold; a healthy process source despite historical
+failures; tick record fresh/stale/missing/malformed; the interval's plist/config/default provenance;
+schedule loaded/not loaded; log tail escaping; every source's `as_of` and status; the release
+verdict; `/api/operations` shape; no control surface; and a closed version gate returning `503` on
+both operations routes.
 
-### Engine suite — 276 tests, `OK (skipped=2)`
+### Engine suite — 328 tests, `OK (skipped=2)`
 
-```bash
-python3 -m unittest discover -s tests
-# Ran 276 tests in 87.2s — OK (skipped=2)
+```console
+$ cd capabilities/work && python3 -m unittest discover -s tests
+Ran 328 tests in 97.8s
+OK (skipped=2)
 ```
 
-Only `capabilities/work/ui` was modified; this run confirms the engine, validator, MCP, A2A and
-surface tests are unaffected.
+Only `capabilities/work/ui` is touched by this branch apart from this evidence file; this run is the
+check that the engine, store, validator, MCP and A2A surfaces still agree.
 
-### Live smoke test (real registry, `PINNED`)
+### Validator — 2 errors, both outside this task's write path
 
-Served this checkout on `127.0.0.1:8799`; the version gate verified that the loaded
-`loom`/`engine.py`/`store.py` match the promoted release.
-
-```text
-GET /api/operations   200   read_only true   interval_source plist   failures_total 10
-GET /operations       200   no <form>, <button>, <input>, <script>, or method=
-HEAD /operations      200
-POST/PUT/PATCH/DELETE 405   Allow: GET, HEAD
-Content-Security-Policy: default-src 'none'; … form-action 'none'; frame-ancestors 'none'
+```console
+$ cd capabilities/work && python3 validate_work.py
+ERROR midas/W-8: heading W-8 missing from midas.program
+ERROR loom/LOOM-14: heading LOOM-14 missing from loom.program
+FAIL (2 errors, 106 warnings)
 ```
 
-The operations payload at `2026-11-16T04:38:59Z` (registry snapshot `04:38:59Z`) reported:
+No UI-4 error. The only UI-4 line is registry/program drift, expected while the claim is live:
 
-```text
-capacity   limits implementer 4, reviewer 3, integrator 1
-           active implementer 2, reviewer 0, integrator 0
-           live 2 of 2 open attempts; live reviewers 0
-leases     1 expired: jarvis/ARCH-09 (opencode/jarvis-agent)
-database   ok         04:38:59Z  1 expired lease(s) across 222 task(s)
-process    ok         04:38:59Z  2 live worker process(es) of 2 open attempt(s); capacity …
-launches   degraded   04:38:59Z  10 failed, stale or lost launch(es); 0 stuck  (shown 10/10)
-tick       ok         04:38:21Z  last recorded tick --apply pass 38s before the snapshot
-scheduler  ok         04:38:59Z  com.hritvik.loom-tick every 120s from the plist; job loaded
-release    ok         04:38:59Z  release 640eb8c82801 intact; matches the engine sources loaded
-logs       ok         04:38:21Z  20 of the last 20 line(s); last written 04:38:21Z
+```console
+WARN  loom-ui/UI-4: registry says claimed, program says planned
 ```
 
-`process` is `ok` while `launches` is `degraded` on the same sampling instant: ten historical
-failures are a launch-record fact, not a claim that capacity is unhealthy.
+### Front-door parity, sampled on the live registry
 
-Parity against the supported front door for the same `--now`, re-checked by comparing the two
-payloads field by field:
+Read-only preview against the real registry at `2026-11-17T05:56Z`:
 
-```text
-$ ./loom tick --json --now 2026-11-16T04:38:59Z
-limits       implementer 4, reviewer 3, integrator 1      == UI capacity.limits
-active       implementer 2, reviewer 0, integrator 0      == UI capacity.active
-expired      jarvis/ARCH-09 opencode/jarvis-agent 11-10   == UI expired_leases
-liveAttempts loom/LOOM-13 11718, loom-ui/UI-4 14331       == UI live attempts (pid for pid)
+```console
+$ ./loom tick --json --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+limits       implementer 4, reviewer 3, integrator 1
+active       implementer 2, reviewer 0, integrator 0
+expired      jarvis/ARCH-09  opencode/jarvis-agent
+liveAttempts loom-ui/UI-4 pid 96689, teach/W-8 pid 6856
 
 $ ./loom workers
-loom/LOOM-13   implementer pid 11718  loom/LOOM-13#a1
-loom-ui/UI-4   implementer pid 14331  loom-ui/UI-4#a3
+loom-ui/UI-4  implementer pid 96689  loom-ui/UI-4#a5
+teach/W-8     implementer pid 6856   teach/W-8#a3
 ```
 
-`validate_work.py` on this branch reports 2 errors and 109 warnings, both errors outside this task's
-write path: `midas/W-8: heading W-8 missing from midas.program` and
-`loom/LOOM-13: heading LOOM-13 missing from loom.program`. No UI-4 error is introduced. The one
-UI-4 warning is registry/program drift, not a path conflict:
-`loom-ui/UI-4: registry says claimed, program says planned` (UI-3 carries the same warning). The
-claim is live while this run is in progress, so the registry is the expected side of that drift.
+The field-by-field comparison of those four values against the operations view is asserted in the
+suite (`test_capacity_leases_and_live_attempts_match_tick_json`), which shells out to the real
+`loom` for the same `--now`.
+
+### Live page smoke — the gate closed, and that is the finding
+
+Serving this checkout on `127.0.0.1:8799` returns `503` on every route, including `/operations`:
+
+```console
+$ python3 capabilities/work/ui/serve.py --port 8799
+GET /             -> 503    GET /operations        -> 503
+GET /graph        -> 503    GET /api/operations    -> 503
+<h1>Loom UI is not serving</h1>
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; …; form-action 'none'
+```
+
+`GET /api/version` explains why, and it is not this branch:
+
+```console
+verdict          DRIFTED
+detail           release tree ~/.local/state/loom/engine no longer matches the digest recorded at
+                 promotion (80da114da8f3 recorded, 3161f735144f now); promote again from a reviewed
+                 commit
+release commit   640eb8c82801, promoted 2026-11-16T02:28:42Z
+```
+
+The promoted tree gained one file after promotion — `capabilities/work/evidence/W-7.md` is the only
+non-`__pycache__` file under `~/.local/state/loom/engine` with an mtime later than the promotion:
+
+```console
+$ cd ~/.local/state/loom/engine && find . -newermt "2026-11-16 02:29" -type f \
+    -not -path "*/__pycache__/*" -not -path "./.git/*" -not -name "*.db*" -not -name "*.log"
+./capabilities/work/evidence/W-7.md
+```
+
+So the fail-closed path is what this run verified end to end, and a page-level smoke (real page, real
+`launches`/`tick`/`scheduler`/`logs` rows) needs a promotion first. Promoting is the coordinator's
+call, not this task's, and writing into the promoted tree to make the gate open would be exactly the
+drift the gate exists to catch. The reviewer who wants the rendered page can serve the same commit
+from a freshly promoted tree; nothing in this branch depends on the drift.
 
 ## Limits and known gaps
 
@@ -211,8 +264,8 @@ claim is live while this run is in progress, so the registry is the expected sid
 - **`launchctl` is macOS-only.** On another platform the job is `unknown` and the source is
   `degraded`; the rest of the page still renders. Cross-platform scheduling is an owner decision
   (UI-7), not a hidden fallback.
-- **The tick interval can be assumed.** With no readable plist and no configured
-  `schedule.tick_interval`, the interval is the installer's 120s default and the view says so.
+- **The tick interval can still be assumed.** With no readable plist and an unreadable front door,
+  the interval is the installer's 120s literal and the view says `default`.
 - **Process liveness is a point-in-time probe.** A worker that exits between the pid probe and the
   render is shown live until the next request. That is the same probe `loom workers` uses.
 - **Historical failures keep `launches` degraded.** The list is bounded at 20 rows for display but
@@ -223,24 +276,37 @@ claim is live while this run is in progress, so the registry is the expected sid
   questions; the field is labelled accordingly and no promotion or rollback control is exposed.
 - **No actions.** Claim/renew/release/ask/answer and transitions remain UI-5, and dispatch/`tick
   --apply` remain CLI-only. This slice can only show state.
+- **The candidate is stacked on UI-3.** It contains `163bc94` rather than main, on purpose (one
+  resolution serves both slices). If UI-3 changes, this branch is re-parented and nothing in the four
+  resolved files changes.
 
 ## Reproduce
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s ui/tests -t ui/tests     # 92 tests
-python3 ui/serve.py --port 8788                          # browse http://127.0.0.1:8788/operations
-python3 -m unittest discover -s tests                    # 276 engine tests
+python3 -m unittest discover -s ui/tests -t ui/tests     # 180 tests
+python3 -m unittest discover -s tests                    # 328 engine tests
+python3 validate_work.py                                 # 2 errors, both outside ui/
+python3 ui/serve.py --port 8788                          # browse /, /graph, /operations
 ./loom tick --json --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)"  # compare the front door
 ```
 
 ## Review asks
 
-1. Is the start grace now presented consistently? A claim inside the window is `ok` and past it is
-   `degraded` in both `process` and `launches`, through one predicate in `model`.
-2. Is three schedule intervals the right staleness threshold for the recorded tick pass, or should a
-   missing/old record only ever be informational?
-3. Should the tick section expose the preview (`loom tick --json`) as well, or is showing only the
-   recorded apply pass the safer read-only contract?
-4. Is the UI gate verdict inside the operations view confusing next to `loom deploy status`'s
-   different STALE verdict, even with the label, or should release health link out to the CLI?
+1. **The integration, not just the slice.** Are the four resolutions right — in particular, does
+   `/operations` rendering inside `templates.shell` (rather than its own shell) keep everything UI-2
+   promised, and is routing both operations handlers through `_load()` the correct single-snapshot
+   and single-gate shape?
+2. **The stack.** Is reviewing UI-4 on top of UI-3's candidate the right way to land one resolution
+   for both, given UI-3 is green and awaiting review? If UI-3's blob moves, is re-parenting enough?
+3. **The corrected interval source.** On this base `schedule.tick_interval` *is* in the front door's
+   `DEFAULTS`, so an interval with no plist reports `config`, not `default`. Is that the right
+   reading for an operator, or should the view treat the front door's DEFAULTS value as "default"
+   anyway because nobody configured it?
+4. **Start grace and failure counting** (unchanged from the approved revision 8): a claim inside the
+   window is `ok` and past it is `degraded` in both `process` and `launches` through one predicate;
+   three schedule intervals is the recorded-tick staleness threshold; the 20-row display bound is
+   never presented as the total.
+5. **The drifted release.** The gate closing on `~/.local/state/loom/engine` is a real finding about
+   the environment, not this branch. Does the coordinator want it promoted so the page-level smoke
+   can be re-run, or is the in-suite front-door parity enough for this review?
