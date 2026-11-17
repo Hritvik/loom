@@ -11,6 +11,7 @@ Run `./loom --help` or see PROTOCOL.md.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import difflib
 import hashlib
@@ -18,6 +19,7 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -84,6 +86,7 @@ DURATION_PATTERN = re.compile(r"^(\d+)([smhd])$")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from store import (  # noqa: E402 — sibling module, resolved from the script directory
+    COLLECTION_KEYS,
     REGISTRY_HEADER,
     REGISTRY_KIND,
     ZERO_HASH,
@@ -3484,6 +3487,410 @@ def cmd_migrate(args, store: Store) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# The registry as a checked fold of the log
+# --------------------------------------------------------------------------
+
+FOLD_COLLECTIONS = ("tasks", "boards", "claims")
+
+
+def _label(collection: str) -> str:
+    return {"tasks": "task", "boards": "board", "claims": "claim"}[collection]
+
+
+def canonical_registry(registry: dict) -> str:
+    """One deterministic rendering of a registry, so a snapshot digest can be rechecked."""
+    return json.dumps(registry, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _fold_index(documents: list[dict], key: str) -> dict[str, dict]:
+    return {str(document[key]): document for document in documents if document.get(key)}
+
+
+def apply_state_delta(registry: dict, delta: dict) -> list[str]:
+    """Apply one `state_delta` document to a registry in place, naming what does not fit."""
+    problems: list[str] = []
+    for collection in FOLD_COLLECTIONS:
+        key = COLLECTION_KEYS[collection]
+        documents = registry.setdefault(collection, [])
+        index = _fold_index(documents, key)
+        for change in delta.get(collection) or []:
+            identifier = str(change.get("id"))
+            if change.get("deleted"):
+                if identifier not in index:
+                    problems.append(
+                        f"deletes {_label(collection)} {identifier}, which the fold does not hold")
+                    continue
+                documents.remove(index.pop(identifier))
+                continue
+            if "created" in change:
+                if identifier in index:
+                    problems.append(
+                        f"creates {_label(collection)} {identifier}, which the fold already holds")
+                    continue
+                document = copy.deepcopy(change["created"])
+                documents.append(document)
+                index[identifier] = document
+                continue
+            document = index.get(identifier)
+            if document is None:
+                problems.append(
+                    f"changes {_label(collection)} {identifier}, which the fold does not hold")
+                continue
+            for field, value in (change.get("set") or {}).items():
+                document[field] = copy.deepcopy(value)
+            for field in change.get("unset") or []:
+                document.pop(field, None)
+    edges = registry.setdefault("edges", [])
+    for edge in (delta.get("edges") or {}).get("added") or []:
+        item = {"from": edge["from"], "to": edge["to"], "kind": edge.get("kind", "depends-on")}
+        if item not in edges:
+            edges.append(item)
+    for edge in (delta.get("edges") or {}).get("removed") or []:
+        item = {"from": edge["from"], "to": edge["to"], "kind": edge.get("kind", "depends-on")}
+        if item in edges:
+            edges.remove(item)
+        else:
+            problems.append(
+                f"removes edge {item['from']} -> {item['to']}, which the fold does not hold")
+    return problems
+
+
+def fold_registry(base: dict, records: list[dict], after_seq: int) -> tuple[dict, list[str], int]:
+    """The registry as `base` plus every state delta recorded after `after_seq`.
+
+    Returns the folded registry, any delta that did not apply, and how many deltas were folded.
+    Events before the baseline are not read: the snapshot is what carries them.
+    """
+    registry = copy.deepcopy(base)
+    for collection in FOLD_COLLECTIONS:
+        registry.setdefault(collection, [])
+    registry.setdefault("edges", [])
+    problems: list[str] = []
+    applied = 0
+    for record in records:
+        try:
+            sequence = int(record.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sequence <= after_seq:
+            continue
+        delta = record.get("state_delta")
+        if not delta:
+            continue
+        applied += 1
+        for problem in apply_state_delta(registry, delta):
+            problems.append(f"event {sequence}: {problem}")
+    return registry, problems, applied
+
+
+def _field_differences(folded, registry, prefix: str = ""):
+    """Field-level differences, by dotted path, so a report can name the field that moved."""
+    differences = []
+    for field in sorted(set(folded) | set(registry)):
+        path = f"{prefix}{field}"
+        if field not in registry:
+            differences.append((path, "missing", folded[field], None))
+        elif field not in folded:
+            differences.append((path, "unexpected", None, registry[field]))
+        elif isinstance(folded[field], dict) and isinstance(registry[field], dict):
+            differences.extend(_field_differences(folded[field], registry[field], path + "."))
+        elif folded[field] != registry[field]:
+            differences.append((path, "changed", folded[field], registry[field]))
+    return differences
+
+
+def compare_registries(folded: dict, registry: dict) -> list[dict]:
+    """Every way the registry on disk disagrees with the fold, named rather than summarised."""
+    divergences: list[dict] = []
+    for collection in FOLD_COLLECTIONS:
+        key = COLLECTION_KEYS[collection]
+        fold_index = _fold_index(folded.get(collection, []), key)
+        registry_index = _fold_index(registry.get(collection, []), key)
+        for identifier in sorted(set(fold_index) | set(registry_index)):
+            if identifier not in registry_index:
+                divergences.append({"kind": "record", "collection": collection,
+                                    "id": identifier, "problem": "missing"})
+            elif identifier not in fold_index:
+                divergences.append({"kind": "record", "collection": collection,
+                                    "id": identifier, "problem": "unexpected"})
+            else:
+                for field, problem, fold_value, registry_value in _field_differences(
+                        fold_index[identifier], registry_index[identifier]):
+                    divergences.append({
+                        "kind": "field", "collection": collection, "id": identifier,
+                        "field": field, "problem": problem,
+                        "fold": fold_value, "registry": registry_value})
+    fold_edges = {(edge["from"], edge["to"], edge.get("kind", "depends-on"))
+                  for edge in folded.get("edges", [])}
+    registry_edges = {(edge["from"], edge["to"], edge.get("kind", "depends-on"))
+                      for edge in registry.get("edges", [])}
+    for problem, edges in (("missing", fold_edges - registry_edges),
+                           ("unexpected", registry_edges - fold_edges)):
+        for source, target, kind in sorted(edges):
+            divergences.append({"kind": "edge", "problem": problem, "from": source,
+                                "to": target, "edge_kind": kind})
+    return divergences
+
+
+def _short(value, limit: int = 80) -> str:
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def describe_divergence(item: dict) -> str:
+    if item["kind"] == "edge":
+        edge = f"{item['from']} -> {item['to']} ({item['edge_kind']})"
+        if item["problem"] == "missing":
+            return f"edge {edge}: the log records it, the registry does not"
+        return f"edge {edge}: the registry has it, no event added it"
+    label = f"{_label(item['collection'])} {item['id']}"
+    if item["kind"] == "record":
+        if item["problem"] == "missing":
+            return f"{label}: the log records it, the registry does not"
+        return f"{label}: the registry has it, no create event since the snapshot"
+    field = item["field"]
+    if item["problem"] == "missing":
+        return f"{label}: field {field!r} is missing from the registry (the log set it)"
+    if item["problem"] == "unexpected":
+        return f"{label}: field {field!r} is in the registry with no event behind it"
+    return (f"{label}: field {field!r} differs — log {_short(item['fold'])}, "
+            f"registry {_short(item['registry'])}")
+
+
+def snapshot_baseline_problems(snapshot: dict, records: list[tuple[bytes, dict]]) -> list[str]:
+    """Prove the baseline body is the one the hash chain committed to.
+
+    The body is a row in `snapshots`; the digest that names it was written by a `snapshot` event at
+    the same sequence. Comparing the body against the row's own digest only proves that whoever
+    edited both agreed with themselves, so the digest is read from the event, an event is required
+    to exist at that sequence, and the chain is verified up to it. `fold_registry` starts after the
+    baseline's sequence, so an unanchored sequence would also hide every delta beneath it.
+    """
+    seq = snapshot["seq"]
+    record = next((candidate for _, candidate in records
+                   if int(candidate.get("seq") or 0) == seq), None)
+    if record is None:
+        return [f"snapshot {seq}: no event at that sequence in the log; the baseline is unanchored "
+                "and any delta beneath it would go unchecked"]
+    if record.get("event") != "snapshot":
+        return [f"snapshot {seq}: the log records a {record.get('event')!r} event there, not a "
+                "snapshot; the baseline is unanchored"]
+    problems: list[str] = []
+    digest = hashlib.sha256(canonical_registry(snapshot["registry"]).encode("utf-8")).hexdigest()
+    anchored = record.get("digest")
+    if not anchored:
+        problems.append(f"snapshot {seq}: the snapshot event carries no digest")
+    elif digest != anchored:
+        problems.append(
+            f"snapshot {seq} body digest {digest[:12]}… does not match the digest recorded in the "
+            f"event chain {anchored[:12]}…")
+    through = [pair for pair in records if int(pair[1].get("seq") or 0) <= seq]
+    chain = verify_event_chain(through)
+    if chain:
+        problems.append(
+            f"snapshot {seq}: the event chain does not verify up to the baseline ({chain[0]})")
+    return problems
+
+
+def fold_check(store: Store) -> dict:
+    """Fold the log from its baseline and compare it with the registry on disk."""
+    snapshot = store.latest_snapshot()
+    if snapshot is None:
+        raise WorkError(
+            f"no snapshot in {store.describe()}: the log has no fold baseline, and this engine "
+            "does not backfill one. Run `loom snapshot` and check forward from there.")
+    registry, records = store.snapshot()
+    problems = snapshot_baseline_problems(snapshot, records)
+    folded, fold_problems, applied = fold_registry(
+        snapshot["registry"], [record for _, record in records], snapshot["seq"])
+    problems.extend(fold_problems)
+    return {
+        "snapshot": snapshot,
+        "registry": registry,
+        "folded": folded,
+        "problems": problems,
+        "applied": applied,
+        "divergences": compare_registries(folded, registry),
+        "events": sum(1 for _, record in records
+                      if int(record.get("seq") or 0) > snapshot["seq"]),
+        "total_events": len(records),
+    }
+
+
+def _restore_point_path(store: Store) -> Path:
+    base = Path(str(store.db_path))
+    stamp = parse_now(None).strftime("%Y%m%dT%H%M%SZ")
+    candidate = Path(f"{base}.restore-{stamp}.db")
+    counter = 2
+    while candidate.exists():
+        candidate = Path(f"{base}.restore-{stamp}-{counter}.db")
+        counter += 1
+    return candidate
+
+
+def verify_restore_point(path: Path, registry: dict, events: int) -> None:
+    """Reopen the copy and prove it holds the database the rebuild is about to change."""
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        raise WorkError(f"restore point {path} does not reopen: {exc}") from exc
+    try:
+        tasks = connection.execute("SELECT count(*) FROM tasks").fetchone()[0]
+        found = connection.execute("SELECT count(*) FROM events").fetchone()[0]
+    except sqlite3.Error as exc:
+        raise WorkError(f"restore point {path} is not a work database: {exc}") from exc
+    finally:
+        connection.close()
+    expected_tasks = len(registry.get("tasks", []))
+    if tasks != expected_tasks or found != events:
+        raise WorkError(
+            f"restore point {path} holds {tasks} tasks and {found} events; the live database has "
+            f"{expected_tasks} tasks and {events} events. Refusing to rebuild on an unverified "
+            "copy.")
+
+
+def cmd_snapshot(args, store: Store) -> int:
+    """Write the fold baseline: the registry as a document at this event sequence.
+
+    Historical tasks arrive through this document. Events written before it are not folded and not
+    backfilled, so the baseline is where the registry stops being its own source of truth.
+    """
+    if args.list:
+        rows = store.snapshots()
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("no snapshots")
+            return 0
+        for row in rows:
+            print(f"{row['seq']:>5} {row['ts']} {row['tasks']:>3} tasks  {row['digest'][:12]}…")
+        return 0
+    agent = require_agent(args)
+    if args.force and not args.reason:
+        raise WorkError(
+            "--force requires --reason: a new baseline accepts the current state as truth")
+    if not args.force:
+        existing = store.latest_snapshot()
+        if existing is not None:
+            previous = fold_check(store)
+            remaining = len(previous["divergences"]) + len(previous["problems"])
+            if remaining:
+                raise WorkError(
+                    f"{remaining} divergence(s) from snapshot {existing['seq']}; a new baseline "
+                    "would accept them as truth. Repair with `loom rebuild`, or pass "
+                    "--force --reason TEXT to accept the current state deliberately.")
+    registry = store.load()
+    body = canonical_registry(registry)
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    now = iso(parse_now(args.now))
+    with store.transaction(record_state=False):
+        event = store.append_event(
+            event="snapshot", agent=agent, tasks=len(registry.get("tasks", [])),
+            boards=len(registry.get("boards", [])), edges=len(registry.get("edges", [])),
+            claims=len(registry.get("claims", [])), digest=digest,
+            **({"reason": args.reason} if args.reason else {}), now=args.now)
+        store.write_snapshot(event["seq"], now, digest, body)
+    print(f"snapshot {event['seq']}: {len(registry.get('tasks', []))} tasks, "
+          f"{len(registry.get('edges', []))} edges, digest {digest[:12]}…")
+    return 0
+
+
+def cmd_foldcheck(args, store: Store) -> int:
+    """Check the registry against a fold of the log, and name every field that disagrees."""
+    result = fold_check(store)
+    snapshot = result["snapshot"]
+    divergences = result["divergences"]
+    problems = result["problems"]
+    if args.json:
+        print(json.dumps({
+            "snapshot": {"seq": snapshot["seq"], "ts": snapshot["ts"],
+                         "digest": snapshot["digest"]},
+            "events": result["events"],
+            "deltas": result["applied"],
+            "divergences": divergences,
+            "problems": problems,
+        }, indent=2))
+        return 0 if not divergences and not problems else 1
+    for problem in problems:
+        print(f"BROKEN {problem}")
+    for item in divergences:
+        print(describe_divergence(item))
+    total = len(divergences) + len(problems)
+    if total:
+        print(f"foldcheck: {total} divergence(s) from snapshot {snapshot['seq']}")
+        return 1
+    print(f"foldcheck: no divergence from snapshot {snapshot['seq']} "
+          f"({result['applied']} state delta(s) over {result['events']} event(s))")
+    return 0
+
+
+def cmd_rebuild(args, store: Store) -> int:
+    """Rewrite the registry from the fold, behind a `VACUUM INTO` restore point and a passing diff.
+
+    The diff passes only when every record the rebuild would delete is explained by the log. A
+    registry record with no event behind it is evidence, not noise: the rebuild names it and
+    refuses, instead of quietly turning a forged row into a deleted one.
+    """
+    agent = require_agent(args) if args.apply else None
+    result = fold_check(store)
+    snapshot = result["snapshot"]
+    divergences = result["divergences"]
+    problems = result["problems"]
+    for problem in problems:
+        print(f"BROKEN {problem}")
+    for item in divergences:
+        print(describe_divergence(item))
+    if problems:
+        raise WorkError(
+            "the log does not fold cleanly; a rebuild from a broken fold would invent state: "
+            + problems[0])
+    if not divergences:
+        print(f"rebuild: the registry already matches the fold from snapshot {snapshot['seq']}; "
+              "nothing to write")
+        return 0
+    unexplained = [item for item in divergences
+                   if item["problem"] == "unexpected" and item["kind"] in {"record", "edge"}]
+    if unexplained:
+        preview = "; ".join(describe_divergence(item) for item in unexplained[:5])
+        raise WorkError(
+            f"the diff does not pass: {len(unexplained)} record(s) in the registry have no event "
+            f"behind them, and a rebuild would delete them. Resolve by hand first: {preview}")
+    if not args.apply:
+        print(f"rebuild: {len(divergences)} divergence(s) would be repaired from snapshot "
+              f"{snapshot['seq']}; run again with --apply (it writes a restore point first)")
+        return 1
+    if not isinstance(store, SqliteStore):
+        raise WorkError(
+            "rebuild needs the sqlite backend so it can write a VACUUM INTO restore point")
+    restore = _restore_point_path(store)
+    try:
+        store.backup_to(restore)
+    except (WorkError, sqlite3.Error) as exc:
+        raise WorkError(f"refusing to rebuild without a restore point: {exc}") from exc
+    verify_restore_point(restore, result["registry"], result["total_events"])
+    diff_digest = hashlib.sha256(canonical_registry(
+        {"snapshot": snapshot["seq"], "divergences": divergences}).encode("utf-8")).hexdigest()
+    with store.transaction(record_state=False):
+        store.registry = result["folded"]
+        store.append_event(
+            event="rebuild", agent=agent, snapshot=snapshot["seq"],
+            restore_point=str(restore), divergences=len(divergences),
+            diff_digest=diff_digest,
+            registry_sha256=hashlib.sha256(
+                canonical_registry(result["folded"]).encode("utf-8")).hexdigest(),
+            now=args.now)
+    check = fold_check(store)
+    remaining = len(check["divergences"]) + len(check["problems"])
+    if remaining:
+        raise WorkError(
+            f"rebuild wrote but {remaining} divergence(s) remain; restore from {restore}")
+    print(f"rebuild: repaired {len(divergences)} divergence(s) from snapshot {snapshot['seq']}; "
+          f"restore point {restore}; foldcheck now reports no divergence")
+    return 0
+
+
 def cmd_export(args, store: Store) -> int:
     """Render the store as YAML or JSON, the replacement for diffable state in git."""
     registry = store.load()
@@ -3964,7 +4371,7 @@ ENGINE_COMMANDS = {
     "create", "list", "show", "attempts", "claim", "renew", "release", "takeover", "transition",
     "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
     "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
-    "init", "integration-plan",
+    "init", "integration-plan", "snapshot", "foldcheck", "rebuild",
 }
 
 
@@ -4216,6 +4623,28 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--format", choices=["yaml", "json"], default="yaml")
     export.add_argument("--out", help="write to a file instead of stdout")
     export.set_defaults(func=cmd_export)
+
+    snapshot = sub.add_parser(
+        "snapshot", help="write the fold baseline the registry is checked from", parents=[common])
+    snapshot.add_argument("--list", action="store_true",
+                          help="list snapshots instead of writing one")
+    snapshot.add_argument("--force", action="store_true",
+                          help="write a new baseline even though the log and registry disagree")
+    snapshot.add_argument("--reason", help="why the current state is accepted (with --force)")
+    snapshot.add_argument("--json", action="store_true")
+    snapshot.set_defaults(func=cmd_snapshot)
+
+    foldcheck = sub.add_parser(
+        "foldcheck", help="check the registry against a fold of the log", parents=[common])
+    foldcheck.add_argument("--json", action="store_true")
+    foldcheck.set_defaults(func=cmd_foldcheck)
+
+    rebuild = sub.add_parser(
+        "rebuild", help="rewrite the registry from the fold, behind a restore point",
+        parents=[common])
+    rebuild.add_argument("--apply", action="store_true",
+                         help="write the rebuild; without it only the diff is printed")
+    rebuild.set_defaults(func=cmd_rebuild)
 
     search = sub.add_parser("search", help="find tasks by text instead of namespace", parents=[common])
     search.add_argument("terms", nargs="+")

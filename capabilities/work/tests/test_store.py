@@ -268,12 +268,12 @@ class StoreTest(unittest.TestCase):
                 sqlite.save()
             registry = sqlite.load()
             task = registry["tasks"][0]
-            original = sqlite._append_event
+            original = sqlite._flush_events
 
-            def boom(**fields):
+            def boom():
                 raise RuntimeError("event append failed")
 
-            sqlite._append_event = boom
+            sqlite._flush_events = boom
             try:
                 with sqlite.lock():
                     task["title"] = "changed"
@@ -281,7 +281,7 @@ class StoreTest(unittest.TestCase):
                         sqlite.commit(event="transition", task=task["id"], status="red",
                                       revision=task.get("revision", 0) + 1, now=T0)
             finally:
-                sqlite._append_event = original
+                sqlite._flush_events = original
             fresh = sqlite.load()
             self.assertEqual(fresh["tasks"][0]["title"], "Task demo/W-1")
             self.assertEqual(len(sqlite.read_events()), 0)
@@ -668,17 +668,17 @@ class StoreTest(unittest.TestCase):
                 registry = sqlite.load()
                 task = registry["tasks"][0]
                 task["title"] = "Renamed"
-                original = sqlite._append_event
+                original = sqlite._flush_events
 
-                def boom(**fields):
+                def boom():
                     raise RuntimeError("event append failed")
 
-                sqlite._append_event = boom
+                sqlite._flush_events = boom
                 try:
                     with self.assertRaises(RuntimeError):
                         sqlite.commit(event="annotate", task=task["id"], status="ready", now=T0)
                 finally:
-                    sqlite._append_event = original
+                    sqlite._flush_events = original
                 stored = json.loads(sqlite.connection.execute(
                     "SELECT body FROM tasks WHERE id = 'demo/W-1'").fetchone()["body"])
                 self.assertEqual(stored["title"], "Task demo/W-1", "the rollback lost a document")

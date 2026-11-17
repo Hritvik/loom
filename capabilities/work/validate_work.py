@@ -11,6 +11,7 @@ Standard library + PyYAML; no jsonschema dependency.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -377,6 +378,10 @@ def main(argv: list[str] | None = None) -> int:
     with store.lock():
         registry, stored_events = store.snapshot()
         checkpoint = store.checkpoint() if hasattr(store, "checkpoint") else None
+        baseline = store.latest_snapshot()
+    # Board entries gain `_packets`/`_data`/`_program` during validation; the fold must compare
+    # the registry as it was read, not as this script annotates it.
+    stored_registry = copy.deepcopy(registry)
 
     schema = json.loads((root / "schemas/task.schema.json").read_text(encoding="utf-8"))
 
@@ -666,6 +671,26 @@ def main(argv: list[str] | None = None) -> int:
                     errors.append(f"event log: invalid JSON ({exc})")
         errors.extend(verify_event_chain(records))
         warnings.extend(event_chain_warnings(records))
+        if baseline is None:
+            warnings.append(
+                "no fold baseline; run `loom snapshot` so foldcheck can detect a field written "
+                "without an event")
+        else:
+            from engine import (compare_registries, describe_divergence, fold_registry,
+                                snapshot_baseline_problems)
+
+            for problem in snapshot_baseline_problems(baseline, records):
+                errors.append(f"fold: BROKEN {problem}")
+            folded, fold_problems, _folded_deltas = fold_registry(
+                baseline["registry"], [record for _, record in records], baseline["seq"])
+            for problem in fold_problems:
+                errors.append(f"fold: {problem}")
+            divergences = compare_registries(folded, stored_registry)
+            for item in divergences[:20]:
+                errors.append(f"fold: {describe_divergence(item)}")
+            if len(divergences) > 20:
+                errors.append(
+                    f"fold: {len(divergences) - 20} more divergence(s); run `loom foldcheck`")
         if records and checkpoint is None:
             errors.append(
                 "event log has no external checkpoint; run `loom events --verify --reanchor`")

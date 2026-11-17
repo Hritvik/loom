@@ -51,6 +51,9 @@ identical on all three surfaces.
 | `inbox` | List unanswered questions addressed to an agent |
 | `answer` | Answer a question addressed to you, once |
 | `events` | Read or verify the hash-chained audit log |
+| `snapshot` | Write the fold baseline: the registry as a document at this event sequence; `--list` shows the ones taken |
+| `foldcheck` | Check the registry against a fold of the log from the latest snapshot, naming every field that disagrees |
+| `rebuild` | Rewrite the registry from the fold, behind a `VACUUM INTO` restore point and a diff that passes |
 | `edge` | Inspect or edit cross-task dependency edges |
 | `board` | List, add, remove, sync or import boards |
 | `reconcile` | Compare or adopt board statuses for imported tasks |
@@ -192,6 +195,13 @@ same bytes in every process, which is what makes it diffable in git and usable a
 
 The exported file is a snapshot for review, not the source of truth. `validate_work.py` reads the
 same store, so it validates live state.
+
+From the latest `loom snapshot` forward, every event that changes state carries the change it made
+(`state_delta`) in its own body. `loom foldcheck` replays those deltas onto the snapshot and
+compares the result with the registry field by field: a lost field is named, a forged one is named,
+and neither is silently repaired. `loom rebuild` rewrites the registry from the fold only after a
+`VACUUM INTO` restore point and a diff in which every record the rebuild would delete is explained
+by the log. Events written before the snapshot are not folded and not backfilled.
 
 ## Three repositories
 

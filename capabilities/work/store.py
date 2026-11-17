@@ -6,11 +6,18 @@ in one transaction, keeps tasks and boards as documents, writes only the documen
 changed, reads registry+events as one snapshot, and mirrors the chain head outside the database.
 `FileStore` is the legacy importer only; its writes are sequential, not atomic. See
 `docs/adr/0002-store-is-a-document-log.md`.
+
+From a baseline snapshot forward, every event that changes state carries that change as a
+`state_delta` document in its own body (see `state_delta`). The registry is then a checked
+projection of the log rather than a second source of truth: `loom foldcheck` replays the deltas
+and reports a field the registry lost or forged. Events written before a snapshot are history the
+fold does not need, so there is no backfill.
 """
 from __future__ import annotations
 
 import abc
 import contextlib
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -19,6 +26,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections import namedtuple
 from pathlib import Path
 
 import yaml
@@ -48,6 +56,12 @@ CREATE TABLE IF NOT EXISTS events (
     body TEXT NOT NULL,
     prev TEXT NOT NULL,
     hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS snapshots (
+    seq INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(json_extract(body, '$.status'));
 CREATE INDEX IF NOT EXISTS tasks_program ON tasks(json_extract(body, '$.program'));
@@ -96,12 +110,42 @@ def event_bytes(event: dict) -> bytes:
     return json.dumps(event, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# A task, board and claim are documents keyed differently; a delta names the key it uses.
+COLLECTION_KEYS = {"tasks": "id", "boards": "id", "claims": "artifact"}
+
+
+def merge_state_delta(existing: dict | None, added: dict) -> dict:
+    """Combine two `state_delta` documents, keeping the order each change was made in."""
+    if not existing:
+        return copy.deepcopy(added)
+    merged = copy.deepcopy(existing)
+    for collection in COLLECTION_KEYS:
+        if added.get(collection):
+            merged[collection] = merged.get(collection, []) + copy.deepcopy(added[collection])
+    if added.get("edges"):
+        edges = merged.get("edges") or {}
+        merged["edges"] = {
+            "added": edges.get("added", []) + copy.deepcopy(added["edges"].get("added", [])),
+            "removed": edges.get("removed", []) + copy.deepcopy(added["edges"].get("removed", [])),
+        }
+    return merged
+
+
+# An event is hashed when it reaches the database, not when it is created: a delta recorded at
+# the end of a transaction still has to land in the body the chain will protect.
+_BufferedEvent = namedtuple("_BufferedEvent", "event prev digest")
+
+
 class Store(abc.ABC):
     """Whole-registry storage. Commands load, mutate, commit; events append separately.
 
     A mutation is only legal while the store lock is held. `commit` writes the registry and the
     event in one transaction where the backend supports it, so a crash cannot leave state without
     its audit record. `snapshot` reads both in one consistent view.
+
+    `latest_snapshot` is a different thing: the baseline a fold starts from. It is the registry as
+    a document at one event sequence, written once and never edited, so historical tasks arrive
+    through it instead of being reconstructed from events that predate the delta format.
     """
 
     root: Path
@@ -112,8 +156,12 @@ class Store(abc.ABC):
             raise WorkError("mutation requires the store lock; use `with store.lock():`")
 
     @contextlib.contextmanager
-    def transaction(self):
-        """One atomic unit of registry state; subclasses override with a real transaction."""
+    def transaction(self, record_state: bool = True):
+        """One atomic unit of registry state; subclasses override with a real transaction.
+
+        `record_state=False` suppresses delta capture. It is for a write that restores state to
+        what the log already says (a rebuild); recording it again would double-apply the change.
+        """
         self._require_lock()
         yield self
         self.save()
@@ -131,6 +179,23 @@ class Store(abc.ABC):
     def checkpoint(self) -> tuple[int, str] | None:
         """The external chain head, where the backend keeps one."""
         return None
+
+    def latest_snapshot(self) -> dict | None:
+        """The fold baseline: `{seq, ts, digest, registry}`, or None when none was taken."""
+        return None
+
+    def snapshots(self) -> list[dict]:
+        """Every baseline snapshot, oldest first, without the stored registry body."""
+        return []
+
+    def write_snapshot(self, seq: int, ts: str, digest: str, body: str) -> None:
+        self._require_lock()
+        raise WorkError(f"{type(self).__name__} cannot hold a snapshot")
+
+    def backup_to(self, path: Path) -> Path:
+        """Write a consistent copy of the database, for a restore point."""
+        self._require_lock()
+        raise WorkError(f"{type(self).__name__} cannot write a restore point")
 
     def reanchor(self, allow_rewind: bool = False) -> None:
         """Re-write the external chain head after a verified audit."""
@@ -340,6 +405,10 @@ class SqliteStore(Store):
         # What the database holds, as `load()` or the first write found it. A save diffs against
         # this, so only changed documents reach the disk; `None` means "not read yet".
         self._stored: dict | None = None
+        # Events staged inside the open transaction, and the documents the delta diffs against.
+        self._event_buffer: list = []
+        self._delta_base: dict | None = None
+        self._record_state = True
 
     def _upgrade(self) -> None:
         """Bring an existing database up to the current schema without losing events."""
@@ -417,8 +486,13 @@ class SqliteStore(Store):
             self._read_depth = 0
 
     @contextlib.contextmanager
-    def transaction(self):
-        """One atomic unit: registry state and any events appended inside it."""
+    def transaction(self, record_state: bool = True):
+        """One atomic unit: registry state and any events appended inside it.
+
+        State and event are written together, and from a snapshot forward the event also carries
+        the state change it made. A single `commit` records its own task's delta; a batch that
+        changes several documents leaves the remainder on its last event.
+        """
         self._require_lock()
         if self._tx_depth:
             self._tx_depth += 1
@@ -431,8 +505,14 @@ class SqliteStore(Store):
         self._tx_depth = 1
         before = self._last_event
         checkpoint_event = None
+        self._event_buffer = []
+        self._record_state = record_state
+        self._delta_base = self._documents()
         try:
             yield self
+            if record_state:
+                self._record_delta(self._state_delta())
+            self._flush_events()
             pending = self._write_registry()
             self.connection.execute("COMMIT")
             self._stored = pending
@@ -444,6 +524,9 @@ class SqliteStore(Store):
             raise
         finally:
             self._tx_depth = 0
+            self._event_buffer = []
+            self._delta_base = None
+            self._record_state = True
         if checkpoint_event is not None:
             try:
                 self._write_checkpoint(checkpoint_event)
@@ -586,37 +669,70 @@ class SqliteStore(Store):
             pass
 
     def commit(self, **fields) -> dict:
-        """Write the registry and append the event in one SQLite transaction."""
+        """Write the registry and append the event in one SQLite transaction.
+
+        The event carries the task's state change (`state_delta`) when the registry document
+        differs from what the transaction read, so a mutation cannot reach the state without
+        leaving the change in the log.
+        """
         self._require_lock()
         with self.transaction():
-            event = self._append_event(**fields)
+            event = self.append_event(**fields)
+            task_id = fields.get("task")
+            if self._record_state and task_id:
+                self._record_committed_task(str(task_id))
         return event
 
     def read_events(self) -> list[tuple[bytes, dict]]:
-        rows = self.connection.execute("SELECT body FROM events ORDER BY seq")
-        return [(row["body"].encode("utf-8"), json.loads(row["body"])) for row in rows]
+        rows = [(row["body"].encode("utf-8"), json.loads(row["body"])) for row in
+                self.connection.execute("SELECT body FROM events ORDER BY seq")]
+        # A command reads the log back inside its own transaction (the reconciler closes attempts
+        # and then folds them), so buffered events count as written until COMMIT.
+        rows.extend((event_bytes(item.event), item.event) for item in self._event_buffer)
+        return rows
 
-    def _append_event(self, **fields) -> dict:
+    def _next_seq(self) -> int:
+        if self._event_buffer:
+            return self._event_buffer[-1].event["seq"] + 1
         last = self.connection.execute(
-            "SELECT seq, hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
-        seq = (last["seq"] + 1) if last else 1
-        prev = last["hash"] if last else ZERO_HASH
-        event = {"seq": seq, "ts": iso(parse_now(fields.pop("now", None))), **fields, "prev": prev}
-        raw = event_bytes(event)
-        self.connection.execute(
-            "INSERT INTO events (seq, task, body, prev, hash) VALUES (?, ?, ?, ?, ?)",
-            (seq, event.get("task"), raw.decode("utf-8"), prev, hashlib.sha256(raw).hexdigest()))
-        self._last_event = event
+            "SELECT seq FROM events ORDER BY seq DESC LIMIT 1").fetchone()
+        return (last["seq"] + 1) if last else 1
+
+    def _buffer_event(self, **fields) -> dict:
+        """Stage one event. Its hash is computed at flush, after any delta is attached."""
+        event = {"seq": self._next_seq(), "ts": iso(parse_now(fields.pop("now", None))), **fields}
+        self._event_buffer.append(_BufferedEvent(event=event, prev=None, digest=None))
         return event
 
+    def _flush_events(self) -> None:
+        if not self._event_buffer:
+            return
+        last = self.connection.execute(
+            "SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
+        prev = last["hash"] if last else ZERO_HASH
+        for item in self._event_buffer:
+            item.event["prev"] = prev
+            raw = event_bytes(item.event)
+            digest = hashlib.sha256(raw).hexdigest()
+            self.connection.execute(
+                "INSERT INTO events (seq, task, body, prev, hash) VALUES (?, ?, ?, ?, ?)",
+                (item.event["seq"], item.event.get("task"), raw.decode("utf-8"), prev, digest))
+            prev = digest
+            self._last_event = item.event
+        self._event_buffer = []
+
     def append_event(self, **fields) -> dict:
+        """Append an audit record that does not change registry state (ask, launch, attempt…)."""
         self._require_lock()
         if self._tx_depth:
-            return self._append_event(**fields)
+            return self._buffer_event(**fields)
         self.connection.execute("BEGIN IMMEDIATE")
         self._tx_depth = 1
+        self._event_buffer = []
+        self._record_state = False
         try:
-            event = self._append_event(**fields)
+            event = self._buffer_event(**fields)
+            self._flush_events()
             self.connection.execute("COMMIT")
         except BaseException:
             if self.connection.in_transaction:
@@ -624,12 +740,117 @@ class SqliteStore(Store):
             raise
         finally:
             self._tx_depth = 0
+            self._event_buffer = []
+            self._record_state = True
         try:
             self._write_checkpoint(event)
         except OSError as exc:
             raise WorkError(
                 f"event committed but the audit head could not be written: {exc}") from exc
         return event
+
+    # -- state deltas ----------------------------------------------------
+
+    def _documents(self) -> dict:
+        """The documents as the database holds them, for a delta to diff against."""
+        stored = self._stored if self._stored is not None else self._read_stored()
+
+        def parsed(section: str) -> dict:
+            return {identifier: json.loads(body)
+                    for identifier, body in stored[section].items()}
+
+        return {
+            "tasks": parsed("tasks"),
+            "boards": parsed("boards"),
+            "claims": parsed("claims"),
+            "edges": set(stored["edges"]),
+        }
+
+    def _registry_documents(self) -> dict | None:
+        """The registry in memory, or None when this command never loaded one."""
+        registry = self.registry
+        if not registry or "tasks" not in registry:
+            return None
+        return {
+            "tasks": {str(task["id"]): task for task in registry.get("tasks", [])},
+            "boards": {str(board["id"]): board for board in registry.get("boards", [])},
+            "claims": {str(claim["artifact"]): claim for claim in registry.get("claims", [])},
+            "edges": {(edge["from"], edge["to"], edge.get("kind", "depends-on"))
+                      for edge in registry.get("edges", [])},
+        }
+
+    def _state_delta(self, only_task: str | None = None) -> dict:
+        """The field-level difference between the documents on disk and the registry.
+
+        Field-level, because "the registry changed" is not evidence: a report has to name the
+        field that moved. A whole document is named only when it was created or deleted.
+        """
+        current = self._registry_documents()
+        if current is None:
+            return {}
+        base = self._delta_base or {"tasks": {}, "boards": {}, "claims": {}, "edges": set()}
+        delta: dict = {}
+        for collection in COLLECTION_KEYS:
+            if only_task is not None and collection != "tasks":
+                continue
+            changes = []
+            for identifier, document in current[collection].items():
+                if only_task is not None and identifier != only_task:
+                    continue
+                before = base[collection].get(identifier)
+                if before is None:
+                    changes.append({"id": identifier, "created": copy.deepcopy(document)})
+                    continue
+                set_fields = {}
+                for field, value in document.items():
+                    if field not in before or before[field] != value:
+                        set_fields[field] = copy.deepcopy(value)
+                unset = [field for field in before if field not in document]
+                if set_fields or unset:
+                    change = {"id": identifier}
+                    if set_fields:
+                        change["set"] = set_fields
+                    if unset:
+                        change["unset"] = unset
+                    changes.append(change)
+            if only_task is None:
+                changes.extend(
+                    {"id": identifier, "deleted": True}
+                    for identifier in base[collection] if identifier not in current[collection])
+            if changes:
+                delta[collection] = changes
+        if only_task is None:
+            added = sorted(current["edges"] - base["edges"])
+            removed = sorted(base["edges"] - current["edges"])
+            if added or removed:
+                delta["edges"] = {
+                    "added": [{"from": source, "to": target, "kind": kind}
+                              for source, target, kind in added],
+                    "removed": [{"from": source, "to": target, "kind": kind}
+                                for source, target, kind in removed],
+                }
+        return delta
+
+    def _record_delta(self, delta: dict) -> None:
+        """Attach a delta to the event that carries the mutation, if there is one."""
+        if not delta or not self._event_buffer:
+            return
+        event = self._event_buffer[-1].event
+        event["state_delta"] = merge_state_delta(event.get("state_delta"), delta)
+
+    def _record_committed_task(self, task_id: str) -> None:
+        """Record one task's change on its own event, and move the delta baseline past it."""
+        delta = self._state_delta(only_task=task_id)
+        self._record_delta(delta)
+        current = self._registry_documents()
+        if current is None or self._delta_base is None:
+            return
+        for change in delta.get("tasks", []):
+            identifier = change["id"]
+            if identifier in current["tasks"]:
+                self._delta_base["tasks"][identifier] = copy.deepcopy(current["tasks"][identifier])
+            else:
+                self._delta_base["tasks"].pop(identifier, None)
 
     def snapshot(self) -> tuple[dict, list[tuple[bytes, dict]]]:
         with self._read_transaction():
@@ -644,6 +865,46 @@ class SqliteStore(Store):
         tmp = Path(str(head) + ".tmp")
         tmp.write_text(payload)
         os.replace(tmp, head)
+
+    # -- baseline snapshots and restore points ---------------------------
+
+    def write_snapshot(self, seq: int, ts: str, digest: str, body: str) -> None:
+        """Store the registry as the baseline for the event at `seq`.
+
+        Called inside the transaction that writes the marking event, so the baseline and the
+        point it is taken from cannot disagree.
+        """
+        self._require_lock()
+        self.connection.execute(
+            "INSERT INTO snapshots (seq, ts, digest, body) VALUES (?, ?, ?, ?)",
+            (seq, ts, digest, body))
+
+    def snapshots(self) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT seq, ts, digest, body FROM snapshots ORDER BY seq")
+        return [{"seq": row["seq"], "ts": row["ts"], "digest": row["digest"],
+                 "tasks": len(json.loads(row["body"]).get("tasks", []))}
+                for row in rows]
+
+    def latest_snapshot(self) -> dict | None:
+        row = self.connection.execute(
+            "SELECT seq, ts, digest, body FROM snapshots ORDER BY seq DESC LIMIT 1").fetchone()
+        if row is None:
+            return None
+        return {"seq": row["seq"], "ts": row["ts"], "digest": row["digest"],
+                "registry": json.loads(row["body"])}
+
+    def backup_to(self, path: Path) -> Path:
+        """A consistent copy of the database via `VACUUM INTO`, for a rebuild's restore point."""
+        self._require_lock()
+        if self.connection.in_transaction:
+            raise WorkError("a restore point must be written outside a transaction")
+        target = Path(path).expanduser()
+        if target.exists():
+            raise WorkError(f"restore point {target} already exists; refusing to overwrite it")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.connection.execute("VACUUM INTO ?", (str(target),))
+        return target
 
     def reanchor(self, allow_rewind: bool = False) -> None:
         self._require_lock()
