@@ -342,7 +342,7 @@ class GraphServerTest(GraphFixture):
         status, headers, raw = self.request("/graph?program=demo", method="POST")
         self.assertEqual(status, 405)
         self.assertEqual(headers["Allow"], "GET, HEAD")
-        self.assertEqual(json.loads(raw)["error"], "read_only")
+        self.assertEqual(json.loads(raw)["error"], "method_not_allowed")
 
     def test_a_foreign_origin_cannot_read_the_graph(self):
         status, _, raw = self.request("/graph?program=demo",

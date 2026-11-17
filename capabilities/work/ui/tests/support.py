@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 UI = Path(__file__).resolve().parents[1]
@@ -385,3 +386,73 @@ class ControlHome(Home):
         self.append(event="launch", task="demo/W-23", attempt="demo/W-23#a1",
                     agent="opencode/worker", role="implementer", pid=os.getpid(),
                     worktree=str(self.root / "worktree"), branch="loom/demo-w-23-a1", now=T0)
+
+
+class ActionHome(Home):
+    """A work home with one task per guarded-action state, owned by a configured person.
+
+    Revision and epoch are stated rather than inherited from ``task()`` so a claim's
+    compare-and-swap has a known starting point, and the lease stamps are relative to the wall
+    clock because the takeover gate is a real-time window.
+    """
+
+    HRITVIK = "hritvik"
+    REVIEWER = "rev"
+
+    def __init__(self):
+        super().__init__()
+        now = datetime.now(timezone.utc)
+        live = iso(now + timedelta(hours=2))
+        soon = iso(now - timedelta(seconds=20))
+        lapsed = iso(now - timedelta(minutes=10))
+        self.lease_live = live
+        self.lease_inside_lock_delay = soon
+        self.lease_expired = lapsed
+
+        def claim(agent, epoch, expiry):
+            return {"agent": agent, "epoch": epoch, "base_revision": 1,
+                    "lease_expires": expiry, "heartbeat": iso(now)}
+
+        self.add("demo/A-1", "ready", ["src/a1"], revision=1, epoch=1)
+        self.add("demo/A-2", "claimed", ["src/a2"], revision=1, epoch=2,
+                 claim=claim(self.HRITVIK, 2, live))
+        self.add("demo/A-3", "green", ["src/a3"], revision=1, epoch=3,
+                 claim=claim(self.HRITVIK, 3, live), evidence="evidence/demo-A-3.md")
+        self.add("demo/A-4", "blocked", [], revision=1, epoch=1, blocked_needs="human")
+        self.add("demo/A-5", "claimed", ["src/a5"], revision=1, epoch=1,
+                 claim=claim("opencode/lapsed", 1, lapsed))
+        self.add("demo/A-6", "claimed", ["src/a6"], revision=1, epoch=1,
+                 claim=claim("opencode/lapsed", 1, soon))
+        self.add("demo/A-7", "integrated", ["src/a7"], revision=1, epoch=1,
+                 evidence="evidence/demo-A-7.md")
+        self.add("demo/A-8", "green", ["src/a8"], revision=1, epoch=4,
+                 claim=claim("opencode/other", 4, live))
+        (self.repo / "evidence" / "demo-A-3.md").write_text("# A-3 evidence\n")
+        (self.repo / "evidence" / "demo-A-7.md").write_text("# A-7 evidence\n")
+        self.save()
+
+        # A current review request for the reviewer identity, addressed on the green task.
+        self.append(event="ask", task="demo/A-3", agent=self.HRITVIK, to=self.REVIEWER,
+                    question="Review demo/A-3", revision=1, status="green",
+                    review_source=SOURCE_B, review_base=SOURCE_A,
+                    review_evidence="evidence/demo-A-3.md", now=T0)
+        # An ordinary question addressed to the owner.
+        self.append(event="ask", task="demo/A-1", agent="opencode/worker", to=self.HRITVIK,
+                    question="Which acceptance wording do you want?", revision=1,
+                    status="ready", now=T0)
+
+    def add(self, task_id, status, paths=None, **extra):
+        record = task(task_id, status, paths, **extra)
+        record.setdefault("owner_repo", str(self.repo))
+        self.registry["tasks"].append(record)
+        return record
+
+    def status_of(self, task_id: str) -> str:
+        return next(item for item in self.load()["tasks"] if item["id"] == task_id)["status"]
+
+    def record_of(self, task_id: str) -> dict:
+        return next(item for item in self.load()["tasks"] if item["id"] == task_id)
+
+
+def iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")

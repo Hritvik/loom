@@ -388,7 +388,7 @@ class OperationsServerTest(unittest.TestCase):
                 status, headers, payload = self.request(method=method)
                 self.assertEqual(status, 405)
                 self.assertEqual(headers["Allow"], "GET, HEAD")
-                self.assertEqual(json.loads(payload)["error"], "read_only")
+                self.assertEqual(json.loads(payload)["error"], "method_not_allowed")
 
     def test_a_version_mismatch_closes_the_operations_view(self):
         self.stop()

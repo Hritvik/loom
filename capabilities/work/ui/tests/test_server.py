@@ -52,13 +52,13 @@ class ServerTest(unittest.TestCase):
         status, _, payload = self.json("/api/health")
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
-        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["actions"]["enabled"])
         self.assertTrue(payload["version"]["ok"])
 
     def test_snapshot_returns_one_read_model_with_provenance(self):
         status, _, payload = self.json("/api/snapshot")
         self.assertEqual(status, 200)
-        self.assertTrue(payload["read_only"])
+        self.assertFalse(payload["actions"]["enabled"])
         self.assertEqual(len(payload["provenance"]), 6)
         self.assertEqual(payload["version"]["front_door"], payload["version"]["front_door"])
         tasks = payload["snapshot"]["tasks"]
@@ -95,7 +95,7 @@ class ServerTest(unittest.TestCase):
         status, headers, raw = self.request("GET", "/")
         self.assertEqual(status, 200)
         body = raw.decode("utf-8")
-        self.assertIn("Read-only local view", body)
+        self.assertIn("Local view of the portfolio registry", body)
         self.assertIn("Claimable now", body)
         self.assertNotIn("<script", body)
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
@@ -115,14 +115,21 @@ class ServerTest(unittest.TestCase):
 
     # -- boundaries ----------------------------------------------------------
 
-    def test_every_mutation_method_is_refused(self):
-        for method in ("POST", "PUT", "PATCH", "DELETE"):
+    def test_unhandled_methods_are_refused_with_the_real_method_set(self):
+        for method in ("PUT", "PATCH", "DELETE", "OPTIONS"):
             with self.subTest(method=method):
                 status, headers, payload = self.json("/api/tasks/demo/W-1", method=method)
                 self.assertEqual(status, 405)
                 self.assertEqual(headers["Allow"], "GET, HEAD")
-                self.assertEqual(payload["error"], "read_only")
-                self.assertIn("no mutation endpoint", payload["message"])
+                self.assertEqual(payload["error"], "method_not_allowed")
+        status, headers, payload = self.json("/api/tasks/demo/W-1", method="POST")
+        self.assertEqual(status, 405)
+        self.assertEqual(headers["Allow"], "GET, HEAD")
+        # A refusal names the methods of the route addressed, and only an action route takes a
+        # POST — the read routes above must not advertise one.
+        status, headers, payload = self.json("/task/demo/W-1/action/claim", method="PUT")
+        self.assertEqual(status, 405)
+        self.assertEqual(headers["Allow"], "GET, HEAD, POST")
 
     def test_non_loopback_host_is_rejected(self):
         status, _, payload = self.json("/api/health", headers={"Host": "evil.example"})

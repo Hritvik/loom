@@ -57,7 +57,7 @@ class PageTest(unittest.TestCase):
         status, headers, body = self.page("/")
         self.assertEqual(status, 200)
         self.assertIn("Owner control room", body)
-        self.assertIn("Read-only local view", body)
+        self.assertIn("Local view of the portfolio registry", body)
         self.assertNotIn("<script", body)
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
         for queue_id in ("needs-you", "stalled", "review", "integration", "acceptance",
@@ -152,7 +152,6 @@ class PageTest(unittest.TestCase):
         status, _, payload = self.json("/api/control")
         self.assertEqual(status, 200)
         room = payload["control"]
-        self.assertTrue(room["read_only"])
         self.assertEqual([queue["id"] for queue in room["queues"]],
                          ["needs-you", "stalled", "review", "integration", "acceptance",
                           "in-progress", "claimable", "waiting", "settled"])
@@ -187,13 +186,13 @@ class PageTest(unittest.TestCase):
 
     # -- boundaries ----------------------------------------------------------
 
-    def test_every_new_route_refuses_mutation(self):
+    def test_a_post_to_a_read_route_is_refused(self):
         for path in ("/", "/tasks", "/task/demo/W-1", "/api/control"):
             with self.subTest(path=path):
                 status, headers, payload = self.json(path, method="POST")
                 self.assertEqual(status, 405)
                 self.assertEqual(headers["Allow"], "GET, HEAD")
-                self.assertEqual(payload["error"], "read_only")
+                self.assertEqual(payload["error"], "method_not_allowed")
 
     def test_host_and_origin_checks_cover_the_new_routes(self):
         status, _, payload = self.json("/api/control", headers={"Host": "evil.example"})

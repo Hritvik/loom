@@ -285,7 +285,6 @@ class ControlTest(unittest.TestCase):
 
     def test_control_room_serialises_without_html(self):
         payload = self.room.to_dict()
-        self.assertTrue(payload["read_only"])
         self.assertEqual([queue["id"] for queue in payload["queues"]],
                          list(control.QUEUE_ORDER))
         self.assertEqual(sum(queue["count"] for queue in payload["queues"]),

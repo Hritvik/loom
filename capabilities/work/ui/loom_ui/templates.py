@@ -119,6 +119,28 @@ ul.plain li { margin:3px 0; }
 footer.site { border-top:1px solid var(--line); color:var(--muted); font-size:13px;
               padding:18px 0 40px; margin-top:44px; }
 footer.site p { margin:4px 0; }
+form.action { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+              padding:14px 16px; margin:12px 0; }
+form.action .fields { display:grid; gap:12px; margin:12px 0; }
+.field label { display:block; font-weight:650; margin-bottom:3px; }
+.field .hint { color:var(--muted); font-size:12.5px; margin:0 0 4px; }
+.field input[type="text"], .field textarea, .field select {
+  width:100%; max-width:60ch; padding:7px 9px; font:inherit; color:var(--ink);
+  background:var(--bg); border:1px solid var(--line); border-radius:7px; }
+.field textarea { min-height:5.5em; resize:vertical; }
+.field .required { color:var(--muted); font-weight:400; font-size:12.5px; }
+.actions-list { margin:10px 0 0; padding-left:0; list-style:none; }
+.actions-list li { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+                   padding:10px 14px; margin:8px 0; }
+.actions-list .why { font-weight:400; color:var(--muted); }
+button { font:inherit; font-weight:650; padding:8px 16px; border-radius:8px; cursor:pointer;
+         color:var(--panel); background:var(--accent); border:1px solid var(--accent); }
+button:focus-visible { outline:3px solid var(--accent); outline-offset:2px; }
+pre.output { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+             padding:10px 12px; overflow-x:auto; white-space:pre-wrap; overflow-wrap:anywhere;
+             font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size:12.5px; }
+.who { font-size:13px; color:var(--muted); }
+.who strong { color:var(--ink); }
 @media (max-width: 640px) {
   dl.facts { grid-template-columns: 1fr; gap:0; }
   dl.facts dd { margin-bottom: 8px; }
@@ -244,18 +266,35 @@ def _nav(current: str, program: str | None = None) -> str:
             + "</ul></nav>")
 
 
-def header_shell(current: str, version: EngineVersion, program: str | None = None) -> str:
+def header_shell(current: str, version: EngineVersion, program: str | None = None,
+                 actor: str | None = None, roles: tuple[str, ...] = ()) -> str:
+    who = ""
+    if actor:
+        listed = f" ({esc(', '.join(roles))})" if roles else ""
+        who = f'<p class="who">signed in as <strong>{esc(actor)}</strong>{listed}</p>'
     return f"""<header class="site">
   <div class="wrap">
-    <p class="brand">Loom <span class="muted">read-only</span></p>
+    <p class="brand">Loom <span class="muted">local</span></p>
     {_nav(current, program)}
+    {who}
     <p class="muted">ui {esc(__version__)} &middot; engine {verdict_badge(version.verdict)}</p>
   </div>
 </header>"""
 
 
 def shell(*, title: str, current: str, version: EngineVersion, body: str,
-          footer: str, program: str | None = None, extra_css: str = "") -> str:
+          footer: str, program: str | None = None, extra_css: str = "",
+          actions: bool = False, actor: str | None = None,
+          roles: tuple[str, ...] = ()) -> str:
+    if actions:
+        note = ('<p class="note">Task actions run through the <span class="mono">loom</span> '
+                "front door as the identity this session was paired with. The UI keeps no state, "
+                "holds no queue, and cannot dispatch a worker, run a policy pass, change the "
+                "schedule or deploy. A refusal or a stale revision is shown, never retried.</p>")
+    else:
+        note = ('<p class="note">This server has no configured human identity, so it cannot '
+                "change task state. Actions belong to the <span class=\"mono\">loom</span> front "
+                "door; the UI stays read-only until a human is configured.</p>")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -267,16 +306,14 @@ def shell(*, title: str, current: str, version: EngineVersion, body: str,
 </head>
 <body>
 <a class="skip" href="#main">Skip to main content</a>
-{header_shell(current, version, program)}
+{header_shell(current, version, program, actor, roles)}
 <main id="main" tabindex="-1" class="wrap">
 {body}
 </main>
 <footer class="site">
   <div class="wrap">
     {footer}
-    <p class="note">This UI is read-only. It exposes no endpoint that changes task state,
-    dispatches a worker, or runs a policy pass. Actions belong to <span class="mono">loom</span>
-    and arrive in a later, separately reviewed slice.</p>
+    {note}
   </div>
 </footer>
 </body>
@@ -372,6 +409,44 @@ def missing(message: str, hint: str) -> str:
   <p class="lede">HTTP 404. {esc(message)}</p>
   <p>{esc(hint)}</p>
   <p><a href="/">Focus</a> &middot; <a href="/tasks">All tasks</a></p>
+</main>
+</body>
+</html>
+"""
+
+
+def notice(title: str, status: int, message: str, details: tuple[str, ...] = (),
+           links: tuple[tuple[str, str], ...] = ()) -> str:
+    """A small, complete page for a refused, rejected or unauthenticated request.
+
+    It carries no task data beyond what the caller passes in: a request that was not accepted must
+    not half-render a task the caller may not see.
+    """
+    body = "".join(f"<li>{esc(item)}</li>" for item in details)
+    listed = f'<ul class="plain">{body}</ul>' if body else ""
+    nav = " ".join(f'<a href="{esc(href)}">{esc(label)}</a>' for href, label in links)
+    if not nav:
+        nav = '<a href="/">Focus</a> &middot; <a href="/tasks">All tasks</a>'
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Loom — {esc(title)}</title>
+<style>{CSS}</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to main content</a>
+<main id="main" tabindex="-1" class="wrap">
+  <h1>{esc(title)}</h1>
+  <p class="lede">HTTP {esc(status)}.</p>
+  <div class="banner" role="status">
+    <h2>What happened</h2>
+    <p>{esc(message)}</p>
+    {listed}
+  </div>
+  <p>{nav}</p>
 </main>
 </body>
 </html>

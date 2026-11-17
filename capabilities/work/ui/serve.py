@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Start the read-only local UI.
+"""Start the local Loom UI.
 
-    python3 ui/serve.py [--port 8788] [--db PATH]
+    python3 ui/serve.py [--port 8788] [--db PATH] [--human identity:roles]...
 
-It binds loopback only and exposes no mutation route. See ``loom_ui/server.py`` for the boundary
-rules and ``ui/README.md`` for how to run it from the promoted release.
+It binds loopback only. Without a configured human identity it is read-only and says so; with one it
+prints a pairing link per identity and enables the guarded task actions in
+``loom_ui/actions.py``. See ``loom_ui/server.py`` for the boundary rules and ``ui/README.md`` for
+how to run it from the promoted release.
 """
 from __future__ import annotations
 

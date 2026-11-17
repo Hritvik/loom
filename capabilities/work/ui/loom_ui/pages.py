@@ -11,6 +11,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 from . import templates
+from .actions import Panel
 from .control import ControlRoom, QueueItem, TaskDetail
 from .model import RegistryView
 from .provenance import Signal
@@ -114,9 +115,10 @@ def _queue_section(queue, as_of: str, now: datetime) -> str:
 
 
 def control_page(control: ControlRoom, view: RegistryView, version: EngineVersion,
-                 signals: tuple[Signal, ...], now: datetime) -> str:
+                 signals: tuple[Signal, ...], now: datetime,
+                 actions: bool = False) -> str:
     label, stale = templates.freshness(control.as_of, now)
-    lede = (f"Read-only local view of the portfolio registry. One registry sample from "
+    lede = (f"Local view of the portfolio registry. One registry sample from "
             f"{control.as_of} ({label}). "
             f"{control.counts['total']} task(s) in scope. "
             "State and claimability are separate facts; each queue names why a task is there.")
@@ -163,11 +165,11 @@ def control_page(control: ControlRoom, view: RegistryView, version: EngineVersio
     footer = templates.footer_snapshot(control.as_of, view.digest, view.head_seq, view.db,
                                        now, version)
     return templates.shell(title="Loom — owner control room", current="focus", version=version,
-                           body=body, footer=footer, program=control.program)
+                           body=body, footer=footer, program=control.program, actions=actions)
 
 
 def tasks_page(control: ControlRoom, view: RegistryView, version: EngineVersion,
-               signals: tuple[Signal, ...], now: datetime) -> str:
+               signals: tuple[Signal, ...], now: datetime, actions: bool = False) -> str:
     label, stale = templates.freshness(control.as_of, now)
     rows = []
     for row in control.rows:
@@ -213,7 +215,7 @@ def tasks_page(control: ControlRoom, view: RegistryView, version: EngineVersion,
     footer = templates.footer_snapshot(control.as_of, view.digest, view.head_seq, view.db,
                                        now, version)
     return templates.shell(title="Loom — all tasks", current="tasks", version=version,
-                           body=body, footer=footer, program=control.program)
+                           body=body, footer=footer, program=control.program, actions=actions)
 
 
 def _link_list(links, caption: str, label: str, empty: str) -> str:
@@ -336,7 +338,7 @@ def _events_table(detail: TaskDetail) -> str:
     if not detail.events:
         return '<p class="empty">No event names this task.</p>'
     rows = "".join(
-        "<tr>"
+        f'<tr id="event-{esc(event.seq)}">'
         f"<td class=\"num\">{esc(event.seq)}</td>"
         f"<td class=\"detail\">{esc(event.at)}</td>"
         f"<td>{esc(event.event)}</td>"
@@ -351,8 +353,59 @@ def _events_table(detail: TaskDetail) -> str:
                             ("Agent", False), ("Detail", False)), [rows], "Event history")
 
 
+def _actions_section(panel: Panel, detail: TaskDetail) -> str:
+    if not panel.enabled:
+        return ('<p class="empty">This server has no configured human identity, so it cannot act '
+                "on a task. Starting it with a configured identity is a deliberate step, not a "
+                "default.</p>")
+    parts = [f'<p class="section-note">Acting as <strong>{esc(panel.identity or "nobody")}</strong>'
+             f'{esc(" (" + ", ".join(panel.roles) + ")" if panel.roles else "")}. '
+             "The identity is bound by the server at pairing time and cannot be chosen by this "
+             "page. Loom still decides whether each action is legal; the UI only decides what to "
+             "offer.</p>"]
+    if not panel.identity:
+        parts.append(
+            '<div class="banner" role="status"><h2>Not signed in</h2>'
+            "<p>Open the pairing link this server printed when it started. Without a paired "
+            "session no action can be submitted, and no form is rendered.</p></div>")
+        return "".join(parts)
+
+    available = [option for option in panel.options if option.available]
+    unavailable = [option for option in panel.options if not option.available]
+
+    if available:
+        items = "".join(
+            f'<li><a href="{esc(_confirm_href(detail.task.id, option))}">{esc(option.label)}</a> '
+            f'<span class="detail">— {esc(option.summary)}</span><br>'
+            f'<span class="detail">{esc(option.effect)}</span></li>'
+            for option in available)
+        parts.append(f'<ul class="actions-list">{items}</ul>')
+        parts.append('<p class="section-note">Each link opens a confirmation page showing the '
+                     "revision, epoch and lease it will present. Nothing is sent until you "
+                     "confirm there.</p>")
+    else:
+        parts.append('<p class="empty">No action is available to you on this task right now. '
+                     "The reasons are below.</p>")
+
+    if unavailable:
+        shown = "".join(
+            f"<li><strong>{esc(option.label)}</strong> — {esc(option.reason or 'not available')}</li>"
+            for option in unavailable)
+        parts.append(
+            f'<details><summary>{len(unavailable)} action(s) not available, and why</summary>'
+            f'<ul class="plain">{shown}</ul></details>')
+    return "".join(parts)
+
+
+def _confirm_href(task_id: str, option) -> str:
+    from .action_pages import confirm_url
+
+    return confirm_url(task_id, option)
+
+
 def task_page(detail: TaskDetail, view: RegistryView, version: EngineVersion,
-              signals: tuple[Signal, ...], now: datetime) -> str:
+              signals: tuple[Signal, ...], now: datetime,
+              panel: Panel | None = None) -> str:
     task = detail.task
     label, stale = templates.freshness(detail.as_of, now)
     claim = task.claim
@@ -411,6 +464,12 @@ def task_page(detail: TaskDetail, view: RegistryView, version: EngineVersion,
             f"<li>{templates.badge(blocker.kind, 'degraded')} {esc(blocker.detail)}</li>"
             for blocker in task.blockers) + "</ul>")
     parts.append("</section>")
+
+    if panel is not None:
+        parts.append('<section aria-labelledby="actions-h">')
+        parts.append('<h2 id="actions-h">Actions</h2>')
+        parts.append(_actions_section(panel, detail))
+        parts.append("</section>")
 
     parts.append('<section aria-labelledby="claim-h">')
     parts.append('<h2 id="claim-h">Claim and lease</h2>')
@@ -499,7 +558,10 @@ def task_page(detail: TaskDetail, view: RegistryView, version: EngineVersion,
     footer = templates.footer_snapshot(detail.as_of, view.digest, view.head_seq, view.db,
                                        now, version)
     return templates.shell(title=f"Loom — {task.id}", current="tasks", version=version,
-                           body=body, footer=footer)
+                           body=body, footer=footer,
+                           actions=bool(panel and panel.enabled),
+                           actor=panel.identity if panel else None,
+                           roles=panel.roles if panel else ())
 
 
 def _freshness_note(as_of: str, now: datetime) -> str:

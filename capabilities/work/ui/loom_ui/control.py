@@ -345,7 +345,6 @@ class ControlRoom:
                 for queue in self.queues
             ],
             "rows": [row.to_dict() for row in self.rows],
-            "read_only": True,
         }
         if self.gaps:
             payload["gaps"] = list(self.gaps)
