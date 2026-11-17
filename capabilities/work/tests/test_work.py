@@ -90,6 +90,8 @@ class Workspace:
         os.environ["LOOM_TICK_ROOTS"] = str(self.root / "tick.roots")
         self._previous_decisions = os.environ.get("LOOM_TICK_DECISIONS")
         os.environ["LOOM_TICK_DECISIONS"] = str(self.root / "tick.decisions.jsonl")
+        self._previous_health = os.environ.get("LOOM_HEALTH")
+        os.environ["LOOM_HEALTH"] = str(self.root / "health.json")
         self.repo = self.root / "repo"
         (self.repo / "docs").mkdir(parents=True)
 
@@ -179,6 +181,9 @@ class Workspace:
         finally:
             store.close()
 
+    def health(self):
+        return json.loads((self.root / "health.json").read_text())
+
     def board_data(self):
         return json.loads((self.repo / "docs" / "board.json").read_text())
 
@@ -187,6 +192,10 @@ class Workspace:
             os.environ.pop("LOOM_TICK_DECISIONS", None)
         else:
             os.environ["LOOM_TICK_DECISIONS"] = self._previous_decisions
+        if self._previous_health is None:
+            os.environ.pop("LOOM_HEALTH", None)
+        else:
+            os.environ["LOOM_HEALTH"] = self._previous_health
         if self._previous_db is None:
             os.environ.pop("WORK_DB", None)
         else:
@@ -2700,6 +2709,219 @@ class WorkCLITest(unittest.TestCase):
 
         readme.write_text("Current registry: **1 boards, 4 tasks, 0 edges**.\n")
         self.assertEqual(validate(self.ws.root).returncode, 0)
+
+    # -- health ------------------------------------------------------------
+    #
+    # A stopped dispatcher, a stopped schedule and a wedged cursor all leave the registry looking
+    # exactly like an idle engine, so each is asserted against the artifact rather than the state.
+
+    def test_an_applying_pass_records_its_time_cursor_and_head(self):
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        report = self.ws.health()
+        head = self.ws.events()[-1]["seq"]
+        self.assertEqual(report["ts"], T0)
+        self.assertEqual(report["mode"], "apply")
+        self.assertEqual(report["cursor"], head)
+        self.assertEqual(report["logHead"]["seq"], head)
+        self.assertEqual(len(report["logHead"]["hash"]), 64)
+        self.assertEqual(report["liveAttempts"], [])
+        self.assertIsNone(report["lastError"])
+        self.assertEqual(report["lastApply"]["cursor"], head)
+        self.assertTrue(report["lastApply"]["complete"])
+
+    def test_a_preview_records_itself_but_never_stands_in_for_a_dispatch(self):
+        self.invoke("tick", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        report = self.ws.health()
+        self.assertEqual(report["mode"], "preview")
+        self.assertIsNone(report["lastApply"])
+        # The whole point: a hand-run preview must not make a stopped schedule look alive.
+        health = self.invoke("health", "--interval", "60", "--now", T0, expect=1)
+        self.assertIn("no applying pass has ever run", health.stdout)
+
+    def test_a_pass_that_dies_records_the_error_and_leaves_the_cursor_behind(self):
+        # The decisions write is the last thing a pass does before it reports; pointing it at a
+        # directory makes the pass die there, which is what a crash looks like to the artifact.
+        broken = self.ws.root / "decisions-is-a-directory"
+        broken.mkdir()
+        previous = os.environ["LOOM_TICK_DECISIONS"]
+        os.environ["LOOM_TICK_DECISIONS"] = str(broken)
+        try:
+            result = self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                                 "--now", T0, expect=1)
+        finally:
+            os.environ["LOOM_TICK_DECISIONS"] = previous
+        self.assertIn("IsADirectoryError", result.stderr)
+        report = self.ws.health()
+        head = self.ws.events()[-1]["seq"]
+        self.assertIn("IsADirectoryError", report["lastError"])
+        self.assertFalse(report["lastApply"]["complete"])
+        self.assertEqual(report["cursor"], 0)
+        self.assertEqual(report["readFrom"], head)
+        self.assertGreater(head, 0)
+        unhealthy = self.invoke("health", "--interval", "60", "--now", T0, expect=1)
+        self.assertIn("the last applying pass did not finish", unhealthy.stdout)
+
+    def test_a_crash_does_not_blame_the_pass_for_events_appended_before_it_ran(self):
+        # A completed pass at head 1, then an event arrives while no pass is running. The next pass
+        # reads from 2 and dies without appending anything, so it consumed nothing *of its own* —
+        # the event was already there. Reporting it as "the pass did not consume it" points the
+        # reader at a pass that never saw it.
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        self.invoke("create", "--agent", "agent-a", "--now", T0, "--id", "demo/W-5",
+                    "--board", "demo.board", "--title", "Another", "--status", "ready",
+                    "--write-path", "src/five")
+        idle_head = self.ws.events()[-1]["seq"]
+
+        broken = self.ws.root / "decisions-is-a-directory"
+        broken.mkdir()
+        previous = os.environ["LOOM_TICK_DECISIONS"]
+        os.environ["LOOM_TICK_DECISIONS"] = str(broken)
+        try:
+            self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                        "--now", "2030-01-01T10:01:00Z", expect=1)
+        finally:
+            os.environ["LOOM_TICK_DECISIONS"] = previous
+        report = self.ws.health()
+        self.assertEqual(report["readFrom"], idle_head)
+        self.assertEqual(report["logHead"]["seq"], idle_head)
+        unhealthy = self.invoke("health", "--interval", "60", "--now", "2030-01-01T10:01:00Z",
+                                expect=1)
+        self.assertNotIn("never consumed", unhealthy.stdout)
+        self.assertIn("the last applying pass did not finish", unhealthy.stdout)
+
+    def test_events_appended_during_a_crashing_pass_are_reported_as_unconsumed(self):
+        # This pass does work — it claims and launches, appending events — and then dies. Those
+        # events are the ones it was responsible for and did not consume, and only readFrom makes
+        # that measurable.
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        started = self.ws.events()[-1]["seq"]
+
+        broken = self.ws.root / "decisions-is-a-directory"
+        broken.mkdir()
+        previous = os.environ["LOOM_TICK_DECISIONS"]
+        os.environ["LOOM_TICK_DECISIONS"] = str(broken)
+        try:
+            self.invoke("tick", "--apply", "--max-implementer", "1", "--max-reviewer", "0",
+                        "--worker-command", "/bin/sh -c 'sleep 5'",
+                        "--now", "2030-01-01T10:01:00Z", expect=1)
+        finally:
+            os.environ["LOOM_TICK_DECISIONS"] = previous
+        report = self.ws.health()
+        head = report["logHead"]["seq"]
+        self.assertEqual(report["readFrom"], started)
+        self.assertEqual(report["cursor"], started)  # the cursor did not advance
+        self.assertGreater(head, started)
+        # A crash record that said "0 live" would hide the worker it had just started.
+        self.assertEqual([item["task"] for item in report["liveAttempts"]], ["demo/W-1"])
+        unhealthy = self.invoke("health", "--interval", "60", "--now", "2030-01-01T10:01:00Z",
+                                expect=1)
+        self.assertIn(f"{head - started} event(s) were never consumed by the last applying pass",
+                      unhealthy.stdout)
+        self.assertIn(f"it read from {started}", unhealthy.stdout)
+
+    def test_a_preview_does_not_lend_its_clock_to_the_dispatch_line(self):
+        # The reproduced defect: an applying pass at 10:00, a hand-run preview at 10:29:55, and
+        # `loom health` printed the preview's timestamp with the applying pass's age beside it.
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        self.invoke("tick", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--now", "2030-01-01T10:29:55Z")
+        stale = self.invoke("health", "--interval", "120", "--now", "2030-01-01T10:30:00Z", expect=1)
+        # The mode line carries the pass it names and no age, because its age is not the verdict.
+        self.assertIn("last pass: 2030-01-01T10:29:55Z (preview)\n", stale.stdout)
+        self.assertNotIn("2030-01-01T10:29:55Z (preview), ", stale.stdout)
+        # The age is printed only beside the applying pass it belongs to.
+        self.assertIn(f"dispatch:  {T0}, 1800s ago", stale.stdout)
+        self.assertIn("the last applying pass was 1800s ago", stale.stdout)
+        as_json = json.loads(self.invoke(
+            "health", "--interval", "120", "--now", "2030-01-01T10:30:00Z", "--json",
+            expect=1).stdout)
+        self.assertEqual(as_json["ageSeconds"], 1800)
+
+    def test_a_future_stamp_is_not_reported_as_healthy(self):
+        # A clock that is wrong reads as fresh. Before this check it printed "-60s ago" and passed.
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        artifact = self.ws.root / "health.json"
+        report = json.loads(artifact.read_text())
+        report["lastApply"]["ts"] = "2030-01-01T10:01:00Z"
+        report["ts"] = "2030-01-01T10:01:00Z"
+        artifact.write_text(json.dumps(report))
+        future = self.invoke("health", "--interval", "60", "--now", T0, expect=1)
+        self.assertIn("stamped 60s in the future", future.stdout)
+        self.assertNotIn("s ago", future.stdout.split("dispatch:")[1])
+
+    def test_an_artifact_written_before_readFrom_existed_is_not_accused(self):
+        # The artifact outlives the engine that wrote it. An older record has no readFrom, and
+        # guessing one of zero would invent a lag of every event in the log.
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        artifact = self.ws.root / "health.json"
+        report = json.loads(artifact.read_text())
+        del report["readFrom"]
+        del report["lastApply"]["readFrom"]
+        artifact.write_text(json.dumps(report))
+        healthy = self.invoke("health", "--interval", "60", "--now", "2030-01-01T10:01:00Z")
+        self.assertIn("health: OK", healthy.stdout)
+        self.assertIn("read from ?", healthy.stdout)
+
+    def test_a_later_pass_advances_the_cursor_and_clears_the_error(self):
+        broken = self.ws.root / "decisions-is-a-directory"
+        broken.mkdir()
+        previous = os.environ["LOOM_TICK_DECISIONS"]
+        os.environ["LOOM_TICK_DECISIONS"] = str(broken)
+        try:
+            self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                        "--now", T0, expect=1)
+        finally:
+            os.environ["LOOM_TICK_DECISIONS"] = previous
+        failed = self.ws.health()
+        self.assertFalse(failed["lastApply"]["complete"])
+        self.invoke("create", "--agent", "agent-a", "--now", T0, "--id", "demo/W-5",
+                    "--board", "demo.board", "--title", "Another", "--status", "ready",
+                    "--write-path", "src/five")
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                    "--now", "2030-01-01T10:02:00Z")
+        healed = self.ws.health()
+        self.assertIsNone(healed["lastError"])
+        self.assertTrue(healed["lastApply"]["complete"])
+        self.assertGreater(healed["cursor"], failed["cursor"])
+        self.assertEqual(healed["cursor"], healed["logHead"]["seq"])
+        self.invoke("health", "--interval", "60", "--now", "2030-01-01T10:02:30Z")
+
+    def test_health_fails_only_when_the_last_pass_is_older_than_three_intervals(self):
+        self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0", "--now", T0)
+        inside = self.invoke("health", "--interval", "60", "--now", "2030-01-01T10:03:00Z")
+        self.assertIn("health: OK", inside.stdout)
+        self.assertIn("cursor", inside.stdout)
+        beyond = self.invoke("health", "--interval", "60", "--now", "2030-01-01T10:03:01Z",
+                             expect=1)
+        self.assertIn("health: UNHEALTHY", beyond.stdout)
+        self.assertIn("stale after 180s", beyond.stdout)
+        as_json = json.loads(self.invoke(
+            "health", "--interval", "60", "--now", "2030-01-01T10:09:00Z", "--json",
+            expect=1).stdout)
+        self.assertFalse(as_json["ok"])
+        self.assertEqual(as_json["ageSeconds"], 540)
+
+    def test_the_interval_defaults_to_the_configured_schedule(self):
+        config = self.ws.root / "loom.json"
+        config.write_text(json.dumps({"schedule": {"tick_interval": 300}}))
+        previous = os.environ.get("LOOM_CONFIG")
+        os.environ["LOOM_CONFIG"] = str(config)
+        try:
+            self.invoke("tick", "--apply", "--max-implementer", "0", "--max-reviewer", "0",
+                        "--now", T0)
+            inside = json.loads(self.invoke(
+                "health", "--now", "2030-01-01T10:14:00Z", "--json").stdout)
+            beyond = self.invoke(
+                "health", "--now", "2030-01-01T10:15:01Z", "--json", expect=1).stdout
+        finally:
+            if previous is None:
+                os.environ.pop("LOOM_CONFIG", None)
+            else:
+                os.environ["LOOM_CONFIG"] = previous
+        self.assertEqual(inside["intervalSeconds"], 300)
+        self.assertEqual(inside["staleAfterSeconds"], 900)
+        self.assertTrue(inside["ok"])
+        self.assertFalse(json.loads(beyond)["ok"])
 
 
 if __name__ == "__main__":

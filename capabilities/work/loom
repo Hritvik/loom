@@ -51,11 +51,13 @@ DEFAULTS = {
         "stuck_after": "3h",
     },
     "linear": {"config": str(Path.home() / ".config/loom/linear-portfolio.json")},
-    "schedule": {"tick_label": "local.loom-tick", "linear_label": "local.loom-linear"},
+    "schedule": {"tick_label": "local.loom-tick", "linear_label": "local.loom-linear",
+                 "tick_interval": 120, "linear_interval": 300},
 }
 
 GLOBAL_FLAGS = {"--root", "--agent", "--now", "--store", "--db"}
-FRONT_DOOR = {"tick", "workers", "schedule", "linear", "logs", "integration-plan", "deploy"}
+FRONT_DOOR = {"tick", "workers", "schedule", "linear", "logs", "health", "integration-plan",
+              "deploy"}
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -562,6 +564,99 @@ def cmd_linear(args: argparse.Namespace, config: dict) -> int:
 
 
 # --------------------------------------------------------------------------
+# health
+# --------------------------------------------------------------------------
+
+
+def health_interval(config: dict) -> int:
+    return int(config.get("schedule", {}).get("tick_interval",
+                                              DEFAULTS["schedule"]["tick_interval"]))
+
+
+def cmd_health(args: argparse.Namespace, config: dict) -> int:
+    """Read the dispatcher's own artifact and say whether it is running and keeping up.
+
+    Exit 0 only when an applying pass finished within three intervals and left no event behind. A
+    stopped dispatcher (its pass clock is older than three intervals), a stopped schedule (no
+    applying pass has ever run, however many previews there are) and a pass that died holding
+    events that arrived while it was running are the ways of being dead that look like an idle
+    engine from the registry.
+    """
+    interval = int(args.interval or health_interval(config))
+    stale_after = 3 * interval
+    now = engine.parse_now(getattr(args, "now", None))
+    report = engine.read_health() or {}
+    problems: list[str] = []
+    age = None
+    last = report.get("lastApply")
+    if not report:
+        problems.append(f"no pass has been recorded at {engine.health_path()}")
+    elif not last:
+        problems.append("no applying pass has ever run; a preview cannot claim, launch "
+                        "or consume the log")
+    if last:
+        try:
+            age = (now - engine.parse_time(last.get("ts"))).total_seconds()
+        except (TypeError, ValueError):
+            problems.append(f"the last applying pass time is unreadable: {last.get('ts')!r}")
+        if age is not None and age > stale_after:
+            problems.append(f"the last applying pass was {int(age)}s ago; stale after "
+                            f"{stale_after}s (3 x {interval}s interval)")
+        elif age is not None and age < 0:
+            problems.append(f"the last applying pass is stamped {int(-age)}s in the future: "
+                            "the clock or the artifact is wrong")
+        cursor = int(last.get("cursor") or 0)
+        head = int((last.get("logHead") or {}).get("seq") or 0)
+        # readFrom is where this pass found the log; an artifact written before the field existed
+        # falls back to the cursor, which is the same position for a completed pass.
+        read_from = last.get("readFrom")
+        read_from = cursor if read_from is None else int(read_from)
+        pending = head - max(cursor, read_from)
+        if pending > 0:
+            problems.append(f"{pending} event(s) were never consumed by the last applying pass: "
+                            f"it read from {read_from}, its cursor is {cursor}, the log ends "
+                            f"at {head}")
+        if not last.get("complete", True):
+            problems.append("the last applying pass did not finish: "
+                            + str(report.get("lastError") or "no error was recorded"))
+    ok = not problems
+    if args.json:
+        print(json.dumps({
+            "ok": ok,
+            "artifact": str(engine.health_path()),
+            "intervalSeconds": interval,
+            "staleAfterSeconds": stale_after,
+            "ageSeconds": None if age is None else int(age),
+            "problems": problems,
+            "report": report or None,
+        }, indent=2))
+        return 0 if ok else 1
+    print(f"health: {'OK' if ok else 'UNHEALTHY'}")
+    print(f"  artifact: {engine.health_path()}")
+    if report:
+        print(f"  last pass: {report.get('ts')} ({report.get('mode')})")
+    if last:
+        head = last.get("logHead") or {}
+        if age is None:
+            aged = ""
+        elif age < 0:
+            aged = f", {int(-age)}s in the future"
+        else:
+            aged = f", {int(age)}s ago"
+        from_seq = last.get("readFrom")
+        print(f"  dispatch:  {last.get('ts')}{aged}  read from "
+              f"{'?' if from_seq is None else from_seq} -> cursor {last.get('cursor')}"
+              f" / log head {head.get('seq')}  {str(head.get('hash') or '')[:12]}")
+    live = report.get("liveAttempts") or []
+    named = ", ".join(str(item.get("attempt")) for item in live)
+    print(f"  attempts:  {len(live)} live" + (f" ({named})" if named else ""))
+    print(f"  error:     {report.get('lastError') or 'none'}")
+    for problem in problems:
+        print(f"  PROBLEM    {problem}")
+    return 0 if ok else 1
+
+
+# --------------------------------------------------------------------------
 # logs
 # --------------------------------------------------------------------------
 
@@ -617,6 +712,13 @@ def front_parser() -> argparse.ArgumentParser:
     logs.add_argument("task")
     logs.add_argument("--lines", type=int, default=40)
     logs.set_defaults(func=cmd_logs)
+
+    health = sub.add_parser("health", help="did the dispatcher run, and is it keeping up?")
+    health.add_argument("--interval", type=int,
+                        help="schedule interval in seconds (default from loom.json)")
+    health.add_argument("--now", default=None, help="override clock (testing only)")
+    health.add_argument("--json", action="store_true")
+    health.set_defaults(func=cmd_health)
     return parser
 
 
@@ -631,10 +733,21 @@ def usage() -> str:
         "  workers   running workers; `workers stop <task>`\n"
         "  schedule  status | install [--restart] | start | stop\n"
         "  deploy    status | promote [--ref] | rollback | path\n"
+        "  health    did the dispatcher run, and is it keeping up? (exit 1 when not)\n"
         "  linear    sync [--all] [--apply]\n"
         "  logs      <task> [--lines N]\n\n"
         "Every engine verb accepts --root, --db, --agent and --now before the verb.\n"
     )
+
+
+def global_value(globals_: list[str], flag: str) -> str | None:
+    """The value of a global flag, however it was written."""
+    for index, item in enumerate(globals_):
+        if item == flag and index + 1 < len(globals_):
+            return globals_[index + 1]
+        if item.startswith(flag + "="):
+            return item.split("=", 1)[1]
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -643,6 +756,10 @@ def main(argv: list[str] | None = None) -> int:
     command = rest[0] if rest else None
     if command == "integration-plan":
         return cmd_plan(rest[1:], globals_, load_config())
+    if command == "health":
+        args = front_parser().parse_args(rest)
+        args.now = args.now or global_value(globals_, "--now")
+        return cmd_health(args, load_config())
     if command in engine.ENGINE_COMMANDS:
         return engine.main(argv)
     if command == "tick":

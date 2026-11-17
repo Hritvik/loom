@@ -2524,6 +2524,91 @@ def write_roots(signature: str) -> None:
     path.write_text(signature + "\n")
 
 
+# --------------------------------------------------------------------------
+# Health
+# --------------------------------------------------------------------------
+#
+# A pass that stops leaves the registry exactly as an idle engine leaves it: nothing changes. The
+# whole report therefore has to live outside the registry, and it has to distinguish the ways of
+# being dead that look identical from the data — a stopped dispatcher, a stopped schedule and a
+# pass that died holding events it never consumed. `loom health` reads only this file.
+
+
+def health_path() -> Path:
+    return Path(os.environ.get("LOOM_HEALTH")
+                or Path.home() / ".local/state/loom/health.json")
+
+
+def log_head(store: Store) -> dict:
+    """The chain tip: the seq the next event builds on and the hash it chains to."""
+    records = store.read_events()
+    if not records:
+        return {"seq": 0, "hash": ZERO_HASH}
+    raw, last = records[-1]
+    return {"seq": int(last.get("seq") or 0), "hash": hashlib.sha256(raw).hexdigest()}
+
+
+def read_health() -> dict | None:
+    try:
+        report = json.loads(health_path().read_text())
+    except (OSError, ValueError):
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def health_attempts(live: list[dict]) -> list[dict]:
+    return [{"task": item.get("task"), "attempt": item.get("attempt"),
+             "role": item.get("role") or "implementer", "pid": item.get("pid")}
+            for item in live]
+
+
+def record_pass(store: Store, args, live: list[dict], error: str | None,
+                complete: bool = True, read_from: dict | None = None) -> dict:
+    """Rewrite health.json from one pass: when it ran, how far it read, and what it saw.
+
+    `readFrom` is the chain tip observed *before* the pass did any work, and `cursor` is what the
+    last completed applying pass consumed. Only a pass that reaches its end advances the cursor, so
+    `readFrom` is what makes an unfinished pass legible: the events between the pass's own start and
+    the head it left behind arrived while it was running and nobody consumed them. Without it the
+    lag would be measured against the *previous* pass's cursor and would blame this pass for events
+    appended while no pass was running — which is idle, not wedged.
+
+    A preview is recorded too, because it is a pass, but it cannot claim, launch or consume: the
+    dispatcher's own clock is `lastApply`. Running previews by hand therefore cannot make a
+    stopped schedule look alive.
+    """
+    now = parse_now(getattr(args, "now", None))
+    head = log_head(store)
+    if read_from is None:
+        read_from = head
+    mode = "apply" if getattr(args, "apply", False) else "preview"
+    previous = read_health() or {}
+    consumed = mode == "apply" and complete
+    cursor = head["seq"] if consumed else int(previous.get("cursor") or 0)
+    last_error = error
+    if last_error is None and mode != "apply":
+        last_error = previous.get("lastError")  # a preview cannot clear an error it did not fix
+    record = {
+        "ts": iso(now),
+        "mode": mode,
+        "readFrom": int(read_from.get("seq") or 0),
+        "cursor": cursor,
+        "logHead": head,
+        "liveAttempts": health_attempts(live),
+        "lastError": last_error,
+        "lastApply": previous.get("lastApply"),
+    }
+    if mode == "apply":
+        record["lastApply"] = {"ts": record["ts"], "readFrom": record["readFrom"],
+                               "cursor": cursor, "logHead": head, "complete": complete}
+    path = health_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, path)
+    return record
+
+
 def short_path(value) -> str:
     text = str(value)
     home = str(Path.home())
@@ -2981,7 +3066,49 @@ def cmd_integration_plan(args, store: Store) -> int:
     return 0
 
 
+def _record_pass_safely(store: Store, args, live: list[dict], error: str | None,
+                        complete: bool = True, read_from: dict | None = None) -> dict | None:
+    """Record the pass, but never let a write failure mask the pass's own outcome."""
+    try:
+        return record_pass(store, args, live, error, complete=complete, read_from=read_from)
+    except Exception as exc:  # noqa: BLE001 — best effort: the pass's own error is the news
+        print(f"warning: health artifact not written: {exc}", file=sys.stderr)
+        return None
+
+
+def _observed_attempts(store: Store) -> list[dict]:
+    """The live attempts, for a pass that died before it could count them itself."""
+    try:
+        return live_attempts(attempt_views([record for _, record in store.read_events()]))
+    except Exception:  # noqa: BLE001 — a crash record is still worth writing without this
+        return []
+
+
 def cmd_tick(args, store: Store) -> int:
+    """One policy pass, recorded whether it finishes or dies.
+
+    The chain tip is taken before any work, so the record can say which events this pass was
+    responsible for. A pass that crashes must still say when it died, why, how much of the log it
+    was holding, and what it had running. Leaving the previous pass's healthy artifact in place is
+    exactly the state that reads as an idle engine.
+    """
+    try:
+        read_from = log_head(store)
+    except Exception:  # noqa: BLE001 — an unreadable log is the pass's news, not the wrapper's
+        read_from = None
+    try:
+        return tick_pass(args, store, read_from=read_from)
+    except WorkError as exc:
+        _record_pass_safely(store, args, _observed_attempts(store), str(exc), complete=False,
+                            read_from=read_from)
+        raise
+    except Exception as exc:  # noqa: BLE001 — the artifact is the diagnosis; nothing escapes it
+        _record_pass_safely(store, args, _observed_attempts(store), f"{type(exc).__name__}: {exc}",
+                            complete=False, read_from=read_from)
+        raise
+
+
+def tick_pass(args, store: Store, read_from: dict | None = None) -> int:
     """One policy pass: what would be claimed, launched or reviewed, and what is stale."""
     now = parse_now(args.now)
     problems = []
@@ -3203,6 +3330,11 @@ def cmd_tick(args, store: Store) -> int:
                 "reviews": [item["task"] for item in launched_reviews],
                 "problems": problems,
             }, sort_keys=True) + "\n")
+
+    # Written before any output branch returns, so the artifact does not depend on `--json`,
+    # `--quiet`, or whether there was anything to print.
+    _record_pass_safely(store, args, live, problems[-1] if problems else None,
+                        read_from=read_from)
 
     if args.json:
         print(json.dumps({"active": active, "limits": limits, "chosen": chosen,
