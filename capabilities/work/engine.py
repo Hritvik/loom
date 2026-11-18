@@ -11,10 +11,12 @@ Run `./loom --help` or see PROTOCOL.md.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime as dt
 import difflib
 import hashlib
+import io
 import json
 import os
 import re
@@ -2231,13 +2233,14 @@ def sweep_approved_reviews(store: Store, now: dt.datetime, agent: str,
             agent=agent, now=iso(now),
         )
         if dry_run:
-            recorded.append({"task": task["id"], "reviewer": answer.get("agent"),
-                             "answer": answer.get("seq"), "would": True})
+            recorded.append({"task": task["id"], "revision": task.get("revision", 0),
+                             "reviewer": answer.get("agent"), "answer": answer.get("seq"),
+                             "would": True})
             continue
         try:
             cmd_transition(review_args, store)
-            recorded.append({"task": task["id"], "reviewer": answer.get("agent"),
-                             "answer": answer.get("seq")})
+            recorded.append({"task": task["id"], "revision": task.get("revision", 0),
+                             "reviewer": answer.get("agent"), "answer": answer.get("seq")})
         except WorkError as exc:
             recorded.append({"task": task["id"], "error": str(exc)})
     return recorded
@@ -2396,6 +2399,439 @@ def apply_review_sweep(store: Store, items: list[dict], args) -> tuple[list[dict
         except WorkError as exc:
             blocked.append({**item, "action": "error", "reason": str(exc)})
     return reissued, blocked
+
+
+# --------------------------------------------------------------------------
+# Derive — one handler per event, shadowed before it is allowed to write
+# --------------------------------------------------------------------------
+#
+# The policy pass used to be a fixed sequence of phases. Each one re-read the registry because the
+# phase before it may have moved it, so the order was load-bearing and a phase that ran twice could
+# act twice. A derive handler owns one event kind instead: it reads the log, derives what that event
+# implies, and applies the derivation keyed by the event it came from. A second run of the same
+# handler therefore finds nothing left to do, and the order the handlers run in cannot change the
+# result — which is what makes the sequence stop mattering.
+#
+# A handler never owns authority. It does not release a claim, take over a claim, take a lease or
+# spawn a process: those are the tick's decisions, taken with an epoch and a lease. What a handler
+# owns is derived state — `reviewed` recorded from an approval, a review request re-issued to the
+# reviewer, and a rework flag set on a task whose reviewer asked for changes. `assert_no_authority`
+# makes that a property of the code rather than a promise in a docstring.
+
+DERIVE_KINDS = ("receipt", "review", "rework")
+
+# The fields each intent is compared on. Two derivations of the same log that agree here agree on
+# everything the handler is allowed to decide; anything else they carry is context for a human.
+INTENT_KEYS = {
+    "receipt": ("task", "revision", "reviewer", "answer"),
+    "review": ("task", "revision", "source", "from"),
+    "rework": ("task", "revision", "request", "answer"),
+}
+
+# Keys that would mean a handler is deciding authority rather than derived state.
+AUTHORITY_KEYS = {"action", "release", "takeover", "ttl", "claim", "lease_expires"}
+
+
+def derive_policy(args) -> dict:
+    """The identities and limits a derivation is allowed to read, from the pass's own arguments."""
+    return {
+        "reviewer": getattr(args, "reviewer_identity", REVIEWER_IDENTITY) or REVIEWER_IDENTITY,
+        "coordinator": getattr(args, "coordinator", REVIEW_COORDINATOR) or REVIEW_COORDINATOR,
+        "humans": HUMAN_IDENTITIES | set(getattr(args, "humans", None) or ()),
+        "known": KNOWN_AGENTS | set(getattr(args, "known_agents", None) or ()),
+    }
+
+
+def event_index(records: list[dict]) -> dict[str, dict]:
+    """One pass over the log: each task's requests, answers, rework flags and its own events."""
+    index: dict[str, dict] = {}
+    for record in records:
+        task_id = record.get("task")
+        if not task_id:
+            continue
+        entry = index.setdefault(task_id, {"asks": {}, "answers": {}, "flags": {},
+                                           "history": []})
+        entry["history"].append(record)
+        kind = record.get("event")
+        if kind == "ask":
+            entry["asks"][int(record.get("seq") or 0)] = record
+        elif kind == "answer":
+            entry["answers"][int(record.get("in_reply_to") or 0)] = record
+        elif kind == "rework":
+            entry["flags"][str(record.get("answer"))] = record
+    return index
+
+
+EMPTY_ENTRY = {"asks": {}, "answers": {}, "flags": {}, "history": []}
+
+
+def indexed_request(task: dict, entry: dict) -> dict:
+    """The last review request for the task's current green revision, from the index."""
+    for seq in sorted(entry["asks"], reverse=True):
+        record = entry["asks"][seq]
+        if (record.get("review_source") and record.get("status") == "green"
+                and record.get("revision") == task.get("revision")):
+            return record
+    return {}
+
+
+def indexed_submission(entry: dict) -> dict:
+    """The last request that carried a source commit, whatever revision it was for."""
+    for seq in sorted(entry["asks"], reverse=True):
+        if entry["asks"][seq].get("review_source"):
+            return entry["asks"][seq]
+    return {}
+
+
+def indexed_green_evidence(entry: dict) -> str | None:
+    """The evidence the last green transition recorded, which a re-issue may reuse."""
+    for record in reversed(entry["history"]):
+        if (record.get("event") == "transition" and record.get("status") == "green"
+                and record.get("evidence")):
+            return record["evidence"]
+    return None
+
+
+@contextlib.contextmanager
+def _quiet():
+    """A handler's outcome is reported by the pass, not by the command it delegates to.
+
+    The handlers reuse `transition` and `ask` so there is exactly one implementation of each write,
+    and those commands print what they did. The pass reports the same thing once; letting both
+    speak would print the receipt twice and put prose in front of `tick --json`.
+    """
+    with contextlib.redirect_stdout(io.StringIO()):
+        yield
+
+
+def assert_no_authority(intent: dict) -> None:
+    """A derived intent may describe state; it may not describe a claim decision."""
+    leftover = AUTHORITY_KEYS & set(intent)
+    if leftover:
+        raise WorkError(
+            f"the {intent.get('kind')!r} handler produced {sorted(leftover)}: a derive handler "
+            "records derived state and never moves a claim")
+
+
+def intent_key(intent: dict) -> tuple:
+    """The comparable identity of an intent: what it derives, not how it was found."""
+    return (intent["kind"],) + tuple(intent.get(key) for key in INTENT_KEYS[intent["kind"]])
+
+
+class DeriveHandler:
+    """One event kind, one derivation from the log, one idempotent application."""
+
+    kind = ""
+    owns = ()
+
+    def derive(self, records: list[dict], registry: dict, policy: dict) -> list[dict]:
+        raise NotImplementedError
+
+    def apply(self, store: Store, intents: list[dict], args) -> dict:
+        written, skipped, refused = [], [], []
+        for intent in intents:
+            assert_no_authority(intent)
+            # Re-read per intent: a handler earlier in the run may have moved this task, and the
+            # registry this pass opened with is not the one the write lands on.
+            registry = store.load()
+            task = next((item for item in registry["tasks"] if item["id"] == intent["task"]), None)
+            if task is None:
+                refused.append({**intent, "error": "task is no longer in the registry"})
+                continue
+            try:
+                outcome = self.apply_one(store, intent, task, args)
+            except WorkError as exc:
+                # The verified paths raise before they write, so a refusal leaves no event behind.
+                refused.append({**intent, "error": str(exc)})
+                continue
+            (skipped if outcome == "skipped" else written).append(intent)
+        return {"kind": self.kind, "applied": written, "skipped": skipped, "refused": refused}
+
+    def apply_one(self, store: Store, intent: dict, task: dict, args) -> str:
+        raise NotImplementedError
+
+    def current(self, task: dict, intent: dict) -> str | None:
+        """Why the intent no longer applies to the task as it stands, or None when it does."""
+        if task.get("status") != "green":
+            return f"{task['id']} is {task.get('status')!r}, not green"
+        if task.get("revision") != intent.get("revision"):
+            return (f"{task['id']} moved to revision {task.get('revision')}; the derivation was "
+                    f"for revision {intent.get('revision')}")
+        return None
+
+
+class ReceiptHandler(DeriveHandler):
+    """Owns the approval: an `answer` that approves a review request becomes `reviewed`.
+
+    The write goes through `cmd_transition`, which is the verified review path: it re-derives the
+    receipt with `verified_review` from the request and the answer in the log, re-reads the commit,
+    and only then records the transition. When that verification refuses, this handler writes
+    nothing at all — the task stays green and the refusal is reported.
+    """
+
+    kind = "receipt"
+    owns = ("answer:approve",)
+
+    def derive(self, records, registry, policy):
+        index = event_index(records)
+        intents = []
+        for task in registry["tasks"]:
+            if task.get("status") != "green":
+                continue
+            entry = index.get(task["id"], EMPTY_ENTRY)
+            request = indexed_request(task, entry)
+            if not request:
+                continue
+            answer = entry["answers"].get(request["seq"])
+            if not answer or answer.get("decision") != "approve":
+                continue
+            intents.append({
+                "kind": self.kind, "task": task["id"], "revision": task.get("revision", 0),
+                "reviewer": answer.get("agent"), "answer": answer["seq"],
+                "request": request["seq"], "source": request.get("review_source"),
+                "evidence": request.get("review_evidence"),
+            })
+        intents.sort(key=lambda item: item["task"])
+        return intents
+
+    def apply_one(self, store, intent, task, args):
+        refusal = self.current(task, intent)
+        if refusal:
+            raise WorkError(refusal)
+        review_args = argparse.Namespace(
+            task=task["id"], revision=task.get("revision", 0), to="reviewed",
+            epoch=claim_epoch(task), reviewer=intent["reviewer"], decision="approve",
+            review_answer=intent["answer"], evidence=intent["evidence"],
+            severity=None, reason=None, needs=None, integrated_source=None,
+            agent=args.coordinator, now=args.now,
+        )
+        # cmd_transition -> verified_review -> commit. The event is written after verification
+        # passes, so a failed verification is a pass that wrote nothing, not a half-applied receipt.
+        with _quiet():
+            cmd_transition(review_args, store)
+        return "applied"
+
+
+class ReviewHandler(DeriveHandler):
+    """Owns the review request: a `green` task whose request went stale gets the ask re-issued.
+
+    A request goes stale when it is addressed to someone the engine does not review for any more —
+    a human, an unknown identity, or a reviewer that never answered and is no longer running. The
+    re-issue is a new `ask` at the same revision and source, so the next derivation for that task
+    finds a current request and has nothing left to do.
+    """
+
+    kind = "review"
+    owns = ("ask:stale",)
+
+    def derive(self, records, registry, policy):
+        index = event_index(records)
+        views = attempt_views(records)
+        live_reviewers = {(item.get("task"), item.get("question")) for item in views.values()
+                          if item.get("role") == "reviewer" and attempt_is_live(item)}
+        intents = []
+        for task in registry["tasks"]:
+            if task.get("status") != "green":
+                continue
+            entry = index.get(task["id"], EMPTY_ENTRY)
+            current = indexed_request(task, entry)
+            if current and entry["answers"].get(current["seq"]):
+                continue  # the receipt and rework handlers own an answered request
+            if current and current.get("to") == policy["reviewer"]:
+                continue  # healthy: the reviewer holds the latest request
+            if current:
+                stale = current
+            else:
+                stale = indexed_submission(entry)
+                if not stale:
+                    continue  # never submitted: nothing to re-issue
+                answer = entry["answers"].get(stale["seq"], {})
+                if answer.get("decision") == "changes requested":
+                    continue  # the rework handler owns it
+                continue  # a source from an older revision is not this revision's work
+            if stale.get("to") in policy["humans"]:
+                continue
+            if stale.get("to") not in policy["known"]:
+                continue
+            if (task["id"], stale["seq"]) in live_reviewers:
+                continue
+            source = stale.get("review_source")
+            evidence = (stale.get("review_evidence") or indexed_green_evidence(entry)
+                        or task.get("evidence"))
+            if not source or not evidence:
+                continue
+            intents.append({
+                "kind": self.kind, "task": task["id"], "revision": task.get("revision", 0),
+                "source": source, "base": stale.get("review_base"), "evidence": evidence,
+                "from": stale["seq"], "addressee": policy["reviewer"],
+            })
+        intents.sort(key=lambda item: item["task"])
+        return intents
+
+    def apply_one(self, store, intent, task, args):
+        refusal = self.current(task, intent)
+        if refusal:
+            raise WorkError(refusal)
+        entry = event_index([record for _, record in store.read_events()]).get(
+            task["id"], EMPTY_ENTRY)
+        current = indexed_request(task, entry)
+        if current and current.get("to") == intent.get("addressee"):
+            return "skipped"  # already re-issued; a second run has nothing to do
+        ask_args = argparse.Namespace(
+            task=task["id"], to=intent["addressee"],
+            question=f"Review request re-issued for {task['id']} at {intent['source'][:12]}",
+            review_source=intent["source"], review_base=intent.get("base"),
+            review_evidence=intent["evidence"], needed_by=None,
+            agent=args.coordinator, now=args.now)
+        with _quiet():
+            cmd_ask(ask_args, store)
+        return "applied"
+
+
+class ReworkHandler(DeriveHandler):
+    """Owns the changes-requested answer: it sets a flag on the task and nothing else.
+
+    The flag is a `rework` event carrying the request and the answer it came from. It records that
+    the work needs another pass; it does not release the claim, take one over, or take a lease. A
+    flag is not authority, and an agent that is still working should not lose its task to a
+    derivation. Clearing the claim stays with `apply_rework`, which the tick runs as a decision
+    with a lease and a reason.
+    """
+
+    kind = "rework"
+    owns = ("answer:changes-requested",)
+
+    def derive(self, records, registry, policy):
+        index = event_index(records)
+        intents = []
+        for task in registry["tasks"]:
+            if task.get("status") != "green":
+                continue
+            entry = index.get(task["id"], EMPTY_ENTRY)
+            request = indexed_request(task, entry)
+            if not request:
+                continue
+            answer = entry["answers"].get(request["seq"])
+            if not answer or answer.get("decision") != "changes requested":
+                continue
+            intents.append({
+                "kind": self.kind, "task": task["id"], "revision": task.get("revision", 0),
+                "request": request["seq"], "answer": answer["seq"],
+                "reviewer": answer.get("agent"), "note": answer.get("note"),
+            })
+        intents.sort(key=lambda item: item["task"])
+        return intents
+
+    def apply_one(self, store, intent, task, args):
+        refusal = self.current(task, intent)
+        if refusal:
+            raise WorkError(refusal)
+        entry = event_index([record for _, record in store.read_events()]).get(
+            task["id"], EMPTY_ENTRY)
+        if str(intent["answer"]) in entry["flags"]:
+            return "skipped"  # already flagged for this answer; a second run changes nothing
+        store.append_event(
+            event="rework", task=task["id"], agent=args.coordinator,
+            revision=task.get("revision", 0), request=intent["request"],
+            answer=intent["answer"], reviewer=intent.get("reviewer"),
+            owner=claim_owner(task), epoch=claim_epoch(task), now=args.now)
+        return "applied"
+
+
+HANDLERS: dict[str, DeriveHandler] = {
+    handler.kind: handler for handler in (ReceiptHandler(), ReviewHandler(), ReworkHandler())
+}
+
+
+def derive_projection(store: Store, registry: dict, policy: dict) -> dict[str, list[dict]]:
+    """What the handlers derive from the log as it stands. Reads; writes nothing."""
+    records = [record for _, record in store.read_events()]
+    projection: dict[str, list[dict]] = {}
+    for kind in DERIVE_KINDS:
+        intents = HANDLERS[kind].derive(records, registry, policy)
+        for intent in intents:
+            assert_no_authority(intent)
+        projection[kind] = intents
+    return projection
+
+
+def tick_projection(store: Store, registry: dict, now: dt.datetime, args) -> dict[str, list[dict]]:
+    """What the tick's own phases derive from the same log, in the shape the handlers produce.
+
+    This is the other half of the shadow comparison: the phases below still hold the decision, and
+    the handlers have to agree with them before they are allowed to write. Only the derived fields
+    are compared — `changes_requested_tasks` also proposes a claim action, and that is authority the
+    handler is forbidden to own.
+    """
+    reviewed = sweep_approved_reviews(store, now, args.coordinator, dry_run=True)
+    reask, _blocked = review_request_sweep(store, registry, now, args)
+    rework = changes_requested_tasks(store, registry, now)
+    return {
+        "receipt": sorted(({"kind": "receipt", "task": item["task"],
+                            "revision": item.get("revision"), "reviewer": item.get("reviewer"),
+                            "answer": item.get("answer")} for item in reviewed),
+                          key=lambda item: item["task"]),
+        "review": sorted(({"kind": "review", "task": item["task"],
+                           "revision": item.get("revision"), "source": item.get("source"),
+                           "from": item.get("from")} for item in reask),
+                         key=lambda item: item["task"]),
+        "rework": sorted(({"kind": "rework", "task": item["task"],
+                           "revision": item.get("revision"), "request": item.get("request"),
+                           "answer": item.get("answer")} for item in rework),
+                         key=lambda item: item["task"]),
+    }
+
+
+def compare_projections(derived: dict, ticked: dict) -> list[str]:
+    """Name every task each derivation disagrees about, in the order a person can act on."""
+    divergences = []
+    for kind in DERIVE_KINDS:
+        left = {intent_key(intent): intent for intent in derived.get(kind) or []}
+        right = {intent_key(intent): intent for intent in ticked.get(kind) or []}
+        for key in sorted(set(left) | set(right)):
+            task = key[1]
+            if key in left and key in right:
+                continue
+            if key in left:
+                divergences.append(f"{kind} {task}: the handler derives it, the tick does not")
+            else:
+                divergences.append(f"{kind} {task}: the tick derives it, the handler does not")
+    return divergences
+
+
+def derive_shadow(store: Store, args) -> dict:
+    """Run the handlers against the tick's phases without writing anything.
+
+    A pass is shadowed: the handlers derive, the tick's own phases derive, and only their agreement
+    earns the handlers the right to write.
+    """
+    now = parse_now(getattr(args, "now", None))
+    registry = store.load()
+    policy = derive_policy(args)
+    derived = derive_projection(store, registry, policy)
+    ticked = tick_projection(store, registry, now, args)
+    return {
+        "equal": not compare_projections(derived, ticked),
+        "divergences": compare_projections(derived, ticked),
+        "handlers": {kind: [dict(intent) for intent in derived[kind]] for kind in DERIVE_KINDS},
+        "tick": {kind: [dict(intent) for intent in ticked[kind]] for kind in DERIVE_KINDS},
+    }
+
+
+def apply_derive_pass(store: Store, args, kinds: tuple[str, ...] | list[str] = DERIVE_KINDS) -> dict:
+    """Run each handler once, in the order given, re-deriving from the log at every step.
+
+    Because each handler re-reads the log and the registry before it writes, and because every
+    write is keyed by the event that caused it, the order of `kinds` cannot change the outcome and
+    running the whole pass again is a no-op.
+    """
+    report: dict[str, dict] = {}
+    for kind in kinds:
+        handler = HANDLERS[kind]
+        records = [record for _, record in store.read_events()]
+        intents = handler.derive(records, store.load(), derive_policy(args))
+        report[kind] = handler.apply(store, intents, args)
+    return report
 
 
 def integration_action(message: str) -> str:
@@ -3114,17 +3550,47 @@ def tick_pass(args, store: Store, read_from: dict | None = None) -> int:
     problems = []
     if args.apply:
         problems = reconcile_launches(store, store.load(), now)
-    reviewed = sweep_approved_reviews(store, now, args.coordinator, dry_run=not args.apply)
+    # Shadow first. The handlers read the log their own way; the phases below read it theirs. They
+    # have to agree before either is allowed to write, because a pass that writes through a
+    # derivation nobody compared is exactly the failure the comparison exists to catch. On a
+    # disagreement the pass says so and keeps using the phases it has always used.
+    shadow = derive_shadow(store, args)
+    handlers_live = not shadow["divergences"]
+    if shadow["divergences"]:
+        problems.append("derive: the handler projection disagrees with the tick ("
+                        + "; ".join(shadow["divergences"][:3])
+                        + "); this pass used the tick's phases")
+    derived: dict[str, dict] = {kind: {"applied": [], "skipped": [], "refused": []}
+                                for kind in DERIVE_KINDS}
+    if args.apply and handlers_live:
+        derived = apply_derive_pass(store, args)
+    # The receipt: an approval becomes `reviewed`, through the verified review path either way. The
+    # handler owns the write when the shadow agreed; the sweep owns it when the shadow did not.
+    if args.apply and handlers_live:
+        reviewed = [{"task": item["task"], "revision": item.get("revision"),
+                     "reviewer": item.get("reviewer"), "answer": item.get("answer")}
+                    for item in derived["receipt"]["applied"]]
+        reviewed += [{"task": item["task"], "error": item["error"]}
+                     for item in derived["receipt"]["refused"]]
+    else:
+        reviewed = sweep_approved_reviews(store, now, args.coordinator, dry_run=not args.apply)
     registry = store.load()
     review_reask, review_blocked = review_request_sweep(store, registry, now, args)
     review_reissued = []
-    if args.apply and review_reask:
+    if args.apply and handlers_live:
+        # The handler already re-issued what the sweep would have; reporting it from the sweep
+        # would print nothing, because the request it would have acted on is current again.
+        review_reissued = list(derived["review"]["applied"])
+        review_blocked = review_blocked + [
+            {"task": item["task"], "action": "refused", "reason": item["error"]}
+            for item in derived["review"]["refused"]]
+    elif args.apply and review_reask:
         review_reissued, review_errors = apply_review_sweep(store, review_reask, args)
         review_blocked.extend(review_errors)
-        if review_reissued:
-            registry = store.load()
     elif not args.apply:
         review_reissued = review_reask
+    if args.apply and review_reissued:
+        registry = store.load()
     rework_items = changes_requested_tasks(store, registry, now)
     rework_queued, rework_held = [], []
     if args.apply and rework_items:
@@ -3133,6 +3599,7 @@ def tick_pass(args, store: Store, read_from: dict | None = None) -> int:
             registry = store.load()
     elif not args.apply:
         rework_held = rework_items
+    rework_flagged = [item["task"] for item in derived["rework"]["applied"]]
     integration_queue, integration_blocked = plan_integration(store, registry, args)
     integrated = []
     if args.apply and not getattr(args, "no_integrate", False) and integration_queue:
@@ -3347,6 +3814,13 @@ def tick_pass(args, store: Store, read_from: dict | None = None) -> int:
                           "reviewReask": review_reask, "reviewReissued": review_reissued,
                           "reviewBlocked": review_blocked, "integrationQueue": integration_queue,
                           "integrated": integrated, "integrationBlocked": integration_blocked,
+                          "deriveShadow": {"equal": handlers_live,
+                                           "divergences": shadow["divergences"]},
+                          "reworkFlagged": rework_flagged,
+                          "deriveSkipped": {kind: [item["task"] for item in derived[kind]["skipped"]]
+                                            for kind in DERIVE_KINDS},
+                          "deriveRefused": {kind: derived[kind]["refused"]
+                                            for kind in DERIVE_KINDS},
                           "problems": problems}, indent=2))
         return 0
     activity = bool(chosen or review_chosen or reviewed or stalled_reviews
@@ -3929,8 +4403,40 @@ def cmd_snapshot(args, store: Store) -> int:
     return 0
 
 
+def derive_check(args, store: Store) -> int:
+    """Shadow the derive handlers against the tick's phases and name every disagreement.
+
+    Read-only by construction: this is the check that earns the handlers the right to write, so it
+    must be able to run on a registry nobody has decided anything about yet. It needs no fold
+    baseline — it compares two readings of the same log, not the log against the registry.
+    """
+    shadow = derive_shadow(store, args)
+    if args.json:
+        print(json.dumps({
+            "equal": shadow["equal"],
+            "divergences": shadow["divergences"],
+            "handlers": shadow["handlers"],
+            "tick": shadow["tick"],
+        }, indent=2, sort_keys=True, default=str))
+        return 0 if shadow["equal"] else 1
+    for kind in DERIVE_KINDS:
+        derived = shadow["handlers"][kind]
+        print(f"derive {kind}: {len(derived)} "
+              + (", ".join(item["task"] for item in derived) or "nothing to do"))
+    if not shadow["equal"]:
+        for line in shadow["divergences"]:
+            print(f"DIVERGED {line}")
+        print("derive: the handler projection disagrees with the tick; the handlers must not write")
+        return 1
+    total = sum(len(shadow["handlers"][kind]) for kind in DERIVE_KINDS)
+    print(f"derive: the handler projection equals the tick projection ({total} intent(s))")
+    return 0
+
+
 def cmd_foldcheck(args, store: Store) -> int:
     """Check the registry against a fold of the log, and name every field that disagrees."""
+    if getattr(args, "derive", False):
+        return derive_check(args, store)
     result = fold_check(store)
     snapshot = result["snapshot"]
     divergences = result["divergences"]
@@ -4769,6 +5275,12 @@ def build_parser() -> argparse.ArgumentParser:
     foldcheck = sub.add_parser(
         "foldcheck", help="check the registry against a fold of the log", parents=[common])
     foldcheck.add_argument("--json", action="store_true")
+    foldcheck.add_argument("--derive", action="store_true",
+                           help="shadow the derive handlers against the tick's phases; read-only")
+    foldcheck.add_argument("--reviewer-identity", default=REVIEWER_IDENTITY)
+    foldcheck.add_argument("--coordinator", default=REVIEW_COORDINATOR)
+    foldcheck.add_argument("--human", action="append", dest="humans")
+    foldcheck.add_argument("--known-agent", action="append", dest="known_agents")
     foldcheck.set_defaults(func=cmd_foldcheck)
 
     rebuild = sub.add_parser(
