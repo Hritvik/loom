@@ -225,7 +225,7 @@ class GraphPageTest(GraphFixture):
     def page(self, **kwargs):
         view, snap = self.build(**kwargs)
         version = server.ReadModel(self.home.db).version()
-        return view, graph_page.page(view, version), snap
+        return view, graph_page.page(view, version, actions=False), snap
 
     def test_the_page_has_a_table_equivalent_and_no_script(self):
         view, page, _ = self.page(focus="demo/W-12")

@@ -445,6 +445,30 @@ class ActionServerTest(unittest.TestCase):
         self.assertEqual([human["identity"] for human in payload["actions"]["humans"]],
                          ["hritvik", "rev"])
 
+    def test_a_task_id_that_ends_in_actions_is_still_readable(self):
+        # A legal task id can end in "/actions", which the panel suffix used to claim first.
+        self.home.add("demo/actions", "ready", ["src/odd"], revision=1, epoch=1)
+        self.home.save()
+        status, payload = self.json("/api/tasks/demo/actions")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["task"]["id"], "demo/actions")
+        self.assertIn("detail", payload)
+        # The panel route still resolves for that task, one suffix deeper.
+        status, payload = self.json("/api/tasks/demo/actions/actions")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["task"], "demo/actions")
+        self.assertIn("panel", payload)
+
+    def test_pages_outside_the_inspector_do_not_claim_the_server_is_read_only(self):
+        # Regression: shell() defaulted to the read-only sentence, so /graph and /operations
+        # asserted that no identity was configured on a server that could act.
+        for path in ("/graph?program=demo", "/operations"):
+            with self.subTest(path=path):
+                status, _, page = self.page(path)
+                self.assertEqual(status, 200)
+                self.assertNotIn("no configured human identity", page)
+                self.assertIn("Task actions run through", page)
+
     def test_the_version_gate_closes_actions_too(self):
         self.stop()
         self.home.drift_engine("store.py")
@@ -499,6 +523,14 @@ class UnconfiguredActionTest(ActionServerTest):
     test_the_version_gate_closes_actions_too = None
     test_health_reports_that_actions_are_configured = None
     test_head_on_a_confirmation_page_has_no_body = None
+    test_pages_outside_the_inspector_do_not_claim_the_server_is_read_only = None
+
+    def test_the_read_only_pages_say_the_server_cannot_act(self):
+        for path in ("/", "/tasks", "/task/demo/A-1", "/graph?program=demo", "/operations"):
+            with self.subTest(path=path):
+                status, _, page = self.page(path)
+                self.assertEqual(status, 200)
+                self.assertIn("no configured human identity", page)
 
     def test_pairing_is_unavailable_and_says_so(self):
         status, _, body = self.page("/pair?token=anything")

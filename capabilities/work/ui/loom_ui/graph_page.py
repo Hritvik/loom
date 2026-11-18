@@ -378,7 +378,7 @@ def _breadcrumbs(view: GraphView) -> str:
     return '<ul class="chips">' + "".join(items) + "</ul>"
 
 
-def page(view: GraphView, version: EngineVersion) -> str:
+def page(view: GraphView, version: EngineVersion, *, actions: bool) -> str:
     if view.mode == "chooser":
         heading = "Dependency graph"
         lede = ("Choose a program, or focus a task, to see what must happen first and what a "
@@ -437,4 +437,4 @@ def page(view: GraphView, version: EngineVersion) -> str:
         "<p>Edges come from the engine's dependency data, not from a copy of it.</p>")
     return shell(title="Loom — dependency graph", current="graph", version=version,
                  body=heading_html, footer=footer, program=view.program,
-                 extra_css=GRAPH_CSS)
+                 actions=actions, extra_css=GRAPH_CSS)

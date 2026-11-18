@@ -370,7 +370,7 @@ class RenderTest(unittest.TestCase):
         detail = control.detail(self.snapshot, self.view, "demo/W-12")
         task_page = pages.task_page(detail, self.view, self.version, self.signals, self.moment)
         ops = operations.collect(self.snapshot, version.inspect())
-        operations_page = templates.operations_page(ops, version.inspect())
+        operations_page = templates.operations_page(ops, version.inspect(), actions=False)
         for name, page in (("control", room_page), ("tasks", tasks_page),
                            ("task", task_page), ("operations", operations_page)):
             with self.subTest(page=name):

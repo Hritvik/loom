@@ -74,7 +74,7 @@ acting as, and which fields Loom requires. Only then is anything sent.
 | Renew lease | `renew` | you hold a live lease and the task is active | lease length |
 | Release claim | `release` | you hold the claim and the task is active | reason |
 | Take over | `takeover` | the lease expired and the lock-delay window has passed | reason, lease length |
-| Move to `<state>` | `transition` | the target is legal from the current state, and you may act | reason, evidence or `blocked_needs`, as the target requires |
+| Move to `<state>` | `transition` | the target is legal from the current state, and you may act | reason, evidence or `needs`, as the target requires |
 | Ask a question | `ask` | always, as the paired identity | who, question, needed-by |
 | Answer question *N* | `answer` | the question is open and addressed to you | decision, note |
 
@@ -299,6 +299,8 @@ schedule and log sources, the graph views against the engine's own closures, the
 empty/stale/partial/unavailable states, the accessibility scaffold on every page, identity and role
 policy, session signing and expiry, CSRF and one-shot form nonces, action gating with an
 engine-parity case per refusal, submission validation (actor fields, unknown fields, bounds,
-patterns), subprocess argument construction, conflict classification, and the action journeys:
-pairing, a successful claim with its audit link, a stale page, a replayed form, a role denial, an
-engine conflict, a timeout, an unconfigured server, and the absence of any operational action.
+patterns), subprocess argument construction, conflict classification, the page footers stating the
+server's actual capability on every page (configured and not), the shadowed `<id>/actions` route,
+and the action journeys: pairing, a successful claim with its audit link, a stale page, a replayed
+form, a role denial, an engine conflict, a timeout, an unconfigured server, and the absence of any
+operational action.

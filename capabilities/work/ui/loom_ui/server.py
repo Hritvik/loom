@@ -222,12 +222,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return self._graph(query, body)
         if path == "/api/tasks":
             return self._tasks(body)
-        if path.startswith("/api/tasks/") and path.rstrip("/").endswith("/actions"):
-            task_id = unquote(path[len("/api/tasks/"):-len("/actions")])
-            return self._task_actions(task_id, body)
         if path.startswith("/api/tasks/"):
-            task_id = unquote(path[len("/api/tasks/"):])
-            return self._task(task_id, body)
+            return self._task_route(path[len("/api/tasks/"):], body)
         if path == "/api/snapshot":
             return self._snapshot(body)
         action = ACTION_PATH.match(path)
@@ -311,7 +307,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         version, snapshot, _view = loaded
         try:
             view = self._graph_view(snapshot, query)
-            page = graph_page.page(view, version)
+            page = graph_page.page(view, version, actions=self.app.policy.configured)
         except Exception:
             return self._crash(body)
         status = 404 if view.mode == "missing" else 200
@@ -356,7 +352,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         version, snapshot, _view = loaded
         try:
             ops = operations.collect(snapshot, version)
-            page = templates.operations_page(ops, version)
+            page = templates.operations_page(ops, version, actions=self.app.policy.configured)
         except Exception:
             return self._crash(body)
         self._html(page, body)
@@ -409,27 +405,33 @@ class RequestHandler(BaseHTTPRequestHandler):
         _version, snapshot, view = loaded
         self._json(200, {"tasks": view.to_dict()["tasks"], "as_of": snapshot.as_of}, body=body)
 
-    def _task(self, task_id: str, body: bool) -> None:
-        loaded = self._load(json_response=True, body=body)
-        if loaded is None:
-            return
-        _version, snapshot, view = loaded
-        found = model.find(view, task_id)
-        if found is None:
-            return self._json(404, {"error": "unknown_task", "message": f"no task {task_id}"},
-                              body=body)
-        detail = self.app.detail(snapshot, view, task_id)
-        self._json(200, {
-            "task": _task_payload(view, found.id),
-            "detail": detail.to_dict(),
-            "as_of": snapshot.as_of,
-        }, body=body)
+    def _task_route(self, rest: str, body: bool) -> None:
+        """``/api/tasks/<id>`` or ``/api/tasks/<id>/actions``, with the exact id winning.
 
-    def _task_actions(self, task_id: str, body: bool) -> None:
+        A legal task id may itself end in ``/actions`` (``demo/actions``), so the suffix route
+        must not claim the path before an existing task of that exact name does. One read
+        settles both, and the panel stays reachable for such a task at ``<id>/actions``.
+        """
         loaded = self._load(json_response=True, body=body)
         if loaded is None:
             return
         _version, snapshot, view = loaded
+        exact = unquote(rest)
+        found = model.find(view, exact)
+        if found is not None:
+            detail = self.app.detail(snapshot, view, found.id)
+            return self._json(200, {
+                "task": _task_payload(view, found.id),
+                "detail": detail.to_dict(),
+                "as_of": snapshot.as_of,
+            }, body=body)
+        suffix = "/actions"
+        if rest.endswith(suffix):
+            return self._task_actions(unquote(rest[:-len(suffix)]), snapshot, view, body)
+        return self._json(404, {"error": "unknown_task", "message": f"no task {exact}"},
+                          body=body)
+
+    def _task_actions(self, task_id: str, snapshot, view, body: bool) -> None:
         detail = self.app.detail(snapshot, view, task_id)
         if detail is None:
             return self._json(404, {"error": "unknown_task", "message": f"no task {task_id}"},

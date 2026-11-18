@@ -283,9 +283,10 @@ def header_shell(current: str, version: EngineVersion, program: str | None = Non
 
 
 def shell(*, title: str, current: str, version: EngineVersion, body: str,
-          footer: str, program: str | None = None, extra_css: str = "",
-          actions: bool = False, actor: str | None = None,
-          roles: tuple[str, ...] = ()) -> str:
+          footer: str, actions: bool, program: str | None = None, extra_css: str = "",
+          actor: str | None = None, roles: tuple[str, ...] = ()) -> str:
+    # ``actions`` is required on purpose: the footer makes a claim about what this server can do,
+    # so every caller has to state the answer rather than inherit one that may be wrong.
     if actions:
         note = ('<p class="note">Task actions run through the <span class="mono">loom</span> '
                 "front door as the identity this session was paired with. The UI keeps no state, "
@@ -732,7 +733,8 @@ def _log(ops: OperationsView) -> str:
                    f"{esc(body)}</pre>")
 
 
-def operations_page(ops: OperationsView, version: EngineVersion) -> str:
+def operations_page(ops: OperationsView, version: EngineVersion, *,
+                    actions: bool) -> str:
     now = datetime.now(timezone.utc)
     body = f"""<h1>Loom — operations</h1>
 <p class="lede">What is running, what ran, and what is stale. Read-only; a refresh runs only
@@ -776,4 +778,4 @@ reads.</p>
         '<span class="mono">loom</span>; refreshing this page runs nothing. Each source keeps '
         "its own sample time, so a fresh page can still show a stale source.</p>")
     return shell(title="Loom — operations", current="operations", version=version, body=body,
-                 footer=footer, extra_css=OPERATIONS_CSS)
+                 footer=footer, actions=actions, extra_css=OPERATIONS_CSS)

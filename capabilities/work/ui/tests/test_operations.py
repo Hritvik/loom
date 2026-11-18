@@ -169,7 +169,7 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual(ops.source("launches").data["not_shown"], 5)
         self.assertIn("25 failed", ops.source("launches").detail)
         self.assertIn("the most recent 20 are listed", ops.source("launches").detail)
-        page = templates.operations_page(ops, version.inspect())
+        page = templates.operations_page(ops, version.inspect(), actions=False)
         self.assertIn("25 recorded; the most recent 20 are listed.", page)
 
     def test_the_attempts_headline_counts_every_record_not_only_the_listed_ones(self):
@@ -185,7 +185,7 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual(ops.source("process").data["attempts_not_shown"], 5)
         self.assertIn("the most recent 25 of 30 attempt(s) are listed",
                       ops.source("process").detail)
-        page = templates.operations_page(ops, version.inspect())
+        page = templates.operations_page(ops, version.inspect(), actions=False)
         self.assertIn("30 recorded; the most recent 25 are listed.", page)
 
     def test_a_run_whose_process_vanished_is_lost(self):
@@ -311,7 +311,7 @@ class OperationsTest(unittest.TestCase):
         _, ops = self.collect()
         self.assertEqual(ops.log.status, "ok")
         self.assertEqual(ops.log.lines[-1], "<script>alert(1)</script>")
-        page = templates.operations_page(ops, version.inspect())
+        page = templates.operations_page(ops, version.inspect(), actions=False)
         self.assertIn("&lt;script&gt;", page)
         self.assertNotIn("<script", page)
 

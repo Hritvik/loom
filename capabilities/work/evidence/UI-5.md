@@ -1,13 +1,16 @@
 # UI-5 — Add authenticated, guarded task actions
 
-Task: `loom-ui/UI-5` · branch `loom/loom-ui-ui-5-a3` · write path `capabilities/work/ui`
+Task: `loom-ui/UI-5` · write path `capabilities/work/ui`
 Goal: supported task actions through the `loom` front door, with server-side human identity
 mapping, CSRF/origin defenses and stale-write handling; no global apply or dispatch.
 
 The slice was implemented and approved at `a289114` (attempt `a1`). It could not integrate because
-the UI directory moved under it when UI-3 and UI-4 landed, so this attempt (`a3`) rebases that
-reviewed commit onto `8cc57c0` and records every conflict resolution in
-[Integration candidate](#integration-candidate-attempt-a3). The action code itself is unchanged.
+the UI directory moved under it when UI-3 and UI-4 landed, so attempt `a3` rebased that reviewed
+commit onto `8cc57c0` and recorded every conflict resolution in
+[Integration candidate](#integration-candidate-attempt-a3). That candidate was reviewed and returned
+changes requested; attempt `a5` (branch `loom/loom-ui-ui-5-a5`) fixes the findings and records them
+in [Rework after review request 2664](#rework-after-review-request-2664-attempt-a5). The action
+implementation itself is unchanged from `a289114`.
 
 ## What was built
 
@@ -24,12 +27,12 @@ argument array, and every success links to the audit event it wrote.
 | `ui/loom_ui/action_pages.py` | the confirmation form and the outcome page |
 | `ui/loom_ui/server.py` | `/pair`, `/api/session`, the confirm route, the POST route, strict Origin for POST, body limits |
 | `ui/loom_ui/pages.py` | an Actions section on the inspector; `#event-<seq>` anchors on history rows |
-| `ui/loom_ui/templates.py` | form styles, the signed-in identity in the shell, an accurate footer, a generic notice page |
+| `ui/loom_ui/templates.py` | form styles, the signed-in identity in the shell, a footer that states what the server can actually do (`actions=` is required, never defaulted), a generic notice page |
 | `ui/loom_ui/control.py` | dropped the `read_only` field from the control payload (the server can act now) |
 | `ui/tests/test_identity.py` | 12 tests |
 | `ui/tests/test_session.py` | 15 tests |
 | `ui/tests/test_actions.py` | 33 tests, including an engine-parity case per refusal and eight real subprocess actions |
-| `ui/tests/test_action_server.py` | 34 tests over pairing, CSRF, Origin, staleness, replay, roles, escaping, and the closed routes |
+| `ui/tests/test_action_server.py` | 38 tests over pairing, CSRF, Origin, staleness, replay, roles, escaping, the closed routes, page-footers and the shadowed `<id>/actions` route |
 | `ui/tests/support.py` | `ActionHome`: one task per guarded-action state, real leases relative to the wall clock |
 
 Suite totals at `a289114`: **213 tests OK** in `ui/tests` (119 before this slice, 94 new); the engine
@@ -93,16 +96,15 @@ OK, 2 skipped**; see [Integration candidate](#integration-candidate-attempt-a3).
 
 ```bash
 cd capabilities/work
-python3 -m unittest discover -s ui/tests -t ui/tests   # 275 tests, OK (post-rebase)
-python3 -m unittest discover -s tests                  # 341 tests, OK (2 skipped, post-rebase)
-python3 validate_work.py                               # 33 board errors, all pre-existing drift
+python3 -m unittest discover -s ui/tests -t ui/tests   # 279 tests, OK (after the a5 rework)
+python3 -m unittest discover -s tests                  # 341 tests, OK (2 skipped)
+python3 validate_work.py                               # 36 board errors, none about this slice
 ```
 
-`validate_work.py` reports 33 errors and 107 warnings, none of them about this slice: 30 are the
-"reviewed source is not in the history of main" rule that LOOM-14 added, reported against board
-receipts in other repositories, and 3 are headings missing from their program files (`loom/LOOM-14`,
-`loom/LOOM-15`, `midas/W-8`). None of those inputs is in this branch — it changes no board file — so
-the same run against `8cc57c0` reports the same set. The only `loom-ui` output is board drift
+`validate_work.py` reports 36 errors and 109 warnings, none of them about this slice: every error
+names a receipt or heading in another program (`midas`, `teach`, `portfolio`, `jarvis`, `ums`, the
+other `loom` tasks), and no `loom-ui` task appears in the error list. The count drifts between runs
+as other boards add receipts, so it is not a stable baseline. The only `loom-ui` output is board drift
 (`registry says claimed, program says planned`), which is expected while the task is claimed rather
 than accepted.
 
@@ -226,3 +228,80 @@ real `loom` subprocess, `http.client` and a session cookie) crossed all four sli
   directory moves again before integration, it will need the same treatment.
 - The limits recorded above (no revocation UI, no review submission from the browser, the
   `ready`-with-expired-claim engine contradiction) are unchanged by the rebase.
+
+## Rework after review request 2664 (attempt a5)
+
+The integration candidate at `4069718` was reviewed and came back **changes requested**. This
+attempt fixes the blocking finding and the two non-blocking nits, and changes nothing else. The
+action implementation, the security boundaries and the four conflict resolutions above are untouched.
+
+### Blocking finding: a footer that asserted the wrong thing
+
+`templates.shell()` defaulted `actions=False`, and the default branch prints *"This server has no
+configured human identity … the UI stays read-only until a human is configured"*. `graph_page.page()`
+and `templates.operations_page()` never passed `actions=`, so on a server started with
+`--human hritvik:owner,implementer` those two pages told the reader the server could not change task
+state while `/`, `/tasks`, `/task/<id>` and `/api/health` reported that it could. It was a merge
+artefact — both pages predate actions — and it landed exactly on the two pages whose reviewed
+boundary is "no controls".
+
+The reviewer offered two fixes; this takes the stricter one:
+
+- `shell()` no longer has a default for `actions`. It is a required keyword argument, so a new page
+  cannot inherit an answer about what the server can do — it has to state one.
+- `graph_page.page(view, version, *, actions)` and `templates.operations_page(ops, version, *,
+  actions)` pass it through, and `server._graph_page` / `server._operations_page` supply
+  `self.app.policy.configured`.
+- `test_action_server.ActionServerTest.test_pages_outside_the_inspector_do_not_claim_the_server_is_read_only`
+  asserts, on a configured server, that `/graph?program=demo` and `/operations` do **not** contain
+  "no configured human identity" and **do** carry the real action contract.
+- `UnconfiguredActionTest.test_the_read_only_pages_say_the_server_cannot_act` asserts the other
+  direction across `/`, `/tasks`, `/task/demo/A-1`, `/graph?program=demo` and `/operations`: each
+  says no identity is configured and none claims that actions run.
+
+### Nit: a task id ending in `/actions`
+
+`/api/tasks/<id>` lost to the panel suffix whenever the id itself ended in `/actions`, because the
+suffix route matched first (`ID_PATTERN` accepts `demo/actions`). `server._task_route` now reads the
+snapshot once and resolves the **exact** id first; the `/actions` suffix is only a fallback. A task
+whose id ends in the suffix still reaches its own panel one segment deeper. Covered by
+`test_a_task_id_that_ends_in_actions_is_still_readable`, which runs configured and unconfigured, and
+by the existing panel/detail tests.
+
+### Nit: the README named the wrong field
+
+The action-field table said `blocked_needs`; the form field and the engine flag are `needs` /
+`--needs` (`actions.FIELDS`). Corrected. `blocked_needs` remains the registry record's own field and
+is still named as such where the control room reads it.
+
+### What was verified
+
+```bash
+cd capabilities/work
+python3 -m unittest discover -s ui/tests -t ui/tests   # 279 OK (was 275; +4, test_action_server 34 -> 38)
+python3 -m unittest discover -s tests                  # 341 OK, 2 skipped
+python3 validate_work.py                               # 36 board errors, none about this slice
+git diff --stat 4069718..HEAD                          # 8 files, capabilities/work/ui + this evidence
+```
+
+A live smoke against a real server over a disposable registry (`support.ActionHome`, a real `loom`
+front door, real HTTP) ran **29/29 checks**:
+
+| Check | Observed |
+|---|---|
+| configured `/`, `/tasks`, `/graph?program=demo`, `/operations` | `200`; none says "no configured human identity"; each states the real action contract |
+| unconfigured `/`, `/tasks`, `/graph?program=demo`, `/operations` | `200`; each says the server cannot act and none claims actions run |
+| `GET /api/tasks/demo/actions` with a task of that exact name | `200`, `task.id = demo/actions`, full detail |
+| `GET /api/tasks/demo/actions/actions` | `200`, the panel for `demo/actions` |
+| `GET /api/tasks/demo/A-1/actions` | `200`, the panel for `demo/A-1` (suffix route still works) |
+| `GET /api/tasks/demo/A-1` | `200`, `task.id = demo/A-1` |
+| `GET /api/tasks/demo/absent/actions` | `404` `unknown_task` |
+
+### Residual risk
+
+- The identity is still shown in the header only on pages that receive it. `/`, `/tasks`, `/graph`
+  and `/operations` do not render "signed in as …", even though they now correctly state whether
+  actions are available. Threading the session into those builders is a follow-up, not a correctness
+  fix; this attempt deliberately left it alone.
+- `shell(actions=...)` is now required, which is a signature change to a shared template helper. Any
+  caller added later must decide; there is no silent default to inherit.
