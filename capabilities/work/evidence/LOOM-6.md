@@ -1,8 +1,9 @@
 # Evidence — LOOM-6 report health as an artifact
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-6-a3`
-Status: green after rework; two review findings fixed (see *Review round 1*)
+Branch: `loom/loom-loom-6-a5`
+Status: green on the integration candidate — the commit containing this file, one evidence-only
+commit on top of main `8cc57c0` (which contains LOOM-9, LOOM-14, UI-3 and UI-4)
 
 ## The problem
 
@@ -96,6 +97,60 @@ reads from 2 and dies: no "never consumed" is printed. `test_events_appended_dur
 covers the honest direction: a pass that claims and launches (three events of its own) and then dies
 reports exactly those three, and `liveAttempts` lists the worker it left behind.
 
+## Integration rework — rebased onto the tree that lands (round 3)
+
+The task has been returned to `ready` twice, for the same object-level reason: an approval is of the
+bytes that land, and the bytes keep moving under it.
+
+- Revision 7 (event 2446): round 2 approved the branch tip `5e40101` (engine.py blob `7547d9c`);
+  LOOM-13, LOOM-8, LOOM-3 and UI-2 landed, so the merge produced `489deb2` with engine.py blob
+  `c7250e2`. Refused, correctly.
+- Revision 11 (event 2617): round 3 approved `489deb2` + an evidence commit (`a90fb61`) against
+  base `0bc7fcc`. Since then **LOOM-9** (`d91ed8d`) rewrote the tick into derive handlers and
+  changed engine.py again, and LOOM-14, UI-3, UI-4 landed on top. The approved blob no longer
+  matched main, so the receipt could not integrate.
+
+**This round is the rebase, nothing else.** The branch was rebased onto main `8cc57c0`. Because
+`489deb2` is already an ancestor of main, the only commit that had to be replayed was the
+evidence-only commit `a90fb61`, which becomes the commit containing this file, whose parent is
+`8cc57c0`. Merging it is a fast-forward: **the tree approved is the tree that lands**.
+
+Nothing in the health change was rewritten for the rebase, and that is checkable rather than
+asserted:
+
+```
+$ git diff --stat 489deb2 HEAD
+ capabilities/work/evidence/LOOM-6.md |  ...
+                                          # this file is the only difference
+$ git diff 489deb2 HEAD -- capabilities/work/loom capabilities/work/tests/test_work.py
+                                          # no output: the CLI and the tests are identical
+$ python3 -c "...ast-extract each health function at 489deb2 and at HEAD, compare..."
+health_path: identical      log_head: identical        read_health: identical
+health_attempts: identical  live_attempts: identical   record_pass: identical
+_record_pass_safely: identical   _observed_attempts: identical   cmd_tick: identical
+```
+
+What did change underneath, and is the reason this round needed more than `git rebase`: LOOM-9
+replaced the tick's fixed phase sequence with derive handlers, so `tick_pass`'s body is different
+at the candidate. The health seam is where it was — `record_pass` is still called once, from the
+same place, *before* any output branch returns:
+
+```
+$ sed -n '3801,3805p' capabilities/work/engine.py
+    # Written before any output branch returns, so the artifact does not depend on `--json`,
+    # `--quiet`, or whether there was anything to print.
+    _record_pass_safely(store, args, live, problems[-1] if problems else None,
+                        read_from=read_from)
+```
+
+`cmd_tick`'s crash wrapper still encloses the whole pass, so a pass that dies inside a derive
+handler is recorded the same way a pass that died inside a phase was.
+
+So the reviewed tree is `8cc57c0` (main) plus this file. What was re-verified **at the candidate**
+rather than assumed from the earlier rounds: the full suite, the validator's current tally, the
+acceptance path end to end, and the crash path — all under *Verification*. The round-1 and round-2
+reproductions below are kept because the code they exercise is byte-identical at the candidate.
+
 ## Acceptance
 
 | Criterion | Proof |
@@ -122,10 +177,62 @@ The dead states, each distinguishable from an idle engine:
 ```bash
 cd capabilities/work
 python3 -m unittest discover -s tests
-# Ran 287 tests in 88s — OK (skipped=2); 11 of them are the health tests in tests/test_work.py
+# at the candidate (main 8cc57c0 + this file): Ran 341 tests in 118s — OK (skipped=2)
+#   The 11 health tests in tests/test_work.py are unchanged since the round-2 approval and all pass.
 python3 validate_work.py
-# FAIL (2 errors, 110 warnings) — see Limits: both errors are other tasks' board headings
+# at the candidate: FAIL (35 errors, 111 warnings) — see Limits: every error is another task's
+#   receipt whose reviewed source is not in its repo's main; none names loom/LOOM-6
 ```
+
+The acceptance path was re-run **at the candidate** in a fresh scratch home (`WORK_DB` and
+`LOOM_HEALTH` under a temporary directory, one ready task, interval 120s), not read off an earlier
+run. Three intervals is 360s and the boundary is exact:
+
+```
+$ loom tick --apply --now 2031-01-01T00:00:00Z --max-implementer 0 --max-reviewer 0
+$ loom health --interval 120 --now 2031-01-01T00:06:00Z      # 360s, exactly three intervals
+health: OK
+  last pass: 2031-01-01T00:00:00Z (apply)
+  dispatch:  2031-01-01T00:00:00Z, 360s ago  read from 2 -> cursor 2 / log head 2  00162c2cb4fa
+  attempts:  0 live
+  error:     none
+exit 0
+$ loom health --interval 120 --now 2031-01-01T00:06:01Z      # 361s
+health: UNHEALTHY
+  ...
+  PROBLEM    the last applying pass was 361s ago; stale after 360s (3 x 120s interval)
+exit 1
+$ loom tick --now 2031-01-01T00:09:00Z                       # preview, nine minutes after the dispatch
+$ loom health --interval 120 --now 2031-01-01T00:09:05Z
+health: UNHEALTHY
+  last pass: 2031-01-01T00:09:00Z (preview)
+  dispatch:  2031-01-01T00:00:00Z, 545s ago  read from 2 -> cursor 2 / log head 2  00162c2cb4fa
+  PROBLEM    the last applying pass was 545s ago; stale after 360s (3 x 120s interval)
+exit 1
+```
+
+The crash path was re-run at the candidate too, because LOOM-9 moved the pass body around it: an
+applying pass pointed at a decisions path that is a directory (the last thing before the record)
+dies, is recorded `complete: false` with the cursor unmoved and the error text, and the artifact
+keeps every field the acceptance criterion names:
+
+```
+$ LOOM_TICK_DECISIONS=<tmp>/broken loom tick --apply --max-implementer 0 --max-reviewer 0 ...
+IsADirectoryError: [Errno 21] Is a directory: '<tmp>/broken'
+$ loom health --interval 120 --now 2031-01-01T00:20:10Z
+health: UNHEALTHY
+  last pass: 2031-01-01T00:20:00Z (apply)
+  dispatch:  2031-01-01T00:20:00Z, 10s ago  read from 2 -> cursor 2 / log head 2  00162c2cb4fa
+  attempts:  0 live
+  error:     IsADirectoryError: [Errno 21] Is a directory: '<tmp>/broken'
+  PROBLEM    the last applying pass did not finish: IsADirectoryError: ...
+exit 1
+  # health.json: mode=apply, ts=00:20:00Z, cursor=2, readFrom=2,
+  #              lastApply.complete=false, lastApply.cursor=2, lastError set
+```
+
+The reproductions below are the round-1 ones, run on the branch tree. They are kept because the
+health code they exercise is byte-identical at the candidate (see *Integration rework*).
 
 A scratch work home, so the demonstration does not touch the live registry or the live artifact
 (`loom init`, one ready task, one applying pass at 2031-01-01T00:00:00Z, interval 120s):
@@ -248,11 +355,15 @@ exit 1
 
 ## Limits
 
-- **The validator's two errors are not this change's.** `python3 validate_work.py` against the live
-  registry reports `midas/W-8: heading W-8 missing from midas.program` and `loom/LOOM-13: heading
-  LOOM-13 missing from loom.program` (LOOM-13 is in review in another worktree). The diff touches no
-  board, packet or heading; it is `engine.py`, `loom`, `tests/` and this file. All 110 warnings are
-  the same pre-existing board drift.
+- **The validator's errors are not this change's.** `python3 validate_work.py` against the live
+  registry at the candidate reports `FAIL (35 errors, 111 warnings)`. Every error is the LOOM-14
+  check firing on another task's receipt — `reviewed source <hash> is not in the history of
+  refs/heads/main` for uds, uds-client, modelswitch, midas, teach and LOOM-15 — i.e. shared
+  registry state from tasks in other worktrees, not anything this diff writes. The check is new in
+  this same main: LOOM-14 landed it, and it is the check that refused LOOM-6 at revision 11. It
+  names `loom/LOOM-6` once this candidate is reviewed but not yet integrated, which is what
+  reviewing the integration candidate is for. None of the 35 errors names `loom/LOOM-6` now. The
+  diff touches no board, packet or heading; it is `engine.py`, `loom`, `tests/` and this file.
 - **The interval is read from `loom.json`, not from launchd.** `loom schedule install` derives the
   plist from the same config, so they agree when installed that way; a hand-edited plist would make
   `health`'s three-interval threshold disagree with the real schedule.
