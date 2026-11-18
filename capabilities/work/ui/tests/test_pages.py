@@ -288,7 +288,7 @@ class AccessibilityTest(unittest.TestCase):
             connection.close()
 
     def test_every_page_has_landmarks_a_skip_link_and_one_h1(self):
-        for path in ("/", "/tasks", "/task/demo/W-1"):
+        for path in ("/", "/tasks", "/task/demo/W-1", "/operations"):
             with self.subTest(path=path):
                 body = self.body(path)
                 self.assertEqual(body.count("<h1"), 1)
@@ -300,7 +300,7 @@ class AccessibilityTest(unittest.TestCase):
                 self.assertIn('lang="en"', body)
 
     def test_tables_are_labelled_and_scroll_containers_are_focusable(self):
-        for path in ("/", "/tasks", "/task/demo/W-13"):
+        for path in ("/", "/tasks", "/task/demo/W-13", "/operations"):
             with self.subTest(path=path):
                 body = self.body(path)
                 self.assertIn("<caption>", body)

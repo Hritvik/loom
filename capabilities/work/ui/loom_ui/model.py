@@ -139,6 +139,28 @@ def claim_view(task: dict, now: datetime) -> ClaimView | None:
     )
 
 
+def attempt_start_grace_expired(item: dict, now: datetime, grace) -> bool:
+    """Whether an attempt has had the engine's whole start grace to attach a process.
+
+    A claim opens the attempt in ``starting``; the spawn attaches the process with a ``launch``.
+    ``engine.reconcile_launches`` gives that hand-off ``engine.ATTEMPT_START_GRACE`` before it reaps
+    the attempt, so inside the window a pid-less attempt is a spawn in flight, not an unreadable
+    run. A start time that cannot be read counts as expired: nothing proves the attempt is still in
+    the window, and the reaper treats an unreadable age the same way.
+
+    This is one predicate so that every surface which reports on attempts (the process capacity
+    line, the failed/stale/lost launch record) agrees about the same attempt at the same instant.
+    """
+    started = item.get("started_at") or item.get("opened_at") or item.get("ts")
+    try:
+        opened = store.parse_time(started) if started else None
+    except (TypeError, ValueError):
+        opened = None
+    if opened is None:
+        return True
+    return (now - opened).total_seconds() > grace.total_seconds()
+
+
 def claimability(registry: dict, task: dict, now: datetime) -> ClaimabilityView:
     reasons: list[str] = []
     blockers: list[BlockerView] = []

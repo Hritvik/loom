@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import ControlHome, DIGEST_A, SOURCE_B, T0  # noqa: E402
 
 import engine  # noqa: E402
-from loom_ui import control, model, pages, provenance, snapshot, templates, version  # noqa: E402
+from loom_ui import control, model, operations, pages, provenance, snapshot, templates, version  # noqa: E402
 
 
 class _Log:
@@ -370,8 +370,10 @@ class RenderTest(unittest.TestCase):
                                       self.moment)
         detail = control.detail(self.snapshot, self.view, "demo/W-12")
         task_page = pages.task_page(detail, self.view, self.version, self.signals, self.moment)
+        ops = operations.collect(self.snapshot, version.inspect())
+        operations_page = templates.operations_page(ops, version.inspect())
         for name, page in (("control", room_page), ("tasks", tasks_page),
-                           ("task", task_page)):
+                           ("task", task_page), ("operations", operations_page)):
             with self.subTest(page=name):
                 self.assertEqual(page.count("<h1"), 1)
                 self.assertIn('class="skip" href="#main"', page)

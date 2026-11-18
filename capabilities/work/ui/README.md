@@ -1,8 +1,9 @@
-# Loom UI — owner control room, task inspector and dependency graph
+# Loom UI — owner control room, task inspector, dependency graph and operations
 
 A local, loopback-only, read-only view of the work registry. UI-1 built the app shell, version
 gate, consistent read model and per-source provenance; UI-2 added the owner control room, the task
-index and the task inspector; this branch adds the UI-3 dependency graph on top of both. It has
+index and the task inspector; UI-3 adds the dependency graph on top of both; this branch adds the
+read-only operations view. It has
 **no** mutation, dispatch or policy route — those are later, separately reviewed slices.
 
 ## Run
@@ -67,6 +68,7 @@ The inspector shows, as **separate** facts:
 | One snapshot | registry documents, edges, claims and all events are read inside one `BEGIN DEFERRED` transaction on a `mode=ro` connection |
 | Shared rules | claimability, dependencies, path conflicts, review currency, receipts and attempts come from `engine`, not a copy |
 | Graph parity | every drawn graph edge comes from `engine.task_edges`; the graph tests compare the view to the engine's own closures |
+| No controls | the operations view reads a recorded tick, launchd and the tick log; there is no apply, dispatch, schedule start/stop, promote, rollback or reanchor route |
 | Fail closed | a version mismatch or drifted release returns `503` and explains why; an unreadable registry returns a distinct `503`; a render failure returns `500` with no partial page |
 | No script | the shell is server-rendered; every value is escaped and the CSP forbids everything but inline style |
 | No file serving | evidence paths are shown, never served — there is no path-traversal surface |
@@ -94,12 +96,14 @@ no colour perception: state, claimability and queue are all spelled out.
 |---|---|
 | `GET /` | the owner control room (`?program=` filters) |
 | `GET /graph?program=<program>`, `GET /graph?task=<id>` | program-scoped dependency graph, or a focus on one task's upstream/downstream paths, with a complete table equivalent |
+| `GET /operations` | the rendered operations view |
 | `GET /tasks` | every task (`?program=` filters) |
 | `GET /task/<id>` | the task inspector; `404` HTML when unknown |
 | `GET /api/health` | gate state; `503` when closed |
 | `GET /api/version` | front door, release commit, digests, verdict |
 | `GET /api/control` | the queues and rows as JSON (`?program=` filters) |
 | `GET /api/graph?program=<program>`, `GET /api/graph?task=<id>` | the same graph view as JSON |
+| `GET /api/operations` | attempts, capacity, leases, tick, schedule, release and log health |
 | `GET /api/tasks`, `GET /api/tasks/<id>` | task views; the single-task form adds `detail` (review, receipt, questions, attempts, events, evidence, dependencies) |
 | `GET /api/boards` | boards with task counts |
 | `GET /api/provenance` | source signals only |
@@ -152,6 +156,35 @@ Six sources are sampled independently, each with its own `as_of` and status (`ok
 
 They are never merged into one timestamp. Two sources sampled a second apart are still two samples.
 
+## Operations
+
+`/operations` explains what is running and what is stale without running anything:
+
+| Fact | Derived from | Front-door parity |
+|---|---|---|
+| Capacity | `engine.attempt_views` + `engine.live_attempts`, limits from `loom.load_config` | `loom tick --json` `active` / `limits` |
+| Worker attempts | the same attempt fold; a live pid is probed, not inferred from a launch state | `loom workers` |
+| Expired leases | the predicate in `engine.cmd_tick`, from the same snapshot | `loom tick --json` `expired` |
+| Stuck attempts | live attempts older than the configured `worker.stuck_after` | `loom tick` "Stuck attempts" |
+| Failed / stale / lost launches | terminal `failed` attempts; `starting` attempts past `ATTEMPT_START_GRACE`; open attempts whose process is gone | the attempt record |
+| Last tick pass | the last line of `~/.local/state/loom/tick.decisions.jsonl` (or `$LOOM_TICK_DECISIONS`) | the recorded `tick --apply` pass |
+| Schedule | the launch agent plist plus `launchctl list`; the interval is labelled `plist`, `config` or `default` | `loom schedule status` |
+| Release | `engine.release`, the running root and a recomputed tree digest | the UI gate verdict; `loom deploy status` additionally compares development HEAD, a different question |
+| Tick log | a bounded tail of `~/.local/state/loom/tick.log` | `loom schedule status` log tail |
+
+Every fact above belongs to one of seven independently sampled sources: `database`, `process`,
+`launches`, `tick`, `scheduler`, `release` and `logs`. Each has its own `as_of` and status. The start
+grace is one predicate (`model.attempt_start_grace_expired`): a claim inside `ATTEMPT_START_GRACE` is
+healthy in both `process` and `launches`, and only past it is the missing process a degradation.
+Failure rows are displayed at most `MAX_FAILURES` at a time but counted in full (`failures_total`);
+attempt rows likewise display at most `MAX_ATTEMPTS` and are counted in full (`attempts_total`), so
+a bounded list never reads as the whole record.
+A tick record older than three schedule intervals is shown degraded, never as current health; when
+no plist supplies the interval, the view says which of `plist`, `config` or the installer default the
+threshold rests on. A missing log or decision record is `unavailable`, not an empty success. The UI
+never executes `tick`, starts or stops a job, promotes or rolls back a release, or dispatches a
+worker. A page refresh runs only reads.
+
 ## Tests
 
 ```bash
@@ -161,6 +194,8 @@ python3 -m unittest discover -s ui/tests -t ui/tests -v
 
 The suite covers read-model parity with `store.SqliteStore.load`, claimability agreement with the
 engine's own checks, queue assignment (one bucket per task), owner identity routing, review and
-receipt currency, the version-gate verdicts, independent provenance sampling, the HTTP boundaries
-(loopback Host, read-only methods, escaping), the empty/stale/partial/unavailable states, and the
-accessibility scaffold on every page.
+receipt currency, the version-gate verdicts, independent provenance sampling, operations parity with
+`loom tick --json` for the same `--now`, failed/stale/lost launches, tick-record freshness, the
+schedule and log sources, the HTTP boundaries (loopback Host, read-only methods, escaping, no
+control surface on `/operations`), the empty/stale/partial/unavailable states, and the accessibility
+scaffold on every page.
