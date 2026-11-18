@@ -1,7 +1,7 @@
 # Evidence — LOOM-12 make evidence claims executable
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-12-a5`, rebased onto the current `main`; the registry ask binds the full
+Branch: `loom/loom-loom-12-a7`, rebased onto `main` at `8cc57c0`; the registry ask binds the full
 commit, and this branch is the integration candidate rather than a pre-merge branch.
 
 ## What changed
@@ -114,14 +114,29 @@ path. That hazard is stated in Limits with the two ways out; it is a property of
 tree-wide number in a file other trees merge into, not a defect in the checker, which is why the
 checker refused to let it pass.
 
+## Rework after integration (revision 14)
+
+Approved at revision 13 against `489deb2`, and the coordinator could not integrate it: `engine.py`
+has changed under LOOM-9 since the review, so the reviewed commit is not an ancestor of `main` and
+the receipt cannot integrate as reviewed (the case LOOM-14's validator now names before a merge is
+spent). The code is unchanged.
+
+This revision is that rebase and nothing else. The branch is now `8cc57c0` (LOOM-14, UI-3 and UI-4)
+plus the three commits of this task; the rebase was clean, no test in `tests/` was touched, and the
+diff against the reviewed tree is this file. Both count spans moved again — 380 to
+`<!-- loom:tests.count -->393<!-- /loom -->` tests and 16 to
+`<!-- loom:tracked.count:tests -->17<!-- /loom -->` files — which is the third tree this claim has
+been true of, and the argument for option (b) in Limits getting stronger rather than weaker. The
+sweep span is still 0.
+
 ## This file's own claims
 
 Each row below is machine-checked, and the check is the suite:
 
 | Claim | Marker | What it asserts |
 |---|---|---|
-| Suite size | `<!-- loom:tests.count -->380<!-- /loom -->` | the tests `unittest` collects under `tests/` |
-| Test files | `<!-- loom:tracked.count:tests -->16<!-- /loom -->` | files in the git index under `tests/` |
+| Suite size | `<!-- loom:tests.count -->393<!-- /loom -->` | the tests `unittest` collects under `tests/` |
+| Test files | `<!-- loom:tracked.count:tests -->17<!-- /loom -->` | files in the git index under `tests/` |
 | Boundary sweep | `<!-- loom:sweep.boundary-tree -->0<!-- /loom -->` | tracked files carrying an absolute home path or a personal mailbox |
 
 Everything else in this file is prose. That is the honest split the template states: a sentence
@@ -152,6 +167,10 @@ FAILED (failures=2)
 
 Two tests fail: the guard, and the fresh-clone guard that runs it in a subprocess. Both name the
 line, the recorded value and the derived one. (The line numbers are the ones that run printed.)
+
+That transcript is a quotation of the run that produced this mechanism, kept because it is the
+red-then-green proof: 327 and 328 are that tree's counts and 52 is that tree's evidence-test count,
+not this file's. The live numbers are the spans in the table above, and the suite settles them.
 
 Refresh rewrites the span and the same command passes:
 
@@ -193,17 +212,24 @@ claimed here — see Limits.
   choice the author makes, and the template states the choice; it cannot make the choice for them.
 - **A suite-size claim belongs to one tree, and this one has already cost a merge.** The first
   integration attempt was reverted because the two tree-wide counts here were stale in the merged
-  tree, not because anything in the diff was wrong. The same thing will happen again: the next
-  branch that adds a test under `capabilities/work/tests` changes both counts, the guard turns
-  main red, and that branch cannot refresh this file because `evidence/LOOM-12.md` is not in its
-  write path. There are two ways out and this submission takes neither, because both need a
-  decision that is not a worker's: refresh this file as part of integrating any branch that moves
-  the counts, which means the integration pass would have to run the refresh or refuse a candidate
-  whose evidence is stale (a change to `engine.py`'s integration path, not made here); or drop the
+  tree, not because anything in the diff was wrong. The second was refused before a merge because
+  the reviewed commit no longer reached `main` at all (LOOM-9 landed under it); refreshing the
+  counts twice is what this file has cost so far. The hazard is permanent and structural: the next
+  branch that adds a test under `capabilities/work/tests` changes both counts, the guard turns main
+  red, and that branch cannot refresh this file because `evidence/LOOM-12.md` is not in its write
+  path. There are two ways out and this submission takes neither, because both need a decision that
+  is not a worker's: refresh this file as part of integrating any branch that moves the counts,
+  which means the integration pass would have to run the refresh or refuse a candidate whose
+  evidence is stale (a change to `engine.py`'s integration path, not made here); or drop the
   tree-wide counts from committed evidence and keep them for interactive use, which is what
   LOOM-2's evidence does and would leave only the sweep span, a claim about a property that does
   not move when an unrelated test lands. What is proved either way is the mechanism: a stale value
   fails, loudly, and refresh is one command.
+  The remedy that *is* in place, and is not this task's: since LOOM-14 the validator names a
+  reviewed source that is not an ancestor of the integration ref before a merge is spent, so a
+  candidate rebased onto `main` and merged forward as the same commit keeps the counts true. What
+  no check covers is `main` moving between the review and the merge; that stays a coordinating
+  responsibility.
 - **The validator is deliberately not claimed here.** `validate_work.py` validates shared registry
   state, so its verdict is a property of the machine: on this tree it fails for boards outside this
   task's write path, and that set changes under other boards' edits rather than under this diff. A
