@@ -4831,10 +4831,129 @@ def remove_board(args, store: Store, registry: dict) -> int:
     if entry is None:
         raise WorkError(f"unknown board {args.board}")
     if any(task.get("board") == args.board for task in registry["tasks"]):
-        raise WorkError(f"board {args.board} still has tasks; move or delete them first")
+        raise WorkError(
+            f"board {args.board} still has tasks; retire them first with "
+            f"`loom delete --board {args.board} --reason ...`")
     registry["boards"].remove(entry)
     store.commit(event="board", agent=agent, action="remove", board=args.board, now=args.now)
     print(f"removed board {args.board}")
+    return 0
+
+
+def tombstone_paths(task: dict, board: dict | None) -> tuple[list[str], list[str]]:
+    """The files a human should remove by hand, split into evidence and body documents.
+
+    Deletion is a registry event: the engine never touches a file, because an evidence file and a
+    program document are content, not state. It prints the paths instead.
+    """
+    evidence: list[str] = []
+    value = str(task.get("evidence") or "").strip()
+    if value:
+        repo = Path(str(task.get("owner_repo") or "")).expanduser()
+        candidate = Path(value)
+        evidence.append(str(candidate if candidate.is_absolute() else repo / candidate))
+    bodies: list[str] = []
+    if board:
+        path = Path(str(board.get("repo") or "")).expanduser() / str(board.get("path") or "")
+        bodies.append(str(path))
+    return evidence, [path for path in bodies if path not in evidence]
+
+
+def delete_guard(registry: dict, doomed: list[dict], now: dt.datetime, label: str) -> None:
+    """Refuse a deletion that would strand other work or steal a live lease."""
+    doomed_ids = {task["id"] for task in doomed}
+    problems: list[str] = []
+    held = [f"{task['id']} ({claim_owner(task)})" for task in doomed if active_claim(task, now)]
+    if held:
+        problems.append("live claim held by " + ", ".join(held))
+    index = dependents_index(registry)
+    stranded = sorted({dependent for task in doomed
+                       for dependent in index.get(task["id"], [])} - doomed_ids)
+    if stranded:
+        problems.append("dependents not also retired: " + ", ".join(stranded))
+    if problems:
+        raise WorkError(f"refusing to delete {label}: " + "; ".join(problems))
+
+
+def retire_documents(registry: dict, doomed_ids: set[str]) -> None:
+    """Drop the registry documents a tombstone removes, and everything that pointed at them."""
+    registry["tasks"] = [task for task in registry["tasks"] if task["id"] not in doomed_ids]
+    registry["edges"] = [edge for edge in registry.get("edges", [])
+                         if edge["from"] not in doomed_ids and edge["to"] not in doomed_ids]
+    registry["claims"] = [claim for claim in registry.get("claims", [])
+                          if claim.get("task") not in doomed_ids]
+
+
+def cmd_delete(args, store: Store) -> int:
+    """Retire a task, or every task on a board, with a recorded tombstone.
+
+    Deleting is an event, not row surgery: the registry drops the documents and the event carries
+    the deletion in its `state_delta`, so `loom foldcheck` still folds the log to the registry and
+    the hash chain is untouched. The event records the agent, the reason and what was deleted, but
+    no `status`: a tombstone is not a state assertion, it is the absence of the task.
+    """
+    agent = require_agent(args)
+    if bool(args.task) == bool(args.board):
+        raise WorkError("delete takes exactly one of <task> or --board")
+    reason = (args.reason or "").strip()
+    if not reason:
+        raise WorkError("delete requires --reason; a tombstone nobody can explain is not a record")
+    registry = store.load()
+    now = parse_now(args.now)
+    board: dict | None = None
+    exiting_board = False
+    if args.board:
+        board = find_board(registry, args.board)
+        doomed = [task for task in registry["tasks"] if task.get("board") == board["id"]]
+        if not doomed:
+            raise WorkError(
+                f"board {board['id']} has no tasks; remove the board with "
+                f"`loom board remove --board {board['id']}`")
+        exiting_board = True
+        label = f"board {board['id']}"
+    else:
+        task = find_task(registry, args.task)
+        doomed = [task]
+        board = next((entry for entry in registry["boards"]
+                      if entry["id"] == task.get("board")), None)
+        label = task["id"]
+    delete_guard(registry, doomed, now, label)
+    doomed_ids = {task["id"] for task in doomed}
+    evidence: list[str] = []
+    bodies: list[str] = []
+    for task in doomed:
+        task_evidence, task_bodies = tombstone_paths(task, board)
+        evidence.extend(path for path in task_evidence if path not in evidence)
+        bodies.extend(path for path in task_bodies if path not in bodies and path not in evidence)
+    fields: dict = {
+        "event": "delete",
+        "agent": agent,
+        "reason": reason,
+        # `tasks` is the uniform tombstone list for both shapes; `task` keeps a single delete
+        # addressable from `loom events --task`.
+        "tasks": sorted(doomed_ids),
+        "prior_status": {task["id"]: task.get("status") for task in doomed},
+        "kept_evidence": evidence,
+        "kept_bodies": bodies,
+        "count": len(doomed_ids),
+        "now": args.now,
+    }
+    if exiting_board:
+        fields["deleted_board"] = board["id"] if board else args.board
+    else:
+        fields["task"] = doomed[0]["id"]
+        fields["board"] = doomed[0].get("board")
+    retire_documents(registry, doomed_ids)
+    store.commit(**fields)
+    print(f"deleted {label} ({len(doomed_ids)} task{'s' if len(doomed_ids) != 1 else ''})")
+    for path in evidence:
+        print(f"  evidence kept: {path}")
+    for path in bodies:
+        print(f"  bodies kept:   {path}")
+    if evidence or bodies:
+        print("  files are never removed for you; delete them by hand")
+    if exiting_board:
+        print(f"  next: loom board remove --board {args.board} --agent {agent}")
     return 0
 
 
@@ -5639,7 +5758,7 @@ ENGINE_COMMANDS = {
     "create", "list", "show", "attempts", "claim", "renew", "release", "takeover", "transition",
     "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
     "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
-    "init", "integration-plan", "snapshot", "foldcheck", "rebuild",
+    "init", "integration-plan", "snapshot", "foldcheck", "rebuild", "delete",
 }
 
 
@@ -5797,6 +5916,13 @@ def build_parser() -> argparse.ArgumentParser:
     board.add_argument("--program", help="namespace for `board import` (e.g. alpha)")
     board.add_argument("--check", action="store_true")
     board.set_defaults(func=cmd_board)
+
+    delete = sub.add_parser(
+        "delete", help="retire a task or a board's work, with a tombstone event", parents=[common])
+    delete.add_argument("task", nargs="?", help="task to retire")
+    delete.add_argument("--board", help="retire every task on this board")
+    delete.add_argument("--reason", required=True, help="why the work is being retired")
+    delete.set_defaults(func=cmd_delete)
 
     reconcile = sub.add_parser("reconcile", help="compare or adopt board packet statuses", parents=[common])
     reconcile.add_argument("--board", required=True)
