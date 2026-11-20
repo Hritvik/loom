@@ -1,7 +1,7 @@
 # Evidence — loom-ui/UI-7 decide promotion and v1 operational readiness
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-ui-ui-7-a3`
+Branch: `loom/loom-ui-ui-7-a5`
 Source: the review request binds the full commit; this branch is the submitted revision.
 
 Goal: put the v1 acceptance decision in front of the owner with the evidence, the supported
@@ -46,6 +46,28 @@ longer calls a paragraph rewrite "two lines".
 
 No code or test changed in the rework. The verification below is a fresh run on this branch, not a
 carried-over result.
+
+## Rework after review 3173
+
+Two required corrections, both in `READINESS.md`; no code, test or other document changed.
+
+1. **Runbook step 2 denied a route that exists.** The sentence said that with no `--human` and no
+   identity file "no action route exists". The route exists and refuses: `server.py` answers `403`
+   with *Actions are disabled* for any id in `ENGINE_VERBS`, and
+   `test_action_server.py::test_every_action_route_is_closed` drives
+   `/task/demo/A-1/action/claim` and asserts the `403` on both `GET` and `POST`. The step now says
+   the routes are present and answer `403` with nothing submitted, and names the source and the test
+   without overstating it: the test drives one route, the code refuses every id. §3's Read path row —
+   the claim the wrong sentence contradicted — was left exactly as it was, per the review's
+   instruction not to weaken a correct claim to match a wrong one.
+2. **The outside-v1 list omitted store-writing commands.** It named twelve entries and left out
+   `rebuild --apply`, `genesis`, `init`, `integration-plan --out`, `snapshot`, `export --out` and
+   `graph --out`, any of which a reader could have inferred was offered. It is completed rather than
+   marked illustrative, because this row is the part of the record that is supposed to leave nothing
+   to silence: it now lists every command that writes and is not one of the seven, grouped as store,
+   artifact and operational, and states separately that the read-only commands have no route because
+   the UI reads the store in process (`ui/loom_ui/snapshot.py` opens the database directly) instead
+   of shelling out to them.
 
 ## Verification
 
