@@ -292,7 +292,10 @@ python3 -m unittest ui.tests.test_verification -v   # the UI-6 acceptance matrix
 ```
 
 [`VERIFICATION.md`](VERIFICATION.md) is the acceptance record: one row per UI-6 dimension, the
-named check behind it, the limits of the check, and the owner decisions still open for UI-7.
+named check behind it, and the limits of the check. [`READINESS.md`](READINESS.md) is the v1
+decision record: a verdict per acceptance criterion, the operating envelope this version claims, the
+owner decisions with a recommendation, and the promotion package. It is a request for an owner
+decision, not an acceptance.
 
 The suite covers read-model parity with `store.SqliteStore.load`, claimability agreement with the
 engine's own checks, queue assignment (one bucket per task), owner identity routing, review and
