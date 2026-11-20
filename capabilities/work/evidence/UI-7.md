@@ -62,7 +62,9 @@ Two required corrections, both in `READINESS.md`; no code, test or other documen
    instruction not to weaken a correct claim to match a wrong one.
 2. **The outside-v1 list omitted store-writing commands.** It named twelve entries and left out
    `rebuild --apply`, `genesis`, `init`, `integration-plan --out`, `snapshot`, `export --out` and
-   `graph --out`, any of which a reader could have inferred was offered. It is completed rather than
+   `graph --format html`, any of which a reader could have inferred was offered. `graph` is split
+   correctly: `--format html` writes a file (to `--out` or `task-graph.html`), while text, mermaid
+   and dot print to stdout and are listed with the read-only commands. It is completed rather than
    marked illustrative, because this row is the part of the record that is supposed to leave nothing
    to silence: it now lists every command that writes and is not one of the seven, grouped as store,
    artifact and operational, and states separately that the read-only commands have no route because
