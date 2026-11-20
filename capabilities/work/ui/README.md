@@ -288,7 +288,11 @@ worker. A page refresh runs only reads.
 ```bash
 cd capabilities/work
 python3 -m unittest discover -s ui/tests -t ui/tests -v
+python3 -m unittest ui.tests.test_verification -v   # the UI-6 acceptance matrix
 ```
+
+[`VERIFICATION.md`](VERIFICATION.md) is the acceptance record: one row per UI-6 dimension, the
+named check behind it, the limits of the check, and the owner decisions still open for UI-7.
 
 The suite covers read-model parity with `store.SqliteStore.load`, claimability agreement with the
 engine's own checks, queue assignment (one bucket per task), owner identity routing, review and
