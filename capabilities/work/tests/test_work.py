@@ -875,6 +875,63 @@ class WorkCLITest(unittest.TestCase):
                     "--agent", "agent-a", "--now", T0)
         self.assertEqual(self.ws.task_record("demo/W-1")["status"], "integrated")
 
+    def test_integration_refuses_a_receipt_that_skips_the_branch(self):
+        # The receipt is computed from a base the worker chooses. Asking from a base inside the
+        # worker's own branch excludes the earlier commits, and the merge lands them anyway.
+        self.mark_green()
+        self.commit("Fork point")
+        subprocess.run(["git", "-C", str(self.ws.repo), "checkout", "-q", "-b", "feature"],
+                       check=True, capture_output=True)
+        inside = self.commit("Unreviewed code", path="src/one/code.txt", content="landed")
+        source = self.commit("Reviewed notes", path="src/one/notes.txt", content="reviewed")
+        approval = self.approve_review(self.request_review(source, base=inside))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+        subprocess.run(["git", "-C", str(self.ws.repo), "checkout", "-q", "main"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.ws.repo), "merge", "--no-ff", "-m",
+                        "merge the reviewed branch", source],
+                       check=True, capture_output=True)
+
+        result = self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "integrated",
+                             "--evidence", "evidence/W-1.md", "--integrated-source", source,
+                             "--agent", "agent-a", "--now", T0, expect=2)
+        self.assertIn("does not cover every path", result.stderr)
+        self.assertIn("src/one/code.txt", result.stderr)
+        self.assertNotIn("src/one/notes.txt", result.stderr)
+        self.assertIn("demo/W-1", result.stderr)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "reviewed")
+
+        plan = self.invoke("integration-plan", "--implementer", "worker-x",
+                           "--reviewer-identity", "reviewer-x")
+        self.assertIn("Receipt does not cover the branch", plan.stdout)
+        self.assertIn("src/one/code.txt", plan.stdout)
+
+    def test_integration_accepts_a_receipt_that_covers_the_whole_branch(self):
+        self.mark_green()
+        fork = self.commit("Fork point")
+        subprocess.run(["git", "-C", str(self.ws.repo), "checkout", "-q", "-b", "feature"],
+                       check=True, capture_output=True)
+        self.commit("Reviewed code", path="src/one/code.txt", content="landed")
+        source = self.commit("Reviewed notes", path="src/one/notes.txt", content="reviewed")
+        approval = self.approve_review(self.request_review(source, base=fork))
+        self.invoke("transition", "demo/W-1", "--revision", "2", "--to", "reviewed",
+                    "--reviewer", "reviewer-r", "--decision", "approve",
+                    "--review-answer", approval, "--evidence", "evidence/W-1.md",
+                    "--agent", "agent-b", "--now", T0)
+        subprocess.run(["git", "-C", str(self.ws.repo), "checkout", "-q", "main"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.ws.repo), "merge", "--no-ff", "-m",
+                        "merge the reviewed branch", source],
+                       check=True, capture_output=True)
+
+        self.invoke("transition", "demo/W-1", "--revision", "3", "--to", "integrated",
+                    "--evidence", "evidence/W-1.md", "--integrated-source", source,
+                    "--agent", "agent-a", "--now", T0)
+        self.assertEqual(self.ws.task_record("demo/W-1")["status"], "integrated")
+
     def test_a_legacy_receipt_is_incomplete_and_never_repaired(self):
         self.mark_green()
         self.commit("Base")

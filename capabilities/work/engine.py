@@ -1176,6 +1176,68 @@ def diverged_content(task: dict, pairs: list[dict], tip: str) -> list[str]:
     return [pair["path"] for pair in pairs if blob_at(task, tip, pair["path"]) != pair.get("blob")]
 
 
+def first_parent(task: dict, commit: str) -> str | None:
+    """The first parent of a commit, or None when it has none (a root)."""
+    listed = git_review_check(task, "rev-list", "--parents", "-n", "1", commit)
+    if listed.returncode or not listed.stdout.split():
+        raise WorkError(f"{task['id']}: could not read the parents of {commit[:12]}")
+    parents = listed.stdout.split()[1:]
+    return parents[0] if parents else None
+
+
+def fork_point(task: dict, source: str, tip: str) -> str | None:
+    """Where the source's line of work forked from the integration branch's mainline.
+
+    `source` must already be an ancestor of `tip`, so `git merge-base source tip` is the source
+    itself and says nothing about what landed. What landed came in on a branch, and the branch
+    is only visible through the mainline: walking the ref's first parents back to the oldest
+    commit that already contains the source finds the merge that brought it in, and the merge
+    base of the source with that commit's first parent is where the branch forked. A source that
+    sits on the mainline itself has its own child as that commit, so the range collapses to the
+    source and covers nothing — a linear integration has no branch to leave unreviewed.
+    """
+    if source == tip:
+        container = tip
+    else:
+        listed = git_review_check(task, "rev-list", "--first-parent", "--reverse", f"{source}..{tip}")
+        if listed.returncode:
+            raise WorkError(f"{task['id']}: could not read the history of the integration branch")
+        commits = listed.stdout.split()
+        container = commits[0] if commits else tip
+    mate = first_parent(task, container)
+    if mate is None:
+        return None
+    merged = git_review_check(task, "merge-base", source, mate)
+    if merged.returncode or not merged.stdout.strip():
+        return None
+    return merged.stdout.strip()
+
+
+def unreviewed_paths(task: dict, source: str, review: dict, tip: str) -> list[str]:
+    """Paths the source landed on the integration branch that its review receipt does not cover.
+
+    The receipt is computed over a base the worker chooses, so a base inside the worker's own
+    branch yields an honest-looking receipt that excludes the branch's earlier commits, while
+    the merge still lands them. The receipt is authoritative only if it covers every path the
+    branch brought in, so the fork point — not the chosen base — decides the range.
+    """
+    approved = {pair["path"] for pair in review.get("paths") or []}
+    base = fork_point(task, source, tip)
+    if base is None:
+        changed = git_review_check(
+            task, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z",
+            "--no-renames", source,
+        )
+    else:
+        changed = git_review_check(
+            task, "diff", "--name-only", "-z", "--no-renames", base, source,
+        )
+    if changed.returncode:
+        raise WorkError(f"{task['id']}: could not determine the paths {source[:12]} landed")
+    landed = list(dict.fromkeys(changed.stdout.split("\0")[:-1]))
+    return [path for path in landed if path not in approved]
+
+
 def verified_review(args, store: Store, task: dict) -> dict:
     if not args.reviewer or args.decision != "approve":
         raise WorkError("transition to reviewed requires --reviewer and --decision approve")
@@ -1241,6 +1303,13 @@ def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
             f"{task['id']}: review receipt digest does not match its recorded path/blob pairs; "
             "reopen the task and submit it for review")
     integration_tip = require_source_on_ref(task, source, ref)
+    uncovered = unreviewed_paths(task, source, review, integration_tip)
+    if uncovered:
+        preview = ", ".join(uncovered[:12]) + (f" (+{len(uncovered) - 12} more)" if len(uncovered) > 12 else "")
+        raise WorkError(
+            f"{task['id']}: the review receipt does not cover every path {source[:12]} "
+            f"brought into {ref}: {preview}; review the work from the commit its branch forked at"
+        )
     moved = diverged_content(task, pairs, integration_tip)
     if moved:
         preview = ", ".join(moved[:12]) + (f" (+{len(moved) - 12} more)" if len(moved) > 12 else "")
@@ -2842,6 +2911,8 @@ def integration_action(message: str) -> str:
     """Classify why an approved task cannot be integrated from the engine's own message."""
     if "review receipt is incomplete" in message:
         return "receipt_incomplete"
+    if "does not cover every path" in message:
+        return "uncovered_paths"
     if "approved paths changed" in message:
         return "paths_diverged"
     return "integration_blocked"
@@ -3112,6 +3183,16 @@ def integration_plan(store: Store, registry: dict, args) -> dict:
         repo = Path(item.get("repo") or ".").expanduser()
         if item.get("branch"):
             item["tip"] = branch_tip(repo, item["branch"]) or None
+        if item["action"] == "uncovered_paths":
+            source = item.get("source")
+            tip = ref_tip(repo, item.get("ref"))
+            if source and tip:
+                try:
+                    item["uncoveredPaths"] = unreviewed_paths(
+                        task, source, task.get("review") or {}, tip)
+                except WorkError:
+                    item["uncoveredPaths"] = []
+            continue
         if item["action"] != "paths_diverged":
             continue
         # The approved commit is already on the ref; the delta to re-verify runs to the ref tip.
@@ -3171,6 +3252,8 @@ def integration_plan(store: Store, registry: dict, args) -> dict:
             "receipt_missing": sum(1 for item in integration_blocked if item["action"] == "receipt_missing"),
             "receipt_incomplete": sum(1 for item in integration_blocked
                                       if item["action"] == "receipt_incomplete"),
+            "uncovered_paths": sum(1 for item in integration_blocked
+                                   if item["action"] == "uncovered_paths"),
             "dependency_blocked": sum(1 for item in integration_blocked
                                       if item["action"] == "dependency_blocked"),
             "never_submitted": sum(1 for item in review_blocked if item["action"] == "never_submitted"),
@@ -3207,6 +3290,7 @@ def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) 
     for key, label in (("merge_needed", "Merge needed"), ("paths_diverged", "Paths diverged"),
                        ("receipt_missing", "Receipt missing"),
                        ("receipt_incomplete", "Receipt incomplete (legacy)"),
+                       ("uncovered_paths", "Receipt does not cover the branch"),
                        ("dependency_blocked", "Dependency blocked"),
                        ("never_submitted", "Never submitted"), ("resubmit_required", "Resubmit required"),
                        ("rework", "Changes requested"), ("human_review", "Human review"),
@@ -3299,6 +3383,43 @@ def integration_plan_markdown(plan: dict, registry: dict, args, generated: str) 
         else:
             add("The branch tip could not be resolved; check the repository and the branch name.")
         add("")
+
+    uncovered_items = [item for item in plan["integration"]
+                       if item["action"] == "uncovered_paths"]
+    add(f"### Receipts that do not cover the branch ({len(uncovered_items)})")
+    add("")
+    add("The approved commit is on the ref, but the branch it came in on changed paths the")
+    add("receipt does not name — the review was asked for from a base inside the branch, so the")
+    add("earlier commits were never covered. The content checks cannot see them: they compare")
+    add("only the paths the receipt recorded. Re-review from the commit the branch forked at.")
+    add("")
+    if uncovered_items:
+        add("| Task | Approved | Uncovered paths |")
+        add("|---|---|---:|")
+        for item in uncovered_items:
+            add(f"| `{item['task']}` | `{(item.get('source') or '-')[:12]}` | "
+                f"{len(item.get('uncoveredPaths') or [])} |")
+        add("")
+        for item in uncovered_items:
+            paths = item.get("uncoveredPaths") or []
+            reason = (item.get("reason") or "the receipt does not cover the branch").split(": ", 1)[-1]
+            add(f"`{item['task']}` — {reason}")
+            add("")
+            for path in paths[:12]:
+                add(f"- `{path}`")
+            if len(paths) > 12:
+                add(f"- … {len(paths) - 12} more")
+            add("")
+            add("```bash")
+            add(f"loom transition {item['task']} --revision {item.get('revision', 0)} --to ready \\")
+            add(f"  --reason \"reopen: the receipt does not cover every path the branch landed\" "
+                f"--agent {implementer}")
+            add("```")
+            add("")
+        add("Then submit the branch from its fork point as the review base.")
+    else:
+        add("Every receipt covers the branch it came in on.")
+    add("")
 
     missing = [item for item in plan["integration"] if item["action"] == "receipt_missing"]
     add(f"---")
