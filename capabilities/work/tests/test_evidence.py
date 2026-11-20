@@ -306,6 +306,60 @@ class TestsCountTest(unittest.TestCase):
             with self.assertRaises(engine.EvidenceClaimError):
                 derive(Path(tmp), "", {})
 
+    def test_a_module_argument_counts_that_module_and_not_its_siblings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "tests/test_evidence_count_probe_a.py", """\
+                import unittest
+
+                class Probe(unittest.TestCase):
+                    def test_one(self):
+                        pass
+
+                    def test_two(self):
+                        pass
+                """)
+            write(root, "tests/test_evidence_count_probe_b.py", """\
+                import unittest
+
+                class Sibling(unittest.TestCase):
+                    def test_three(self):
+                        pass
+                """)
+            derive = engine.EVIDENCE_DERIVATIONS["tests.count"]
+            self.assertEqual(derive(root, "tests/test_evidence_count_probe_a.py", {}), "2")
+            self.assertEqual(derive(root, "tests", {}), "3")
+
+    def test_a_module_scoped_count_does_not_move_when_a_sibling_lands(self):
+        """The hazard the narrower argument exists for: an unrelated test must not stale it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write(root, "tests/test_evidence_count_probe_c.py", """\
+                import unittest
+
+                class Probe(unittest.TestCase):
+                    def test_one(self):
+                        pass
+                """)
+            derive = engine.EVIDENCE_DERIVATIONS["tests.count"]
+            before = derive(root, "tests/test_evidence_count_probe_c.py", {})
+            write(root, "tests/test_evidence_count_probe_d.py", """\
+                import unittest
+
+                class Later(unittest.TestCase):
+                    def test_landed_by_another_branch(self):
+                        pass
+                """)
+            self.assertEqual(derive(root, "tests/test_evidence_count_probe_c.py", {}), before)
+            self.assertEqual(derive(root, "tests", {}), "2")
+
+    def test_a_module_argument_that_does_not_exist_is_a_problem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            derive = engine.EVIDENCE_DERIVATIONS["tests.count"]
+            with self.assertRaises(engine.EvidenceClaimError) as caught:
+                derive(Path(tmp), "tests/test_absent.py", {})
+        self.assertIn("no test directory or module", str(caught.exception))
+
 
 VALIDATOR_STUB = '''\
 import pathlib

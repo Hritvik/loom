@@ -1640,7 +1640,9 @@ Do this:
    `./loom renew {task} --revision N{epoch_flag} --ttl 30m --agent {agent}`
 5. Write evidence to {evidence} in the repository from the template in `capabilities/work/engine.py`
    (`EVIDENCE_TEMPLATE`): a span between `<!-- loom:<derivation> -->` and `<!-- /loom -->` is
-   re-derived by the suite, and everything else is prose. Then ask for review:
+   re-derived by the suite, and everything else is prose. Mark the narrowest claim that answers the
+   sentence: a count over a whole tree goes stale when another branch lands beside it, and that
+   branch cannot refresh your file. Then ask for review:
    `./loom ask {task} --to <reviewer> --question "..." --review-source <40-char commit>
     --review-evidence {evidence} --agent {agent}`
 6. Never accept a contract, change a requirement, or approve your own work. If you are blocked,
@@ -5016,8 +5018,11 @@ def verify_registry_events(registry: dict, records: list[tuple[bytes, dict]]) ->
 # the distinction for the writer and marks both kinds of line.
 #
 # A derivation is `callable(root, argument, cache) -> str`. The argument is the optional text after
-# the derivation name (`tests.count:tests` reads tests from another directory). The built-ins cover
-# the suite, the validator and tracked-file counts; a checker may register more, which is how a
+# the derivation name (`tests.count:tests` reads tests from another directory, and
+# `tests.count:tests/test_evidence.py` counts one module). A committed claim should name the
+# narrowest thing that answers it: a whole-tree count goes stale whenever any branch lands beside
+# it, which turns an unrelated change into a red build. The built-ins cover the suite, the
+# validator and tracked-file counts; a checker may register more, which is how a
 # repository adds a sweep without copying its detector into the engine:
 #
 #     register_evidence_derivation("sweep.example", derive_example_sweep)
@@ -5141,20 +5146,31 @@ def _cached(cache: dict, key, build):
 
 
 def derive_tests_count(root: Path, argument: str, cache: dict) -> str:
-    """How many tests `unittest` collects under `root/argument` — what `Ran N tests` prints."""
+    """How many tests `unittest` collects under `root/argument` — what `Ran N tests` prints.
+
+    The argument is a directory, or one test module inside a directory. A module is narrower and
+    is what a committed claim usually wants: a whole-directory count moves whenever any branch
+    lands a test beside it, so the claim turns stale for a change its own diff never made, while
+    a claim about the module this task added stays true until that module changes — and the
+    change that makes it untrue can refresh it.
+    """
     key = ("tests.count", str(root), argument)
 
     def build() -> str:
         import unittest  # imported here so the CLI's startup does not pay for the test framework
 
         start = Path(root) / (argument or "tests")
-        if not start.is_dir():
-            raise EvidenceClaimError(f"no test directory at {start}")
+        if start.is_file():
+            directory, pattern = start.parent, start.name
+        elif start.is_dir():
+            directory, pattern = start, "test*.py"
+        else:
+            raise EvidenceClaimError(f"no test directory or module at {start}")
         try:
             # A fresh loader: `unittest -k` sets a filter on the shared one, and a count that
             # depends on how this process was launched is a property of the invocation, not of
             # the tree.
-            suite = unittest.TestLoader().discover(str(start))
+            suite = unittest.TestLoader().discover(str(directory), pattern=pattern)
         except Exception as exc:  # a module that will not import is not a count
             raise EvidenceClaimError(
                 f"the suite under {start} could not be collected: {exc}") from exc
@@ -5436,7 +5452,7 @@ it depends on.
 
 | Derivation | Re-derived from | Answers from the tree |
 |---|---|---|
-| `tests.count` | the suite `unittest` collects under `tests/` | yes |
+| `tests.count:<dir-or-module>` | the suite `unittest` collects there | yes |
 | `tracked.count:<pathspec>` | `git ls-files` under a pathspec | yes |
 | `validator.verdict` | the validator's exit status | no — the registry |
 | `validator.errors:<substring>` | its `ERROR` lines, optionally filtered | no — the registry |
@@ -5444,13 +5460,20 @@ it depends on.
 A repository may register more (a sweep, a schema count) with `register_evidence_derivation`; an
 unknown derivation fails the check rather than passing as prose.
 
+Mark the narrowest claim that answers the sentence. `tests.count` with no argument counts every
+test in `tests/`, so any branch that lands a test beside yours makes the span stale for a change
+your diff never made. Naming the module you added keeps the claim yours: it stays true until that
+module changes, and the change that breaks it can refresh it.
+
 ## Delivered
 
 <!-- Prose. What changed, and where. Name the paths a reviewer should open. -->
 
 ## Verification
 
-The suite collects <!-- loom:tests.count --><!-- /loom --> tests.
+The suite collects <!-- loom:tests.count:tests --><!-- /loom --> tests. Prefer the narrowest span
+that answers the sentence — the module you added, not every test in `tests/`, when the number you
+mean is your own.
 
 <!-- Prose. Paste the commands, not their output: a command can be run at any commit, a pasted
 block persuades and then rots. -->
