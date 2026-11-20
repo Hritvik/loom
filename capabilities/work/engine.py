@@ -1506,7 +1506,11 @@ def cmd_events(args, store: Store) -> int:
         records_all = store.read_events()
     records = records_all
     if args.task:
-        records = [(raw, rec) for raw, rec in records if rec.get("task") == args.task]
+        # A tombstone names its tasks in a list, and a board tombstone names several at once; both
+        # shapes must be addressable, or retiring a board leaves no audit trail under its tasks.
+        records = [(raw, rec) for raw, rec in records
+                   if rec.get("task") == args.task
+                   or (isinstance(rec.get("tasks"), list) and args.task in rec["tasks"])]
     if args.limit:
         records = records[-args.limit:]
     for raw, record in records:

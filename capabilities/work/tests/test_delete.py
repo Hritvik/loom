@@ -11,9 +11,10 @@ Run: python3 -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
+import json
 import unittest
 
-from test_work import T0, Workspace, run, validate
+from test_work import T0, Workspace, packet, run, validate
 
 
 class DeleteTest(unittest.TestCase):
@@ -143,6 +144,8 @@ class DeleteTest(unittest.TestCase):
                               "--agent", "agent-a", "--now", T0)
         self.assertIn("removed board demo.board", removed.stdout)
         self.assertNotIn("demo.board", self.invoke("board", "list").stdout)
+        # The board tombstone names every task it retired, so it is addressable under each of them.
+        self.assertIn("delete", self.invoke("events", "--task", "demo/W-2").stdout)
         self.invoke("foldcheck")
         clean = validate(self.ws.root)
         self.assertEqual(clean.returncode, 0, clean.stdout + clean.stderr)
@@ -176,6 +179,57 @@ class DeleteTest(unittest.TestCase):
         again = self.delete("--board", "demo.board", "--reason", "second pass", expect=2)
         self.assertIn("has no tasks", again.stderr)
         self.assertIn("loom board remove --board demo.board", again.stderr)
+
+    # -- a board brought back ---------------------------------------------
+
+    def re_add(self, **overrides):
+        """Register demo.board again, the way an operator revives a retired programme."""
+        options = {"kind": "board", "role": "provider", "path": "docs/board.json"}
+        options.update(overrides)
+        return self.invoke("board", "add", "--board", "demo.board", "--kind", options["kind"],
+                           "--role", options["role"], "--repo", str(self.ws.repo),
+                           "--path", options["path"], "--agent", "agent-a", "--now", T0)
+
+    def create(self, task_id, status):
+        return self.invoke("create", "--id", task_id, "--board", "demo.board",
+                           "--title", f"Task {task_id}", "--status", status,
+                           "--agent", "agent-a", "--now", T0)
+
+    def test_a_packet_board_added_back_after_its_tombstone_is_validated_again(self):
+        self.delete("--board", "demo.board", "--reason", "retired while the programme paused")
+        self.invoke("board", "remove", "--board", "demo.board", "--agent", "agent-a", "--now", T0)
+        self.ws.board["packets"] = [packet("W-9", "draft", ["src/nine"])]
+        (self.ws.repo / "docs" / "board.json").write_text(
+            json.dumps(self.ws.board, indent=2) + "\n", encoding="utf-8")
+        self.re_add()
+        self.create("demo/W-9", "draft")
+
+        clean = validate(self.ws.root)
+        self.assertEqual(clean.returncode, 0, clean.stdout)
+        self.assertNotIn("packet W-9 missing", clean.stdout)
+        self.assertNotIn("demo.board: missing", clean.stdout)
+
+    def test_a_program_board_added_back_after_its_tombstone_is_validated_again(self):
+        self.delete("--board", "demo.board", "--reason", "checkout retired")
+        self.invoke("board", "remove", "--board", "demo.board", "--agent", "agent-a", "--now", T0)
+        body = self.ws.repo / "docs" / "work-items.md"
+        body.write_text("## W-9 — Revived\n\n**Status.** ready\n", encoding="utf-8")
+        self.re_add(kind="program", path="docs/work-items.md")
+        self.create("demo/W-9", "ready")
+
+        clean = validate(self.ws.root)
+        self.assertEqual(clean.returncode, 0, clean.stdout)
+        self.assertNotIn("heading W-9 missing", clean.stdout)
+
+    def test_a_board_added_back_whose_body_disappears_is_reported_missing(self):
+        self.delete("--board", "demo.board", "--reason", "checkout retired")
+        self.invoke("board", "remove", "--board", "demo.board", "--agent", "agent-a", "--now", T0)
+        self.re_add()
+        (self.ws.repo / "docs" / "board.json").unlink()
+
+        broken = validate(self.ws.root)
+        self.assertEqual(broken.returncode, 1, broken.stdout)
+        self.assertIn("demo.board: missing", broken.stdout)
 
     # -- files ------------------------------------------------------------
 

@@ -229,12 +229,28 @@ def tombstones(
     survive on purpose (the engine never touches content). Reading the `delete` events is what lets
     the checks below ignore the leftovers a tombstone deliberately leaves behind, instead of
     reporting them as drift and pushing an operator to resurrect dead work.
+
+    The log is ordered, so a later event can bring the work back: `board add` for a retired id makes
+    that board live again -- it must be validated like any other, because the operator has just
+    pointed the registry at a body -- and `create` for a retired task id gives it a body to check.
+    A tombstone that stayed in force for the rest of the log hid a re-registered board's missing
+    body and reported its present packets as missing.
     """
     tasks: set[str] = set()
     boards: set[str] = set()
     packets: set[tuple[str, str]] = set()
     for _, record in records:
-        if record.get("event") != "delete":
+        event = record.get("event")
+        if event == "board" and record.get("action") == "add":
+            board_id = str(record.get("board") or "")
+            if board_id:
+                boards.discard(board_id)
+                packets = {key for key in packets if key[0] != board_id}
+            continue
+        if event == "create" and record.get("task"):
+            tasks.discard(str(record["task"]))
+            continue
+        if event != "delete":
             continue
         if record.get("deleted_board"):
             boards.add(str(record["deleted_board"]))
