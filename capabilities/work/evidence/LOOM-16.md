@@ -1,13 +1,14 @@
 # Evidence — LOOM-16 retire a task or a board with a tombstone
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-16-a1` (isolated worktree, from `7df7b16`)
-Change under review: `7df7b16..9f04c8c` — the code, the tests and the README row are one commit;
-the evidence commit that follows it on this branch changes only this file.
-Status: green, submitted for independent review
+Branch: `loom/loom-loom-16-a3` (isolated worktree, from `7df7b16`)
+Change under review: `7df7b16..ce06bcb` — the feature commit `9f04c8c`, the evidence commit
+`e7df1b8`, and the rework commit `ce06bcb`; the commit that carries this file changes only
+`capabilities/work/evidence/LOOM-16.md`.
+Status: rework of review 3054 (`changes requested`), resubmitted for independent review.
 
 This file states what the range delivers and how to re-check it. Review history belongs in the
-registry event log (`./loom events | grep loom/LOOM-16`), not here.
+registry event log (`./loom events --task loom/LOOM-16`), not here.
 
 ## Why deletion had to be an event
 
@@ -46,6 +47,9 @@ still has a state.
 - **`tombstone_paths`** — the evidence file and the body document (program markdown or packet
   board JSON), printed and never touched. Acceptance says the command prints the paths a human
   should remove; this is that list.
+- **`cmd_events`** — `--task` now also matches the `tasks` list a tombstone carries, so the one
+  event that retired a board is addressable under each task it retired. The match requires a list,
+  because the genesis event's `tasks` is a count.
 - `board remove` now says `retire them first with loom delete --board <id> --reason ...` instead of
   the dead-end "move or delete them first".
 - `delete` is in `ENGINE_COMMANDS` and `build_parser()`, so `loom` routes it and `loom --help`
@@ -67,8 +71,13 @@ one rule.
 
 `capabilities/work/validate_work.py`:
 
-- **`tombstones()`** reads the `delete` events into retired task ids, retired board ids and
-  `(board, suffix)` packet keys.
+- **`tombstones()`** reads the `delete` events, in order, into retired task ids, retired board ids
+  and `(board, suffix)` packet keys. **Rework:** a later `board add` for a retired id clears that
+  board and its packet keys, and a later `create` for a retired task id clears that task. The log
+  is ordered, and the last word on whether work is live is the registration, not the tombstone.
+  Without this the retirement stayed in force for the rest of the log: a board added back had its
+  packets reported as missing although present, its headings reported as missing, and a body that
+  had disappeared after the re-add passed unnoticed.
 - A retired board is not read from disk. That is the MyFinance case: the checkout is gone on
   purpose, so `missing <path>` is no longer reported for it, and its tombstoned tasks are not
   reported as missing headings.
@@ -77,7 +86,8 @@ one rule.
 - A retired task is not reported as "task X no longer in registry" if any status-bearing event
   referred to it.
 
-`capabilities/work/tests/test_delete.py` — 11 tests on a disposable work home:
+`capabilities/work/tests/test_delete.py` — the module collects
+<!-- loom:tests.count:tests/test_delete.py -->14<!-- /loom --> tests on a disposable work home:
 
 - a deleted task leaves `list`, `graph`, `export`, `search` and `show`, while `events --verify`,
   `foldcheck` and `validate_work.py` all pass;
@@ -88,9 +98,13 @@ one rule.
 - a dependent refuses the delete and names `demo/W-2`;
 - exactly one target and a nonblank reason, an unknown task, and the `--reason` requirement;
 - `delete --board` retires four tasks in one event, drops every edge, then `board remove` succeeds
-  and the suite stays green (`foldcheck` + validator);
+  and the suite stays green (`foldcheck` + validator); the tombstone is also visible from
+  `events --task demo/W-2`, one of the tasks it retired;
 - a board whose checkout was never created produces `missing …` and `heading … missing` errors,
   `delete --board` clears them, and `board remove` finishes the job;
+- a re-added packet board is validated again: its present packet is not reported missing;
+- a re-added program board is validated again: its present heading is not reported missing;
+- a re-added board whose body then disappears is reported `missing` (it passed before the rework);
 - a board with no tasks left points at `loom board remove`;
 - an evidence file and the board file both survive the delete and are printed.
 
@@ -103,11 +117,15 @@ subcommand to be documented. See Limits.
 ```bash
 # capabilities/work — the whole suite on this tip
 python3 -m unittest discover -s tests
-#   Ran 352 tests in 117.489s — OK (skipped=2)
-#   the two skips are test_boundary.PrivateDenylistTest, which need LOOM_BOUNDARY_DENYLIST
+#   OK (skipped=2); the two skips are test_boundary.PrivateDenylistTest, which need
+#   LOOM_BOUNDARY_DENYLIST
 python3 -m unittest discover -s tests -p test_delete.py
-#   Ran 11 tests — OK
+#   Ran 14 tests — OK
 ```
+
+The rework is only worth believing if the tests fail without it. Against `e7df1b8`'s
+`validate_work.py` the same three new tests fail (packet missing, heading missing, and a missing
+body passing), so they pin the defect and not the shape of the fix.
 
 The MyFinance shape, end to end on a disposable home (a program board whose checkout does not
 exist, with one rejected task). Reproduce from `capabilities/work`:
@@ -150,20 +168,31 @@ EOF
 #     PASS
 ```
 
+The rework, on a disposable home (`delete --board`, `board remove`, `board add` the same id,
+`create` a task, then validate). Reproduce from `capabilities/work`:
+
+```bash
+python3 -m unittest discover -s tests -p test_delete.py
+#   test_a_packet_board_added_back_after_its_tombstone_is_validated_again ... ok
+#   test_a_program_board_added_back_after_its_tombstone_is_validated_again ... ok
+#   test_a_board_added_back_whose_body_disappears_is_reported_missing ... ok
+```
+
 A refusal, with the ids named (`exit 2`):
 
 ```text
 error: refusing to delete demo/W-1: live claim held by demo/W-1 (agent-a); dependents not also retired: demo/W-2
 ```
 
-The live registry was re-read with both the previous engine and this one; the result is identical,
-so this range adds no validator finding to the shared home (the failures are pre-existing reviewed
-receipts whose commits are not on their integration branches):
+The live registry was re-read with the previous engine and this one; the result is identical, so
+this range adds no validator finding to the shared home (the failures are pre-existing reviewed
+receipts whose commits are not on their integration branches). The shared home holds no `delete`
+event, so the ordering change cannot alter its output:
 
 ```bash
 python3 ~/.local/state/loom/engine/capabilities/work/validate_work.py 2>&1 | tail -1
 python3 validate_work.py 2>&1 | tail -1
-#   both print: FAIL (42 errors, 112 warnings)
+#   both print: FAIL (39 errors, 114 warnings)
 ```
 
 ## Limits
@@ -175,9 +204,19 @@ python3 validate_work.py 2>&1 | tail -1
   coordinator has been asked to ratify or reject it (event 3041, asked
   `opencode/loom-coordinator`). Reverting it means re-scoping the surface contract, which is not
   this task's to accept.
+- **The evidence locator resolves against the work home.** In this branch the file is at
+  `capabilities/work/evidence/LOOM-16.md`; the running work home is a deployed copy, so the registry
+  artifact resolves only once the branch is integrated or the copy is placed there. The reviewer
+  asked for the copy (review 3054, non-blocking b) and it is a content file, not a repository write.
 - **A retired board is two steps.** `delete --board` retires the work, as acceptance asks, and
   leaves the board document registered so `board remove` can drop it. Between the two the board
   still lists in `loom board list`; after `delete --board` the validator no longer reads its file.
+- **Re-registration is authoritative.** `board add` for a retired id is a supported way to bring a
+  board back, so the validator validates it again and reports a missing body. A task id can also be
+  created again after a delete (the registry no longer holds it), and the tombstone reader clears
+  that id's retirement when it sees the `create`. This is a policy the rework chose over refusing a
+  tombstoned id: refusing would add a second command's worth of state to every add, and the ordered
+  log already says what the operator meant.
 - **Files are never removed.** Evidence and body documents survive every delete and are printed.
   That includes the program heading: a deleted task's `## W-8 — …` section stays in the markdown
   until a human edits it, and the validator does not report an unregistered heading.
@@ -190,5 +229,5 @@ python3 validate_work.py 2>&1 | tail -1
   write; the delete does not scan for a live process.
 - **Task-scoped shared-artifact claims are dropped, not refused.** Refusing would leave no way to
   delete a task that ever carried one, because no CLI command edits `registry["claims"]`.
-- **Evidence is the claim, not the numbers.** The suite output above is from this tip; a later
-  change to any test file will change the count, and the command is what to re-run.
+- **The validator result is prose on purpose.** The shared registry is not in this checkout; the
+  counts above depend on it and a committed evidence file must not machine-check them.
