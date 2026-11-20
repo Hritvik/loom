@@ -45,11 +45,11 @@ that was run.
 |---|---|---|---|
 | 1 | A person can tell decisions needing a human from work merely waiting for an agent, reviewer, dependency or capacity | `ui/VERIFICATION.md` row 9 (`BlockedWork`); the control-room queues in `ui/README.md`, in which every task lands in exactly one queue | **Met** |
 | 2 | Every row and detail view shows state, claimability, blocker reason, freshness and revision/lease without conflating them | `BlockedWork`, `TaskInspection`; per-source `as_of` and status | **Met** |
-| 3 | A blocked task traces to its prerequisites and the work it gates | `GraphAccessibility`; graph closures compared with the engine's own | **Met** |
+| 3 | A blocked task traces to its prerequisites and the work it gates | `ReadModelParity.test_graph_edges_are_the_front_door_dependencies` (pictured edges equal the engine's own `depends_on`); `GraphAccessibility` (the picture has a complete, labelled text equivalent) | **Met** |
 | 4 | Review verdict, evidence location, integration receipt and event history are separate facts | `TaskInspection`; missing evidence is reported missing, not filled in | **Met** |
 | 5 | No mutation bypasses the engine; conflicts, stale revisions, expired leases and denials are visible and never silently retried | `StaleWriteBoundary`, `OwnerJourneys`; `ui/README.md` "What is actually enforced" | **Met** |
 | 6 | V1 exposes no worker dispatch or global `tick --apply`; any operational control needs separate explicit confirmation; reads never trigger one | `ENGINE_VERBS` is a seven-verb frozenset (`ui/loom_ui/actions.py`); the route table has no operational route (`ui/loom_ui/server.py`); operations is a read-only view | **Met, and stronger than asked**: v1 has no scheduler or deploy control at all, so there is nothing to mis-confirm |
-| 7 | Mutations are bound to a server-side human identity and role mapping; browser-supplied actors are rejected | `IdentityBoundary`; `ui/loom_ui/identity.py` role table; `accepted` is owner-only | **Met** |
+| 7 | Mutations are bound to a server-side human identity and role mapping; browser-supplied actors are rejected | `IdentityBoundary`; `ui/loom_ui/identity.py` role table; `OwnerJourneys.test_an_owner_accepts_integrated_work_from_the_acceptance_queue` walks the owner-only acceptance path end to end | **Met** |
 | 8 | Core workflows are keyboard-operable, screen-reader labelled, responsive, and usable without colour perception | `ContentSafety.test_every_page_has_the_accessibility_scaffold`; no script anywhere, so keyboard order is native link/control order | **Partly met — see below** |
 
 ### Criterion 8 in detail
@@ -82,7 +82,7 @@ claim, stated so that a future reader cannot infer more from silence.
 | **Host** | One person, one machine, loopback HTTP only. The listener refuses any non-loopback bind, and every request must address the server by a loopback `Host` (`ui/loom_ui/server.py`) | LAN, reverse proxy, remote or shared service, TLS. Remote use needs authenticated identities, transport security, tenancy and an operator: a new design, not a flag |
 | **Identity** | One or more local humans are configured at startup (`--human` or a JSON file). Opening a pairing link binds the browser to that identity; the browser never names an actor. Three roles: implementer, owner, reviewer; `accepted` is owner-only. Sessions are in memory, 8 hours absolute, 1 hour idle, and die on restart | Per-person identity on a shared OS account, SSO, or an identity provider. The pairing link is printed to the terminal and `--human` is visible in the process list; that is acceptable for one person's machine and not for a shared host |
 | **Authority** | Loom is the only authority. The UI samples state for display and submits a confirmed action to the `loom` front door; the engine can refuse, and the refusal is shown verbatim with no retry | Any rule re-implemented in the browser. A refusal the engine would give is never pre-empted silently |
-| **Mutation** | Seven verbs: `claim`, `renew`, `release`, `takeover`, `transition`, `ask`, `answer` (`ui/loom_ui/actions.py`). Confirmed forms carry revision and fencing epoch, a CSRF token and a one-shot nonce | `reviewed`/`integrated`/`accepted` transitions (the UI will not let an implementer approve its own work), `annotate`, `create`, `edge`, `board`, `reconcile`, `migrate`, `tick`, `tick --apply`, `workers`, `schedule`, `deploy`, `linear` |
+| **Mutation** | Seven verbs: `claim`, `renew`, `release`, `takeover`, `transition`, `ask`, `answer` (`ui/loom_ui/actions.py`). `transition` offers only the engine's legal targets for the current state, minus `reviewed` and `integrated` (`EXCLUDED_TARGETS`) and minus `reviewed → accepted` (`NEEDS_INTEGRATED_SOURCE`). An owner — and only an owner — can record `accepted` for integrated work whose dependencies are satisfied, from the acceptance queue (`identity.py` `TARGET_ROLES`; `OwnerJourneys.test_an_owner_accepts_integrated_work_from_the_acceptance_queue` exercises it). Confirmed forms carry revision and fencing epoch, a CSRF token and a one-shot nonce | Marking work `reviewed` or `integrated`: a reviewer's answer and an integration receipt belong to the coordinator, which is also what stops an implementer approving its own work. `reviewed → accepted`, which needs the coordinator's approved commit as proof. Outside v1 entirely: `annotate`, `create`, `edge`, `board`, `reconcile`, `migrate`, `tick`, `tick --apply`, `workers`, `schedule`, `deploy`, `linear` |
 | **Read path** | Read-only by construction when no identity is configured. On a version mismatch every data surface answers `503` and leaks no task content | Offline caching or a frozen snapshot. A stale page is refused by the engine's own compare-and-swap |
 | **Environment** | Verified on macOS 27.3 (arm64) with CPython 3.14.4 — the machine the verification suite ran on | Any other OS, Python version or architecture, and any minimum Python version. Elsewhere the UI is expected to degrade rather than crash: the scheduler source reads `~/Library/LaunchAgents` and `launchctl` (`ui/loom_ui/provenance.py`, `ui/loom_ui/operations.py`), so off macOS it reports the source degraded with the reason, but that prediction is unverified |
 | **Release coupling** | The UI runs from the active front door and reports a release that drifted. A process whose loaded engine sources differ from the active front door closes its data surfaces | Starting from an unrelated checkout and expecting it to agree. After any release promotion the running server must be restarted, or it will serve the mismatch by design and say so |
@@ -97,8 +97,12 @@ recommendation with the cost of the alternative; the owner's answer is what the 
    security, per-user authentication, tenancy and an operational owner, none of which exists here.
    Changing later is a new design, and the current code refuses non-loopback binds rather than
    pretending to support them.
-2. **Mutation scope.** *Recommend: the seven task verbs only; `tick --apply`, worker dispatch,
-   scheduler and deploy stay CLI-only for v1.* The alternative is a scoped, version-bound apply
+2. **Mutation scope.** *Recommend: the seven task verbs, plus the owner's acceptance of integrated
+   work from the queue; `tick --apply`, worker dispatch, scheduler and deploy stay CLI-only for v1.*
+   The one authority-bearing mutation v1 does include is
+   the owner accepting integrated work from the acceptance queue — owner-only in the role table, and
+   the reason the queue exists. It is not the same as marking work `reviewed` or `integrated`, which
+   stay with the coordinator (§3, Mutation row). The alternative is a scoped, version-bound apply
    operation that enumerates its full effect and refuses if state moved — the plan's Phase 4, and
    still a separate design. Shipping the current global apply through a browser would let one click
    transition unrelated tasks.
@@ -161,7 +165,7 @@ What "promoted" would mean, exactly. This is not performed here.
 | [`ui/VERIFICATION.md`](VERIFICATION.md) | product repo | no copy; acceptance record |
 | `capabilities/work/evidence/UI-6.md`, `UI-7.md` | product repo | no copy; evidence stays evidence |
 | `plans/loom/2026-11-15-ui-plan.md` | private content repo | stays; its Promotion list records owner acceptance, and "copied to `docs/`" is marked not required with the reason below |
-| `loom-ui/UI-7` in the registry | work database | `accepted` by the owner through the coordinator; never by the implementer |
+| `loom-ui/UI-7` in the registry | work database | marked `accepted` by the owner, through the coordinator or the UI's own acceptance queue once the work is integrated; never by the implementer |
 
 **Why no copy into `docs/`.** The artefact taxonomy says one artefact, one home, and promotion is a
 copy plus a pointer *when the artefact lives somewhere else*. The UI's documentation is already a
@@ -182,7 +186,8 @@ recommended" is a complete answer.
 
 1. **Deployment** — local single-user loopback UI (recommended) / packaged desktop / remote design
    first.
-2. **Mutation scope** — seven task verbs only (recommended) / add scheduler and deploy controls now.
+2. **Mutation scope** — seven task verbs plus the owner's acceptance of integrated work from the
+   queue (recommended) / add scheduler and deploy controls now.
 3. **Identity** — local pairing, three roles, one person (recommended) / multiple local people with
    separate roles now.
 4. **Technology** — stdlib server, no JavaScript (recommended) / a separate frontend.
@@ -199,8 +204,9 @@ recommended" is a complete answer.
 This record is evidence about a tree, not a promise about the future. It must be re-derived, not
 trusted, when any of these change:
 
-- the action allow-list, the route table, the identity/role table, the session rules or the version
-  gate in `ui/loom_ui/` — any of which can widen or narrow the envelope in §3;
+- the action allow-list, the transition target filters (`EXCLUDED_TARGETS`, `NEEDS_INTEGRATED_SOURCE`),
+  the route table, the identity/role table, the session rules or the version gate in `ui/loom_ui/` —
+  any of which can widen or narrow the envelope in §3;
 - the engine's own verbs or state model, which the UI mirrors;
 - the operating system or Python version beyond the one measured in §3;
 - a release promotion that moves the active front door;

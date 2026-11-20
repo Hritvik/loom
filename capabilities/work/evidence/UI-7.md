@@ -1,7 +1,7 @@
 # Evidence — loom-ui/UI-7 decide promotion and v1 operational readiness
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-ui-ui-7-a1`
+Branch: `loom/loom-ui-ui-7-a3`
 Source: the review request binds the full commit; this branch is the submitted revision.
 
 Goal: put the v1 acceptance decision in front of the owner with the evidence, the supported
@@ -15,12 +15,37 @@ reads rather than a machine checks.
 | Path | Change |
 |---|---|
 | `capabilities/work/ui/READINESS.md` | new — the v1 decision record: a verdict per acceptance criterion, the operating envelope, seven owner decisions with a recommendation, the runbook, the residual risks, the promotion package and the questions to answer |
-| `capabilities/work/ui/README.md` | two lines: point at `READINESS.md` as the decision record, and say that it is a request, not an acceptance |
+| `capabilities/work/ui/README.md` | one paragraph rewritten: the verification pointer now names `READINESS.md` as the decision record and says it is a request, not an acceptance |
 | `capabilities/work/evidence/UI-7.md` | this file |
 
 No product code changed. No test changed. No engine rule, action allow-list, route, role table,
 session rule, version gate or persistence format changed. No registry, receipt or plan was edited
 from this task; no `docs/` file was written; the Linear projection was not touched.
+
+## Rework after review 3087
+
+The blocking finding was that §3's Mutation row listed `accepted` among the transitions v1 does not
+claim, while the code offers it: `identity.py` maps `accepted` to the owner role and
+`OwnerJourneys.test_an_owner_accepts_integrated_work_from_the_acceptance_queue` accepts `demo/A-7`
+through the browser. That was an understated envelope, not a typo, so the correction is in four
+places:
+
+- **§3 Mutation** now states the filter that actually exists — `EXCLUDED_TARGETS` removes `reviewed`
+  and `integrated`, `NEEDS_INTEGRATED_SOURCE` removes `reviewed → accepted` — and says plainly that
+  an owner, and only an owner, can record `accepted` for integrated work whose dependencies are
+  satisfied.
+- **§4 decision 2** says the same, so the mutation-scope question the owner answers includes the one
+  authority-bearing click the acceptance queue exists for.
+- **§2 row 7** cites the journey test, not just the role table.
+- **§9** lists the transition filters among the things that would make the record false.
+
+Two cosmetic corrections from the same review: §2 row 3 now cites
+`ReadModelParity.test_graph_edges_are_the_front_door_dependencies` for graph-versus-engine parity —
+`GraphAccessibility` is the text-equivalent check, a different property — and the README row above no
+longer calls a paragraph rewrite "two lines".
+
+No code or test changed in the rework. The verification below is a fresh run on this branch, not a
+carried-over result.
 
 ## Verification
 
@@ -49,7 +74,7 @@ at the submitted commit. None is a claim about live registry state.
 | Exactly seven engine verbs can be executed | `ui/loom_ui/actions.py` — `ENGINE_VERBS` is a frozenset, and the executor refuses a verb outside it |
 | No operational route exists | `ui/loom_ui/server.py` route table — no tick, dispatch, schedule, deploy, promote, rollback or linear route |
 | Loopback only | `ui/loom_ui/server.py` — non-loopback binds refused, `LOOPBACK_HOSTS`, `Host` and `Origin` checks |
-| Roles and owner-only acceptance | `ui/loom_ui/identity.py` — `ROLES`, `ACTION_ROLES`, `TARGET_ROLES` |
+| Roles and owner-only acceptance | `ui/loom_ui/identity.py` — `ROLES`, `ACTION_ROLES`, `TARGET_ROLES` (`accepted` → owner); `ui/loom_ui/actions.py` — `EXCLUDED_TARGETS` removes `reviewed` and `integrated`, `NEEDS_INTEGRATED_SOURCE` removes `reviewed → accepted`, and `integrated → accepted` stays offered to an owner |
 | Sessions are memory-only | `ui/loom_ui/session.py` — absolute and idle TTLs, secret generated at start, one-shot nonces |
 | The version gate closes rather than guesses | `ui/loom_ui/version.py` — digest over the engine sources, imported-module check, `MISMATCH`/`DRIFTED`/`ABSENT` closed |
 | Off-macOS prediction (degraded scheduler, not a crash) | `ui/loom_ui/provenance.py` (launch-agent path) and `ui/loom_ui/operations.py` (`launchctl` failure returns an error string) |
@@ -77,6 +102,11 @@ at the submitted commit. None is a claim about live registry state.
 5. **`loom deploy promote` is deliberately not conflated with artefact promotion.** The UI runs from
    a promoted release and a release promotion moves the front door under it, which is why the runbook
    says to restart the server and why the record refuses to recommend a release moment.
+6. **The review's blocking finding changed the envelope, not the summary.** The Mutation row said
+   `accepted` was not claimed while the UI offers it to an owner from the acceptance queue. Deleting
+   the word would have left the claim vague, so the row now names the filter that exists and the
+   acceptance path it leaves open. The record was corrected to match the code; no code was changed to
+   make the old sentence true.
 
 ## Limits
 
@@ -96,6 +126,8 @@ at the submitted commit. None is a claim about live registry state.
 
 The reviewer should attack the honesty of the register, not the prose quality:
 
+- Does the corrected Mutation row now understate nothing? It is the one row the last review found
+  false, so check it against `actions.py` and `identity.py` rather than against this summary.
 - Is "partly met" on criterion 8 the right verdict, and is an owner manual pass a proportionate
   closure rather than a way to avoid testing?
 - Does any recommendation quietly widen the envelope — remote use, a scheduler control, multi-user
