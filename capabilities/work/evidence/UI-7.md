@@ -1,7 +1,7 @@
 # Evidence — loom-ui/UI-7 decide promotion and v1 operational readiness
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-ui-ui-7-a10`
+Branch: `loom/loom-ui-ui-7-a12`
 Source: the review request binds the full commit and the base it is reviewed from; this branch is
 the submitted revision.
 
@@ -130,6 +130,37 @@ or README paragraph changed.
 The completeness sentence is made true rather than hedged, the same choice the 3173 round made: that
 row is the part of the record that is supposed to leave nothing to silence.
 
+## Rework after review 3275
+
+Three corrections, all in `READINESS.md` §3's Mutation row, whose read-only clause claimed an
+exhaustiveness it did not have. No code, test, registry or other document changed; `ui/README.md`
+and the earlier sections of this file are untouched.
+
+1. **`board sync --check` was missing from the read-only clause.** `cmd_board`'s sync path skips every
+   mutation when `--check` is set (`engine.py` 4747) and returns before `atomic_json_write`
+   (`engine.py` 4776, 4783), so it writes nothing. The parenthetical also read as if
+   `board titles --check` were the only board preview; it now names both preview modes, and both
+   appear in the read-only list.
+2. **`deploy path` was missing.** It is a non-writing mode of the front-door `deploy` command —
+   `capabilities/work/loom` line 697 offers `status|promote|rollback|path`, and `cmd_deploy` prints
+   `running_root()` and returns for `path` (`loom` 150) — while only `deploy status` was named. It now
+   sits beside `deploy status`.
+3. **`tick` was classified as read-only, but a bare tick writes.** `tick_pass` calls
+   `_record_pass_safely` unconditionally (`engine.py` 3928), and `record_pass` writes `health_path()`
+   whether the pass is apply or preview (`engine.py` 3115–3129; its docstring at 3087 says "A preview
+   is recorded too, because it is a pass"). Under the same standard that moved
+   `events --verify --reanchor` out of the read-only list for rewriting a file outside the store,
+   `tick` is now in the operational group with its preview qualified: it records the pass in
+   `~/.local/state/loom/health.json`, cannot claim, launch or consume, and `--apply` is the acting
+   mode. It no longer appears in the read-only clause.
+
+The completeness sentence is kept and made true rather than dropped, as in the 3173 and 3219 rounds.
+I re-swept `build_parser` and the front door for every command in both groups: `board`, `edge`,
+`reconcile`, `rebuild`, `export`, `integration-plan`, `graph`, `snapshot`, `workers`, `schedule`,
+`deploy`, `linear` and `events` each now have their writing mode in the first group and their
+non-writing modes in the second, and `tick` is the one command whose preview writes, so it is named
+only in the first group.
+
 ## Verification
 
 The UI-6 acceptance matrix still passes on the integrated tree, and so do the suites beneath it.
@@ -222,10 +253,12 @@ at the submitted commit. None is a claim about live registry state.
 
 The reviewer should attack the honesty of the register, not the prose quality:
 
-- Does the Mutation row now understate nothing? It is the row two reviews found false, most recently
-  on completeness, so check both halves: the envelope against `actions.py` and `identity.py`, and the
-  outside-v1 list against `build_parser` and the front door — including that `events` appears only
-  through its writing mode and `board titles` sits with the other store-writing `board` actions.
+- Does the Mutation row now understate nothing? It is the row three reviews found false, most recently
+  on the read-only clause's completeness, so check both halves: the envelope against `actions.py` and
+  `identity.py`, and both lists against `build_parser` and the front door — including that `events`
+  appears only through its writing mode, `board titles` sits with the other store-writing `board`
+  actions, `board sync --check` and `deploy path` appear among the non-writing modes, and `tick`
+  appears only in the writing group with its health-file preview named.
 - Is the corrected §7 pointer now limited to what this task can actually write, without leaving the
   owner's plan item looking done?
 - Is "partly met" on criterion 8 the right verdict, and is an owner manual pass a proportionate
