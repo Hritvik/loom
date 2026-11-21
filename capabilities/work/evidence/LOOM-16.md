@@ -1,11 +1,13 @@
 # Evidence — LOOM-16 retire a task or a board with a tombstone
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-loom-16-a3` (isolated worktree, from `7df7b16`)
-Change under review: `7df7b16..ce06bcb` — the feature commit `9f04c8c`, the evidence commit
-`e7df1b8`, and the rework commit `ce06bcb`; the commit that carries this file changes only
-`capabilities/work/evidence/LOOM-16.md`.
-Status: rework of review 3054 (`changes requested`), resubmitted for independent review.
+Branch: `loom/loom-loom-16-a5` (isolated worktree, rebased onto `main` at `c3c2742`)
+Change under review: `c3c2742` to the tip of `loom/loom-loom-16-a5` — the feature commit `43221d4`,
+the evidence commit `c1cd85a`, the rework commit `a29884d`, and the commit that carries this file,
+which changes only `capabilities/work/evidence/LOOM-16.md`.
+Status: approved at review 3131 on a base that has since moved; rebased onto current `main` at the
+portfolio coordinator's request (event 3200) and resubmitted for review of the integration
+candidate.
 
 This file states what the range delivers and how to re-check it. Review history belongs in the
 registry event log (`./loom events --task loom/LOOM-16`), not here.
@@ -112,6 +114,41 @@ one rule.
 `tests/test_surface.py:test_work_readme_documents_every_cli_command` requires every parser
 subcommand to be documented. See Limits.
 
+## Rebase onto current `main`
+
+Review 3131 approved a range cut against `7df7b16`, and `engine.py` has moved since: `main` now
+carries LOOM-12's evidence-claim machinery (511 lines appended after `verify_registry_events`) and
+LOOM-17's reviewed-source and fork-point changes. Integrating the old blob would have landed code no
+review had seen, so the four commits were replayed onto `c3c2742`.
+
+The replay was textually clean, which is not the same as reviewed. What the rebase changes, and what
+a reviewer should read:
+
+- `cmd_delete`, `delete_guard`, `retire_documents`, `tombstone_paths` and the `events --task` match
+  are unchanged, and they still sit before the region LOOM-12 appended to; no moved code touches
+  them.
+- `delete` is still in `ENGINE_COMMANDS` and in `build_parser()` after `board`, so the routing and
+  the README row that `tests/test_surface.py` requires are unchanged.
+- `validate_work.py` and `tests/test_delete.py` do not overlap the rebased commits at all.
+- LOOM-12's derivations read this file. Its one machine-checked span is
+  `tests.count:tests/test_delete.py`; it re-derives to the recorded value, so the rebase did not
+  leave a stale receipt behind. From `capabilities/work`:
+
+  ```bash
+  python3 -c "import engine; from pathlib import Path; \
+      print(engine.check_evidence_file(Path('evidence/LOOM-16.md'), root=Path('.'))['ok'])"
+  #   True
+  ```
+
+The whole suite on the rebased tip is green (`OK (skipped=2)`), and `loom foldcheck` and the
+validator are still exercised through `test_delete.py` as before.
+
+The replay is a straight four-commit sequence on top of `c3c2742`, so integrating the branch is a
+fast-forward to its tip. The tip the reviewer must read is the commit this file arrives in; that is
+also the `--review-source` in the review request. The review base is `c3c2742`, the fork point from
+`main` — not this file's parent, because a docs-only tip as the base would leave the receipt
+approving only this file while the merge lands the other four paths.
+
 ## Verification
 
 ```bash
@@ -123,9 +160,9 @@ python3 -m unittest discover -s tests -p test_delete.py
 #   Ran 14 tests — OK
 ```
 
-The rework is only worth believing if the tests fail without it. Against `e7df1b8`'s
-`validate_work.py` the same three new tests fail (packet missing, heading missing, and a missing
-body passing), so they pin the defect and not the shape of the fix.
+The rework is only worth believing if the tests fail without it. Against the first feature commit's
+`validate_work.py` (`43221d4`) the same three new tests fail (packet missing, heading missing, and a
+missing body passing), so they pin the defect and not the shape of the fix.
 
 The MyFinance shape, end to end on a disposable home (a program board whose checkout does not
 exist, with one rejected task). Reproduce from `capabilities/work`:
@@ -184,15 +221,18 @@ A refusal, with the ids named (`exit 2`):
 error: refusing to delete demo/W-1: live claim held by demo/W-1 (agent-a); dependents not also retired: demo/W-2
 ```
 
-The live registry was re-read with the previous engine and this one; the result is identical, so
-this range adds no validator finding to the shared home (the failures are pre-existing reviewed
-receipts whose commits are not on their integration branches). The shared home holds no `delete`
-event, so the ordering change cannot alter its output:
+The live registry was re-read with `main`'s engine and this one, from the same store: both print the
+same `FAIL (n errors, n warnings)` tally and the same `ERROR` lines, so this range adds no validator
+finding to the shared home. Those failures are pre-existing receipts whose commits are not on their
+integration branches, plus headings missing from shared board bodies that this task's write paths do
+not include — including `loom/LOOM-16`'s own, because its body belongs to the planning repository
+and `delete` neither creates nor requires one. The shared home holds no `delete` event, so the
+ordering change cannot alter its output:
 
 ```bash
-python3 ~/.local/state/loom/engine/capabilities/work/validate_work.py 2>&1 | tail -1
+# both the main checkout and this worktree, from capabilities/work
 python3 validate_work.py 2>&1 | tail -1
-#   both print: FAIL (39 errors, 114 warnings)
+#   FAIL (the same tally and the same ERROR lines from both)
 ```
 
 ## Limits
@@ -200,7 +240,7 @@ python3 validate_work.py 2>&1 | tail -1
 - **README is outside the claimed write paths.** `tests/test_surface.py` makes "delete is in the
   parser" and "delete is in the README table" the same condition, so the suite cannot pass without
   the row. The pre-commit guard classes `capabilities/work/` as shared and allowed the commit, but
-  the claim's write paths did not list `README.md`. One table row was added at `9f04c8c` and the
+  the claim's write paths did not list `README.md`. One table row was added at `43221d4` and the
   coordinator has been asked to ratify or reject it (event 3041, asked
   `opencode/loom-coordinator`). Reverting it means re-scoping the surface contract, which is not
   this task's to accept.
