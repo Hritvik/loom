@@ -1,8 +1,9 @@
 # Evidence — loom-ui/UI-7 decide promotion and v1 operational readiness
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-ui-ui-7-a5`
-Source: the review request binds the full commit; this branch is the submitted revision.
+Branch: `loom/loom-ui-ui-7-a8`
+Source: the review request binds the full commit and the base it is reviewed from; this branch is
+the submitted revision.
 
 Goal: put the v1 acceptance decision in front of the owner with the evidence, the supported
 environment, the deployment and identity decisions, and the promotion package, **without accepting
@@ -71,6 +72,31 @@ Two required corrections, both in `READINESS.md`; no code, test or other documen
    the UI reads the store in process (`ui/loom_ui/snapshot.py` opens the database directly) instead
    of shelling out to them.
 
+## Rework after the integration refusal (event 3203)
+
+No document changed in content. The refusal was that the branch edits
+`capabilities/work/ui/README.md` while the receipt approved for `56ae63d` covered only
+`evidence/UI-7.md` and `ui/READINESS.md`, so integration would have landed an unreviewed README
+edit — and the new `LOOM-17` rule refuses exactly that. The cause was mechanical, not editorial: the
+final review request in the previous round omitted `--review-base`, so `loom ask` defaulted to the
+source's **first parent** (`12ebe4e`), which is the second commit of the rework, and a two-commit
+range never sees the README paragraph from the first commit.
+
+Two changes here, both to the submission rather than to the artifact:
+
+1. **Rebased onto the current `main`.** The branch now sits on `c3c2742` (`LOOM-17`) instead of
+   `8056368`, so the range has no pre-existing commits in it and the new rule is in force for the
+   tree that will integrate. `git merge-base HEAD origin/main` is now `c3c2742`.
+2. **The review request names that merge-base explicitly** with `--review-base`, instead of letting
+   the default pick a parent inside the branch. The receipt therefore covers all three paths the
+   branch changes — `ui/README.md`, `ui/READINESS.md`, `evidence/UI-7.md` — which is the same scope
+   the earlier receipts claimed in prose but not in the recorded path pair set.
+
+Nothing in the artifact was reworded to satisfy the refusal: the README paragraph, the readiness
+record and the rework notes above are byte-identical to `56ae63d` apart from this section and the
+branch line at the top. The suites were re-run on the rebased tree, and the engine suite now collects
+398 tests (two skipped) because `LOOM-17` added its own.
+
 ## Verification
 
 The UI-6 acceptance matrix still passes on the integrated tree, and so do the suites beneath it.
@@ -84,9 +110,11 @@ python3 -m unittest discover -s tests
 
 The module this submission's readiness verdict rests on collects
 <!-- loom:tests.count:ui/tests/test_verification.py -->44<!-- /loom --> tests, all passing on this
-branch. The engine suite carries `tests/test_evidence.py`, whose repository sweep re-derives every
-span under `evidence/`; this file is therefore checked against the tree rather than believed, and a
-hand-written count would have failed it.
+branch. On the rebased tree (`c3c2742`), `discover -s ui/tests -t ui/tests` collects 323 tests and
+`discover -s tests` collects 398 (two skipped), all passing. The engine suite carries
+`tests/test_evidence.py`, whose repository sweep re-derives every span under `evidence/`; this file
+is therefore checked against the tree rather than believed, and a hand-written count would have
+failed it.
 
 ## What was checked by reading, and where
 
@@ -131,6 +159,12 @@ at the submitted commit. None is a claim about live registry state.
    the word would have left the claim vague, so the row now names the filter that exists and the
    acceptance path it leaves open. The record was corrected to match the code; no code was changed to
    make the old sentence true.
+7. **The receipt's base is named, not defaulted.** An earlier round asked for review without
+   `--review-base`, so `loom ask` used the source's first parent and the recorded path set silently
+   shrank to the last two commits of the branch. The range is part of the claim — an approval is
+   over a set of paths — so the request now names the merge-base with `main` and the base is written
+   into this evidence like any other claim. The alternative, asking again over the same shortened
+   range, would have produced an approving receipt for a change it did not cover.
 
 ## Limits
 
