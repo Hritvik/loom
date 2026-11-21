@@ -1,7 +1,7 @@
 # Evidence — loom-ui/UI-7 decide promotion and v1 operational readiness
 
 Repository: `~/repositories/loom`
-Branch: `loom/loom-ui-ui-7-a8`
+Branch: `loom/loom-ui-ui-7-a10`
 Source: the review request binds the full commit and the base it is reviewed from; this branch is
 the submitted revision.
 
@@ -70,7 +70,8 @@ Two required corrections, both in `READINESS.md`; no code, test or other documen
    to silence: it now lists every command that writes and is not one of the seven, grouped as store,
    artifact and operational, and states separately that the read-only commands have no route because
    the UI reads the store in process (`ui/loom_ui/snapshot.py` opens the database directly) instead
-   of shelling out to them.
+   of shelling out to them. That claim was still false as written: `board titles` and
+   `events --verify --reanchor` were missing, and the 3219 rework below corrects them.
 
 ## Rework after the integration refusal (event 3203)
 
@@ -92,10 +93,42 @@ Two changes here, both to the submission rather than to the artifact:
    branch changes — `ui/README.md`, `ui/READINESS.md`, `evidence/UI-7.md` — which is the same scope
    the earlier receipts claimed in prose but not in the recorded path pair set.
 
-Nothing in the artifact was reworded to satisfy the refusal: the README paragraph, the readiness
-record and the rework notes above are byte-identical to `56ae63d` apart from this section and the
-branch line at the top. The suites were re-run on the rebased tree, and the engine suite now collects
-398 tests (two skipped) because `LOOM-17` added its own.
+Nothing in the artifact was reworded to satisfy the refusal: `git diff 56ae63d..2515be0` is empty
+for `ui/README.md` and `ui/READINESS.md`. Within this file that range changes the branch line, the
+Verification paragraph's suite counts and decision 7 as well as adding this section. The suites were
+re-run on the rebased tree, and the engine suite now collects 398 tests (two skipped) because
+`LOOM-17` added its own.
+
+## Rework after review 3219
+
+Four corrections, all documentation: `READINESS.md` §3 and §7, and this file. No code, test, registry
+or README paragraph changed.
+
+1. **`board titles` was missing from the store-writing group.** `engine.py` offers it as a `board`
+   action (`choices=[… "titles"]`, line 5790) and `cmd_board` dispatches it to `backfill_titles`,
+   which sets task titles and goals and commits a `titles` event (4841–4873); `--check` previews
+   without writing. It is now listed with `board add`, `remove`, `sync` and `import`.
+2. **`events` was in the read-only list, but `events --verify --reanchor` writes.** Reanchoring calls
+   `store.reanchor`, which rewrites the external `.head` checkpoint (`engine.py` 1496–1502,
+   `store.py` 909–920); `--allow-rewind` only decides whether lowering a truncated head is refused.
+   `events` left the read-only list, the writing mode joined the operational group, and the read-only
+   clause now names each writing command's non-writing mode — `board list`, `edge list`, `reconcile`
+   and `rebuild` without `--apply`, `tick`, `export` and `integration-plan` to stdout,
+   `snapshot --list`, `workers` listing, `schedule` and `deploy` status, `linear` without `--apply` —
+   so the two halves cover the same command set. Plain `events` and `events --verify` still only read.
+3. **This file overstated its own delta from `56ae63d`.** It said only the new section and the branch
+   line differed; that range also rewrites the Verification paragraph (the 323 and 398 counts) and
+   adds decision 7. The sentence now states the diff itself: empty for `ui/README.md` and
+   `ui/READINESS.md`, and exactly those changes within this file.
+4. **`READINESS.md` §7 claimed a pointer this task cannot write.** It said the record adds "the plan
+   entry and the `README.md` reference"; the plan lives in the private content repo and this task's
+   write path is `capabilities/work/ui`, so the record adds the README reference only. The same table
+   row said the plan *marks* the `docs/` copy not required; the plan's Promotion checklist still
+   carries that item unticked, so the row now says this record gives the reason and the owner
+   resolves the item.
+
+The completeness sentence is made true rather than hedged, the same choice the 3173 round made: that
+row is the part of the record that is supposed to leave nothing to silence.
 
 ## Verification
 
@@ -165,6 +198,11 @@ at the submitted commit. None is a claim about live registry state.
    over a set of paths — so the request now names the merge-base with `main` and the base is written
    into this evidence like any other claim. The alternative, asking again over the same shortened
    range, would have produced an approving receipt for a change it did not cover.
+8. **The list is completed, not softened.** The reviewer found two writing commands absent from a
+   sentence that claimed to name every one. Deleting the completeness claim would have left the row
+   vague, so `board titles` and `events --verify --reanchor` were added and `events` left the
+   read-only clause. The sentence is true only while it matches `build_parser` and the front door,
+   which is why it now names the writing mode of `events` rather than the whole command.
 
 ## Limits
 
@@ -184,8 +222,12 @@ at the submitted commit. None is a claim about live registry state.
 
 The reviewer should attack the honesty of the register, not the prose quality:
 
-- Does the corrected Mutation row now understate nothing? It is the one row the last review found
-  false, so check it against `actions.py` and `identity.py` rather than against this summary.
+- Does the Mutation row now understate nothing? It is the row two reviews found false, most recently
+  on completeness, so check both halves: the envelope against `actions.py` and `identity.py`, and the
+  outside-v1 list against `build_parser` and the front door — including that `events` appears only
+  through its writing mode and `board titles` sits with the other store-writing `board` actions.
+- Is the corrected §7 pointer now limited to what this task can actually write, without leaving the
+  owner's plan item looking done?
 - Is "partly met" on criterion 8 the right verdict, and is an owner manual pass a proportionate
   closure rather than a way to avoid testing?
 - Does any recommendation quietly widen the envelope — remote use, a scheduler control, multi-user
