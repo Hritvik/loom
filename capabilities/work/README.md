@@ -57,6 +57,7 @@ identical on all three surfaces.
 | `edge` | Inspect or edit cross-task dependency edges |
 | `board` | List, add, remove, sync or import boards |
 | `delete` | Retire a task, or every task on a board, with a tombstone event; files are never touched |
+| `adopt` | Close inherited work that already exists, with evidence and a reason instead of an invented receipt |
 | `reconcile` | Compare or adopt board statuses for imported tasks |
 | `genesis` | Write the single bootstrap event |
 
@@ -93,6 +94,22 @@ The commit must exist in the owner checkout and be in the history of the board's
 pairs and their digest, and re-checks that the paths the commit changed are unchanged at the
 integration tip. Annotating is refused when a receipt already exists, and the event is appended
 to the audit log like any other.
+
+### Adopting inherited work
+
+Some tasks describe work that landed before the registry existed: the paths are on the integration
+branch, no commit introduced them that anyone can point at, and there is no diff to review. An
+integration receipt for those would be a fabrication, so the disposition is different:
+
+```bash
+./loom adopt <id> --revision <n> --evidence "<where the work already is>" \
+  --reason "inherited work; no candidate commit to review" --agent <you>
+```
+
+`adopted` is terminal, satisfies dependents like `integrated` does, cannot be claimed, and records
+the evidence, the reason and the prior state in the audit log. Use it when the work is genuinely
+present; use `integrate` when a reviewed commit is what landed, and `delete` when the work should not
+exist at all.
 
 ## One command
 

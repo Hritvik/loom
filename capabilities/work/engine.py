@@ -47,31 +47,33 @@ STATE_ORDER = [
     "reviewed",
     "integrated",
     "accepted",
+    "adopted",
     "rejected",
     "released",
     "in-progress",
     "done",
 ]
 ACTIVE_STATES = {"claimed", "red", "green"}
-TERMINAL_STATES = {"accepted", "done"}
-DEP_SATISFIED = {"accepted", "integrated", "done"}
+TERMINAL_STATES = {"accepted", "adopted", "done"}
+DEP_SATISFIED = {"accepted", "integrated", "adopted", "done"}
 REVIEW_GATED = DEP_SATISFIED | {"reviewed"}
 CLAIMABLE_FROM = {"ready"}
 
 # Explicitly allowed transitions. `claimed` is reached through `claim`, not
 # through `transition`, so it is intentionally absent from the value sets.
 TRANSITIONS = {
-    "draft": {"planned", "ready", "blocked", "rejected"},
-    "planned": {"ready", "blocked", "rejected"},
-    "ready": {"blocked", "released", "rejected"},
+    "draft": {"planned", "ready", "blocked", "rejected", "adopted"},
+    "planned": {"ready", "blocked", "rejected", "adopted"},
+    "ready": {"blocked", "released", "rejected", "adopted"},
     "claimed": {"red", "green", "blocked", "ready", "rejected", "released"},
     "in-progress": {"claimed", "red", "green", "blocked", "ready", "rejected", "released"},
     "red": {"green", "claimed", "blocked", "ready", "rejected", "released"},
     "green": {"reviewed", "red", "blocked", "rejected", "released"},
-    "blocked": {"ready", "planned", "rejected"},
-    "reviewed": {"integrated", "accepted", "ready", "rejected"},
+    "blocked": {"ready", "planned", "rejected", "adopted"},
+    "reviewed": {"integrated", "accepted", "adopted", "ready", "rejected"},
     "integrated": {"accepted", "rejected"},
     "accepted": set(),
+    "adopted": set(),
     "done": set(),
     "rejected": {"ready", "draft", "planned"},
     "released": {"ready", "planned"},
@@ -1316,6 +1318,33 @@ def require_reviewed_source(task: dict, source: str | None, ref: str) -> str:
         raise WorkError(
             f"approved paths changed in {ref}: {preview}; submit the integrated change for review")
     return integration_tip
+
+
+def cmd_adopt(args, store: Store) -> int:
+    """Record that a task's work already exists, so it is closed without a fake receipt."""
+    agent = require_agent(args)
+    now = parse_now(args.now)
+    registry = store.load()
+    task = find_task(registry, args.task)
+    require_revision(task, args.revision)
+    if not args.evidence:
+        raise WorkError("adopt requires --evidence: name where the work already exists")
+    if not args.reason:
+        raise WorkError("adopt requires --reason: say why this is adopted, not integrated")
+    current = task.get("status")
+    if "adopted" not in TRANSITIONS.get(current, set()):
+        raise WorkError(
+            f"illegal transition {current} -> adopted for {task['id']}; "
+            f"allowed: {', '.join(sorted(TRANSITIONS.get(current, set()))) or '(none)'}")
+    task["evidence"] = args.evidence
+    task["claim"] = None
+    task["adopted"] = {"reason": args.reason, "evidence": args.evidence, "by": agent, "at": iso(now)}
+    bump(task, "adopted", now)
+    store.commit(event="adopt", task=task["id"], agent=agent, previous_status=current,
+                 revision=task["revision"], evidence=args.evidence, reason=args.reason,
+                 now=args.now)
+    print(f"{task['id']}: {current} -> adopted at revision {task['revision']}")
+    return 0
 
 
 def cmd_transition(args, store: Store) -> int:
@@ -5762,7 +5791,7 @@ ENGINE_COMMANDS = {
     "create", "list", "show", "attempts", "claim", "renew", "release", "takeover", "transition",
     "events", "genesis", "edge", "board", "reconcile", "ask", "answer", "inbox",
     "decisions", "migrate", "export", "search", "dependents", "graph", "annotate",
-    "init", "integration-plan", "snapshot", "foldcheck", "rebuild", "delete",
+    "init", "integration-plan", "snapshot", "foldcheck", "rebuild", "delete", "adopt",
 }
 
 
@@ -5842,6 +5871,15 @@ def build_parser() -> argparse.ArgumentParser:
                          help="fencing epoch issued at claim time")
     release.add_argument("--reason", required=True)
     release.set_defaults(func=cmd_release)
+
+    adopt = sub.add_parser("adopt", help="close work that already exists, without a receipt",
+                           parents=[common])
+    adopt.add_argument("task")
+    adopt.add_argument("--revision", type=int, required=True)
+    adopt.add_argument("--evidence", required=True,
+                       help="where the work already is: commit, paths, or a recorded proof")
+    adopt.add_argument("--reason", required=True)
+    adopt.set_defaults(func=cmd_adopt)
 
     takeover = sub.add_parser("takeover", help="take an expired lease with a recorded reason", parents=[common])
     takeover.add_argument("task")

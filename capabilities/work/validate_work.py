@@ -27,10 +27,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from store import make_store  # noqa: E402 — sibling module
 
 STATUS_ACTIVE = {"claimed", "red", "green"}
-STATUS_DONE = {"accepted", "integrated", "done"}
+STATUS_DONE = {"accepted", "integrated", "adopted", "done"}
 STATUSES = [
     "draft", "planned", "ready", "claimed", "red", "green", "blocked", "reviewed",
-    "integrated", "accepted", "rejected", "released", "in-progress", "done",
+    "integrated", "accepted", "adopted", "rejected", "released", "in-progress", "done",
 ]
 
 

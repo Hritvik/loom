@@ -5,18 +5,46 @@
   "description": "A central task record. Bodies and packet detail stay in the owning repository; this record carries identity, state, revision, dependencies and claims.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "board", "program", "owner_repo", "status", "revision"],
+  "required": [
+    "id",
+    "board",
+    "program",
+    "owner_repo",
+    "status",
+    "revision"
+  ],
   "properties": {
     "id": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{1,31}/[A-Za-z0-9._-]+$"
     },
-    "board": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{2,63}$"},
-    "program": {"type": "string", "pattern": "^[a-z][a-z0-9.-]{2,63}$"},
-    "owner_repo": {"type": "string", "minLength": 1, "maxLength": 200},
-    "title": {"type": "string", "minLength": 1, "maxLength": 200},
-    "goal": {"type": "string", "minLength": 1},
-    "kind": {"type": "string", "minLength": 1, "maxLength": 40},
+    "board": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9.-]{2,63}$"
+    },
+    "program": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9.-]{2,63}$"
+    },
+    "owner_repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    },
     "status": {
       "enum": [
         "draft",
@@ -29,75 +57,174 @@
         "reviewed",
         "integrated",
         "accepted",
+        "adopted",
         "rejected",
         "released",
         "in-progress",
         "done"
       ]
     },
-    "status_source": {"enum": ["registry", "board", "manual"]},
-    "revision": {"type": "integer", "minimum": 0},
+    "status_source": {
+      "enum": [
+        "registry",
+        "board",
+        "manual"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
     "epoch": {
       "type": "integer",
       "minimum": 1,
       "description": "Fencing epoch, incremented on every claim and takeover. A holder must present the epoch it was issued or its writes are rejected."
     },
-    "created_at": {"type": "string", "format": "date-time"},
-    "updated_at": {"type": "string", "format": "date-time"},
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "depends_on": {
       "type": "array",
-      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}/[A-Za-z0-9._-]+$"},
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]{1,31}/[A-Za-z0-9._-]+$"
+      },
       "uniqueItems": true
     },
     "write_paths": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1},
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "uniqueItems": true
     },
     "acceptance": {
       "type": "array",
-      "items": {"type": "string", "minLength": 1}
-    },
-    "claim": {
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "required": ["agent", "base_revision", "lease_expires"],
-      "properties": {
-        "agent": {"type": "string", "minLength": 1, "maxLength": 100},
-        "epoch": {"type": "integer", "minimum": 1},
-        "base_revision": {"type": "integer", "minimum": 0},
-        "lease_expires": {"type": "string", "format": "date-time"},
-        "heartbeat": {"type": "string", "format": "date-time"}
+      "items": {
+        "type": "string",
+        "minLength": 1
       }
     },
-    "evidence": {"type": "string", "minLength": 1, "maxLength": 512},
+    "claim": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "agent",
+        "base_revision",
+        "lease_expires"
+      ],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "base_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lease_expires": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "heartbeat": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "evidence": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
     "blocked_needs": {
-      "enum": ["human", "agent"],
+      "enum": [
+        "human",
+        "agent"
+      ],
       "description": "Who can resolve a blocked task: an agent acting, or the owner deciding."
     },
     "review": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["reviewer", "decision"],
+      "required": [
+        "reviewer",
+        "decision"
+      ],
       "properties": {
-        "reviewer": {"type": "string", "minLength": 1},
-        "decision": {"enum": ["approve", "reject"]},
-        "source": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
-        "answer": {"type": "integer", "minimum": 1},
-        "base": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
-        "evidence": {"type": "string", "minLength": 1, "maxLength": 512},
-        "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+        "reviewer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "approve",
+            "reject"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "answer": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "severity": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "info"
+          ]
+        },
         "paths": {
           "type": "array",
           "description": "The paths the approval covers and the object each held at the approved source.",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path", "blob"],
+            "required": [
+              "path",
+              "blob"
+            ],
             "properties": {
-              "path": {"type": "string", "minLength": 1},
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
               "blob": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
                 "description": "The object at the approved source; null when the commit deleted the path."
               }
@@ -105,9 +232,39 @@
           }
         },
         "digest": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[0-9a-f]{64}$",
           "description": "SHA-256 over the path/blob pairs. Null on receipts written before content binding."
+        }
+      }
+    },
+    "adopted": {
+      "type": "object",
+      "required": [
+        "reason",
+        "evidence",
+        "by",
+        "at"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "at": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }
