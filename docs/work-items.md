@@ -114,3 +114,45 @@ rule the suite enforces is a rule that cannot drift.
 dependency claim, and its detector is exercised on that fixture so it cannot become a no-op. This
 file carries no status or dependency claim, while every section keeps its problem statement and its
 acceptance. `python3 -m unittest discover -s tests` passes.
+
+## LOOM-14 — Review the integration candidate, and flag a review that cannot integrate
+
+Integration compares the approved blob with the blob on the integration branch, so a branch cut from
+an older main can never integrate as reviewed — it goes stale before anyone notices, and an integrator
+spends a merge discovering it. This package records the merge → review the merge commit → integrate
+that commit order, and makes the impossibility visible in the validator.
+
+**Acceptance.** `validate_work.py` reports an error naming the task and its branch when a reviewed
+task's approved source is not in the history of the board's `integration_ref`, and reports nothing for
+a source that is. `PROTOCOL.md` and `AGENT-GUIDE.md` state the sequencing rule.
+
+## LOOM-15 — Schedule install must not drop WORK_HOME
+
+`loom schedule install` wrote `EnvironmentVariables` with `PATH` alone, so a hand-set work home was
+lost on the next install and the scheduled tick resolved relative evidence paths against its own tree.
+That is how a promoted release acquired an evidence file and drifted its digest to `MISMATCH`.
+
+**Acceptance.** The generated plist declares the resolved work home next to `PATH`; a tick started
+from it writes evidence under that work home, never inside the promoted release; `deploy status`
+stays verified.
+
+## LOOM-16 — Retire a task or a board with a tombstone, without breaking the chain
+
+There was no way to remove work: `board remove` refused while tasks existed, and no task delete
+existed, so an abandoned programme could not be retired. Deleting rows would break the hash chain.
+
+**Acceptance.** `loom delete <task|--board> --reason` records the deletion as an event; the task
+disappears from every view while `foldcheck` still verifies; a retired board can be removed; the
+validator stays silent; a live claim or undeleted dependent refuses the delete; and no evidence or
+bodies file is removed by the command.
+
+## LOOM-17 — Refuse an integration that would land an unreviewed path
+
+The receipt is computed from `review-base..source`, and the base is chosen by the worker. A worker can
+ask for review of a commit that already contains its own code, so the receipt covers only what came
+after — and integration checks just the paths in the receipt. Two packages reached `reviewed` that way
+with their whole change uncovered.
+
+**Acceptance.** Integration refuses when the source changes any path, since the merge-base with the
+integration branch, that the receipt does not cover, naming the uncovered paths and the task. A
+receipt that covers every changed path still integrates, proven in the suite.
