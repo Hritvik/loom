@@ -56,6 +56,7 @@ identical on all three surfaces.
 | `rebuild` | Rewrite the registry from the fold, behind a `VACUUM INTO` restore point and a diff that passes |
 | `edge` | Inspect or edit cross-task dependency edges |
 | `board` | List, add, remove, sync or import boards |
+| `delete` | Retire a task, or every task on a board, with a tombstone event; files are never touched |
 | `reconcile` | Compare or adopt board statuses for imported tasks |
 | `genesis` | Write the single bootstrap event |
 

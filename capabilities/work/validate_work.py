@@ -221,6 +221,51 @@ def event_chain_warnings(records: list[tuple[bytes, dict]]) -> list[str]:
     return warnings
 
 
+def tombstones(
+        records: list[tuple[bytes, dict]]) -> tuple[set[str], set[str], set[tuple[str, str]]]:
+    """Task ids, board ids and (board, suffix) packets the audit log records as retired.
+
+    A deleted task is gone from the registry, but the board files it used to be described in may
+    survive on purpose (the engine never touches content). Reading the `delete` events is what lets
+    the checks below ignore the leftovers a tombstone deliberately leaves behind, instead of
+    reporting them as drift and pushing an operator to resurrect dead work.
+
+    The log is ordered, so a later event can bring the work back: `board add` for a retired id makes
+    that board live again -- it must be validated like any other, because the operator has just
+    pointed the registry at a body -- and `create` for a retired task id gives it a body to check.
+    A tombstone that stayed in force for the rest of the log hid a re-registered board's missing
+    body and reported its present packets as missing.
+    """
+    tasks: set[str] = set()
+    boards: set[str] = set()
+    packets: set[tuple[str, str]] = set()
+    for _, record in records:
+        event = record.get("event")
+        if event == "board" and record.get("action") == "add":
+            board_id = str(record.get("board") or "")
+            if board_id:
+                boards.discard(board_id)
+                packets = {key for key in packets if key[0] != board_id}
+            continue
+        if event == "create" and record.get("task"):
+            tasks.discard(str(record["task"]))
+            continue
+        if event != "delete":
+            continue
+        if record.get("deleted_board"):
+            boards.add(str(record["deleted_board"]))
+        board = record.get("deleted_board") or record.get("board")
+        identifiers = [record["task"]] if record.get("task") else []
+        identifiers.extend(record.get("tasks") or [])
+        for task_id in identifiers:
+            if not isinstance(task_id, str):
+                continue
+            tasks.add(task_id)
+            if board:
+                packets.add((str(board), task_id.split("/", 1)[-1]))
+    return tasks, boards, packets
+
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -459,6 +504,10 @@ def main(argv: list[str] | None = None) -> int:
     # the registry as it was read, not as this script annotates it.
     stored_registry = copy.deepcopy(registry)
 
+    # A retired task or board is an event, not a missing document: read the tombstones before the
+    # board and packet checks so deliberate leftovers are not reported as drift.
+    retired_tasks, retired_boards, retired_packets = tombstones(stored_events or [])
+
     schema = json.loads((root / "schemas/task.schema.json").read_text(encoding="utf-8"))
 
     boards = {}
@@ -469,6 +518,9 @@ def main(argv: list[str] | None = None) -> int:
 
     loaded = {}
     for board_id, entry in boards.items():
+        if board_id in retired_boards:
+            # The checkout is gone on purpose; its tasks are tombstoned, so there is no body to read.
+            continue
         path = Path(entry["repo"]).expanduser() / entry["path"]
         if not path.is_file():
             errors.append(f"{board_id}: missing {path}")
@@ -540,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
         registered = {task_id.split("/", 1)[-1] for task_id, task in by_id.items()
                       if task.get("board") == board_id}
         for suffix in sorted(set(entry["_packets"]) - registered):
+            if (board_id, suffix) in retired_packets:
+                continue
             warnings.append(
                 f"{board_id}: packet {suffix} is not registered centrally; run `loom board import`")
 
@@ -792,6 +846,8 @@ def main(argv: list[str] | None = None) -> int:
                 last_by_task[record["task"]] = record
         for task_id, record in last_by_task.items():
             if task_id not in by_id:
+                if task_id in retired_tasks:
+                    continue
                 warnings.append(f"event log: task {task_id} no longer in registry")
                 continue
             task = by_id[task_id]
